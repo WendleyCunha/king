@@ -109,22 +109,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Coleta de Dados
+# Coleta de Dados (Se não houver dados, o DataFrame apenas virará uma estrutura vazia sem travar o app)
 tickets_raw = obter_tickets_db(data_consulta)
-if not tickets_raw:
-    st.info("⏳ Nenhum dado encontrado para o dia selecionado.")
-    st.stop()
-
 df = pd.DataFrame(tickets_raw)
-df["_notificado"] = get_series(df, "on_its_way").apply(lambda x: bool(x and str(x).strip() not in ("", "None", "null")))
 
-total = len(df)
-notificados = int(df["_notificado"].sum())
-sucesso = int((get_series(df, "_status_visual") == "✅ Sucesso").sum())
-falhou = int((get_series(df, "_status_visual") == "❌ Falhou").sum())
-pendentes = total - sucesso - falhou
-
-# Configuração Dinâmica de Abas
+# Configuração Dinâmica de Abas (Sempre geradas com base nas permissões)
 abas_nomes = ["🏠 Dashboard", "🧑‍✈️ Visão por Motorista"]
 if papel in ["supervisor", "adm"]: abas_nomes.append("📥 Exportar")
 if papel == "adm": abas_nomes.append("⚙️ Configurações")
@@ -133,74 +122,88 @@ abas = st.tabs(abas_nomes)
 
 # ABA 1: DASHBOARD
 with abas[0]:
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.markdown(f'<div class="kpi-card"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga Oficial</div></div>', unsafe_allow_html=True)
-    k2.markdown(f'<div class="kpi-card"><div class="kpi-label">📱 Notificados</div><div class="kpi-value" style="color:#2ecc71;">{notificados}</div><div class="kpi-sub">{round(notificados/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
-    k3.markdown(f'<div class="kpi-card"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value" style="color:#3498db;">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
-    k4.markdown(f'<div class="kpi-card"><div class="kpi-label">❌ Falhas</div><div class="kpi-value" style="color:#e74c3c;">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
-    k5.markdown(f'<div class="kpi-card"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendentes}</div><div class="kpi-sub">Na Rua</div></div>', unsafe_allow_html=True)
+    if df.empty:
+        st.info("⏳ Nenhum dado de entrega encontrado para o dia selecionado. Mas o sistema está online! Acesse as outras abas no topo normalmente.")
+    else:
+        df["_notificado"] = get_series(df, "on_its_way").apply(lambda x: bool(x and str(x).strip() not in ("", "None", "null")))
+        total = len(df)
+        notificados = int(df["_notificado"].sum())
+        sucesso = int((get_series(df, "_status_visual") == "✅ Sucesso").sum())
+        falhou = int((get_series(df, "_status_visual") == "❌ Falhou").sum())
+        pendentes = total - sucesso - falhou
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.dataframe(pd.DataFrame({
-        "Ordem": get_series(df, "order"), "Motorista": get_series(df, "route").apply(obter_nome_banco_ou_limpo),
-        "Cliente": get_series(df, "title"), "Status": get_series(df, "_status_visual", "⏳ Pendente"),
-        "Notificado": get_series(df, "_notificado").apply(lambda x: "Sim" if x else "Não"),
-        "Check-out": get_series(df, "checkout_time").apply(formatar_data)
-    }), use_container_width=True, hide_index=True)
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.markdown(f'<div class="kpi-card"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga Oficial</div></div>', unsafe_allow_html=True)
+        k2.markdown(f'<div class="kpi-card"><div class="kpi-label">📱 Notificados</div><div class="kpi-value" style="color:#2ecc71;">{notificados}</div><div class="kpi-sub">{round(notificados/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
+        k3.markdown(f'<div class="kpi-card"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value" style="color:#3498db;">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
+        k4.markdown(f'<div class="kpi-card"><div class="kpi-label">❌ Falhas</div><div class="kpi-value" style="color:#e74c3c;">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total>0 else 0}%</div></div>', unsafe_allow_html=True)
+        k5.markdown(f'<div class="kpi-card"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendentes}</div><div class="kpi-sub">Na Rua</div></div>', unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame({
+            "Ordem": get_series(df, "order"), "Motorista": get_series(df, "route").apply(obter_nome_banco_ou_limpo),
+            "Cliente": get_series(df, "title"), "Status": get_series(df, "_status_visual", "⏳ Pendente"),
+            "Notificado": get_series(df, "_notificado").apply(lambda x: "Sim" if x else "Não"),
+            "Check-out": get_series(df, "checkout_time").apply(formatar_data)
+        }), use_container_width=True, hide_index=True)
 
 # ABA 2: MOTORISTAS
 with abas[1]:
-    rotas_unicas = sorted(df["route"].unique()) if "route" in df.columns else []
-    if rotas_unicas:
-        opcoes_radio, mapeamento_reverso = [], {}
-        for r_orig in rotas_unicas:
-            lbl = f"📍 {obter_nome_banco_ou_limpo(r_orig)}"
-            opcoes_radio.append(lbl)
-            mapeamento_reverso[lbl] = r_orig
+    if df.empty:
+        st.info("⏳ Nenhuma rota ou motorista ativo nesta data.")
+    else:
+        rotas_unicas = sorted(df["route"].unique()) if "route" in df.columns else []
+        if rotas_unicas:
+            opcoes_radio, mapeamento_reverso = [], {}
+            for r_orig in rotas_unicas:
+                lbl = f"📍 {obter_nome_banco_ou_limpo(r_orig)}"
+                opcoes_radio.append(lbl)
+                mapeamento_reverso[lbl] = r_orig
 
-        col_m1, col_m2 = st.columns([1.5, 3])
-        with col_m1:
-            lbl_sel = st.radio("Rotas do Dia", options=opcoes_radio, label_visibility="collapsed")
-            mot_ativo = mapeamento_reverso[lbl_sel]
-            
-            # Supervisor e ADM podem editar o nome
-            if papel in ["supervisor", "adm"]:
-                st.markdown("---")
-                novo_nome = st.text_input("Alterar nome do condutor:", value=obter_nome_banco_ou_limpo(mot_ativo))
-                if st.button("Salvar Condutor"):
-                    salvar_vinculo_db(extrair_chave_permanente(mot_ativo), novo_nome.strip())
-                    st.rerun()
+            col_m1, col_m2 = st.columns([1.5, 3])
+            with col_m1:
+                lbl_sel = st.radio("Rotas do Dia", options=opcoes_radio, label_visibility="collapsed")
+                mot_ativo = mapeamento_reverso[lbl_sel]
+                
+                if papel in ["supervisor", "adm"]:
+                    st.markdown("---")
+                    novo_nome = st.text_input("Alterar nome do condutor:", value=obter_nome_banco_ou_limpo(mot_ativo))
+                    if st.button("Salvar Condutor"):
+                        salvar_vinculo_db(extrair_chave_permanente(mot_ativo), novo_nome.strip())
+                        st.rerun()
 
-            # Apenas ADM pode deletar
-            if papel == "adm":
-                st.markdown("---")
-                st.error("🚨 Zona de Exclusão")
-                if st.button("Excluir Carga do Motorista"):
-                    deletar_rota_db(mot_ativo, data_consulta)
-                    st.rerun()
+                if papel == "adm":
+                    st.markdown("---")
+                    st.error("🚨 Zona de Exclusão")
+                    if st.button("Excluir Carga do Motorista"):
+                        deletar_rota_db(mot_ativo, data_consulta)
+                        st.rerun()
 
-        with col_m2:
-            df_rota = df[df["route"] == mot_ativo]
-            st.dataframe(pd.DataFrame({
-                "Cliente": get_series(df_rota, "title"), "Status": get_series(df_rota, "_status_visual"),
-                "Observação": get_series(df_rota, "checkout_observation")
-            }), use_container_width=True, hide_index=True)
+            with col_m2:
+                df_rota = df[df["route"] == mot_ativo]
+                st.dataframe(pd.DataFrame({
+                    "Cliente": get_series(df_rota, "title"), "Status": get_series(df_rota, "_status_visual"),
+                    "Observação": get_series(df_rota, "checkout_observation")
+                }), use_container_width=True, hide_index=True)
 
-# ABA 3: EXPORTAR (Se disponível)
+# ABA 3: EXPORTAR (Se disponível para o nível)
 if "📥 Exportar" in abas_nomes:
     idx = abas_nomes.index("📥 Exportar")
     with abas[idx]:
-        st.write("Extração completa dos dados processados.")
-        df_excel = pd.DataFrame({
-            "Ordem": get_series(df, "order"), "Motorista": get_series(df, "route").apply(obter_nome_banco_ou_limpo),
-            "Cliente": get_series(df, "title"), "Status": get_series(df, "_status_visual", "⏳ Pendente"),
-            "Check-out": get_series(df, "checkout_time").apply(formatar_data), "Anotações": get_series(df, "notes")
-        })
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer: df_excel.to_excel(writer, index=False)
-        st.download_button("📥 Baixar Planilha", data=output.getvalue(), file_name=f"Relatorio_{data_consulta}.xlsx", type="primary")
+        if df.empty:
+            st.warning("⚠️ Não há planilhas para gerar pois este dia não possui registros.")
+        else:
+            st.write("Extração completa dos dados processados.")
+            df_excel = pd.DataFrame({
+                "Ordem": get_series(df, "order"), "Motorista": get_series(df, "route").apply(obter_nome_banco_ou_limpo),
+                "Cliente": get_series(df, "title"), "Status": get_series(df, "_status_visual", "⏳ Pendente"),
+                "Check-out": get_series(df, "checkout_time").apply(formatar_data), "Anotações": get_series(df, "notes")
+            })
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer: df_excel.to_excel(writer, index=False)
+            st.download_button("📥 Baixar Planilha", data=output.getvalue(), file_name=f"Relatorio_{data_consulta}.xlsx", type="primary")
 
-# ABA 4: CONFIGURAÇÕES (ADM)
+# ABA 4: CONFIGURAÇÕES (ADM - Sempre ativa e funcional!)
 if "⚙️ Configurações" in abas_nomes:
     idx = abas_nomes.index("⚙️ Configurações")
     with abas[idx]:
@@ -216,14 +219,14 @@ if "⚙️ Configurações" in abas_nomes:
                 if st.form_submit_button("Criar Acesso"):
                     if novo_nome and novo_user and nova_senha:
                         criar_usuario(novo_nome, novo_user, nova_senha, novo_nivel)
-                        st.success(f"Usuário {novo_user} criado!")
+                        st.success(f"Usuário {novo_user} criado com sucesso!")
                         time.sleep(1)
                         st.rerun()
                     else:
-                        st.warning("Preencha todos os campos.")
+                        st.warning("Por favor, preencha todos os campos.")
 
         st.markdown("---")
-        st.write("**Usuários Ativos**")
+        st.write("**Usuários Ativos no Sistema**")
         lista_users = listar_usuarios()
         if lista_users:
             for u in lista_users:
@@ -232,10 +235,10 @@ if "⚙️ Configurações" in abas_nomes:
                 col_u2.write(f"Login: `{u.get('usuario')}`")
                 col_u3.write(f"Nível: {u.get('role').upper()}")
                 if col_u4.button("🗑️", key=f"del_{u.get('usuario')}"):
-                    if u.get('usuario') != "admin": # Protege o master
+                    if u.get('usuario') != "admin": # Proteção para não deletar o master temporário
                         deletar_usuario(u.get('usuario'))
                         st.rerun()
 
-if auto_refresh and is_hoje:
+if auto_refresh and is_hoje and not df.empty:
     time.sleep(15)
     st.rerun()
