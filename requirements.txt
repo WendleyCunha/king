@@ -13,3 +13,6 @@ pytz
 streamlit-autorefresh
 google-cloud-firestore
 google-auth
+fastapi
+uvicorn
+pydantic
