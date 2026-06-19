@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import json
@@ -10,10 +10,8 @@ app = FastAPI(title="KingStar - Motor de Entregas SimpliRoute Firebase")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Inicializa o FirebaseAdmin (Certifique-se de ter o arquivo JSON da credencial do Firebase)
-# No Render, você pode carregar isso via variável de ambiente. Para rodar local:
+# Inicializa o FirebaseAdmin
 if not firebase_admin._apps:
-    # Substitua "textkey.json" pelo nome do arquivo gerado pelo GCP/Firebase
     cred = credentials.Certificate("textkey.json") 
     firebase_admin.initialize_app(cred)
 
@@ -51,18 +49,22 @@ def derivar_status_visual(payload: dict) -> dict:
 
 def salvar_no_firebase(chave: str, payload: dict):
     data_entrega = payload.get("planned_date")
-    if data_entrega: data_entrega = str(data_entrega)[:10]
-    else: data_entrega = date.today().isoformat()
+    if data_entrega: 
+        data_entrega = str(data_entrega)[:10]
+    else: 
+        data_entrega = date.today().isoformat()
     
-    # Grava na coleção 'entregas', usando como ID a combinação de Data + Chave para evitar duplicidade
+    # ID combinado para evitar duplicidade na mesma data
     doc_id = f"{data_entrega}_{chave}"
     
+    # CORREÇÃO: Desempacotamos o payload com ** na raiz do documento 
+    # para que o painel Streamlit consiga ler as colunas perfeitamente.
     documento = {
         "id_chave": chave,
         "data_entrega": data_entrega,
-        "payload": payload, # O Firestore guarda o JSON estruturado nativamente!
         "rota": payload.get("route", "Rota não identificada"),
-        "recebido_em": payload.get("_recebido_em")
+        "recebido_em": payload.get("_recebido_em"),
+        **payload 
     }
     
     db.collection("entregas").document(doc_id).set(documento)
@@ -70,7 +72,8 @@ def salvar_no_firebase(chave: str, payload: dict):
 @app.post("/webhook")
 async def receber_webhook(request: Request):
     try:
-        try: payload = await request.json()
+        try: 
+            payload = await request.json()
         except:
             form_data = await request.form()
             payload = json.loads(form_data.get("payload", form_data.get("data", "{}")))
@@ -82,7 +85,8 @@ async def receber_webhook(request: Request):
         salvar_no_firebase(chave, payload)
         return {"status": "sucesso", "id": chave}
     except Exception as e:
-        return {"status": "erro", "detalhe": str(e)}
+        # Retorna erro com código HTTP 500 real para o SimpliRoute registrar o log de falha se houver
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run("motor_api:app", host="0.0.0.0", port=8000)
