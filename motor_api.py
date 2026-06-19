@@ -21,7 +21,7 @@ if not firebase_admin._apps:
     cred = credentials.Certificate("textkey.json") 
     firebase_admin.initialize_app(cred)
 
-db = firestore.client()
+db = firestore.client(database="portal")
 
 def normalizar_payload(payload: dict) -> dict:
     campos_padrao = {
