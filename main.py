@@ -109,11 +109,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Coleta de Dados (Se não houver dados, o DataFrame apenas virará uma estrutura vazia sem travar o app)
+# Coleta de Dados
 tickets_raw = obter_tickets_db(data_consulta)
 df = pd.DataFrame(tickets_raw)
 
-# Configuração Dinâmica de Abas (Sempre geradas com base nas permissões)
+# Configuração Dinâmica de Abas
 abas_nomes = ["🏠 Dashboard", "🧑‍✈️ Visão por Motorista"]
 if papel in ["supervisor", "adm"]: abas_nomes.append("📥 Exportar")
 if papel == "adm": abas_nomes.append("⚙️ Configurações")
@@ -186,7 +186,7 @@ with abas[1]:
                     "Observação": get_series(df_rota, "checkout_observation")
                 }), use_container_width=True, hide_index=True)
 
-# ABA 3: EXPORTAR (Se disponível para o nível)
+# ABA 3: EXPORTAR (Se disponível)
 if "📥 Exportar" in abas_nomes:
     idx = abas_nomes.index("📥 Exportar")
     with abas[idx]:
@@ -203,7 +203,7 @@ if "📥 Exportar" in abas_nomes:
             with pd.ExcelWriter(output, engine='openpyxl') as writer: df_excel.to_excel(writer, index=False)
             st.download_button("📥 Baixar Planilha", data=output.getvalue(), file_name=f"Relatorio_{data_consulta}.xlsx", type="primary")
 
-# ABA 4: CONFIGURAÇÕES (ADM - Sempre ativa e funcional!)
+# ABA 4: CONFIGURAÇÕES (ADM)
 if "⚙️ Configurações" in abas_nomes:
     idx = abas_nomes.index("⚙️ Configurações")
     with abas[idx]:
@@ -229,14 +229,17 @@ if "⚙️ Configurações" in abas_nomes:
         st.write("**Usuários Ativos no Sistema**")
         lista_users = listar_usuarios()
         if lista_users:
-            for u in lista_users:
+            for i, u in enumerate(lista_users):
+                username_limpo = u.get('usuario') if u.get('usuario') else f"usuario_{i}"
                 col_u1, col_u2, col_u3, col_u4 = st.columns([2, 2, 2, 1])
-                col_u1.write(f"**{u.get('nome')}**")
-                col_u2.write(f"Login: `{u.get('usuario')}`")
-                col_u3.write(f"Nível: {u.get('role').upper()}")
-                if col_u4.button("🗑️", key=f"del_{u.get('usuario')}"):
-                    if u.get('usuario') != "admin": # Proteção para não deletar o master temporário
-                        deletar_usuario(u.get('usuario'))
+                col_u1.write(f"**{u.get('nome', 'Sem Nome')}**")
+                col_u2.write(f"Login: `{username_limpo}`")
+                col_u3.write(f"Nível: {str(u.get('role', 'operacional')).upper()}")
+                
+                # CORREÇÃO AQUI: Chave composta usando o índice 'i' garante unicidade absoluta na interface
+                if col_u4.button("🗑️", key=f"del_{username_limpo}_{i}"):
+                    if username_limpo != "admin":
+                        deletar_usuario(username_limpo)
                         st.rerun()
 
 if auto_refresh and is_hoje and not df.empty:
