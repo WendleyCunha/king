@@ -8,7 +8,7 @@ def get_db():
     if "db" not in st.session_state:
         key_dict = json.loads(st.secrets["textkey"])
         creds = service_account.Credentials.from_service_account_info(key_dict)
-        st.session_state.db = firestore.Client(credentials=creds, project="wendleydesenvolvimento")
+        st.session_state.db = firestore.client(database="portal")
     return st.session_state.db
 
 def hash_senha(senha):
