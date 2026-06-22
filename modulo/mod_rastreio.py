@@ -1,61 +1,53 @@
 import streamlit as st
 import pandas as pd
-import io
-from database import (obter_nome_banco_ou_limpo, calcular_stats_motorista, 
-                      formatar_data, get_series, salvar_vinculo_db, deletar_rota_db)
+import sys
+import os
 
-def renderizar_rastreio(df, data_consulta, papel):
-    """Renderiza a lógica do Rastreio."""
+# Adiciona o diretório pai (raiz) ao caminho de busca do Python
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from database import (obter_nome_banco_ou_limpo, formatar_data, get_series, 
+                      salvar_vinculo_db, deletar_rota_db)
+
+def renderizar_rastreio(data_consulta, papel, df):
+    """Renderiza a aba de rastreio de forma isolada."""
     
     if df.empty:
-        st.info("⏳ Nenhum dado de entrega disponível.")
+        st.info("⏳ Nenhuma rota ou motorista ativo nesta data.")
         return
 
-    # Garante a coluna de notificação
-    df["_notificado"] = get_series(df, "on_its_way").apply(
-        lambda x: bool(x and str(x).strip() not in ("", "None", "null"))
-    )
+    rotas_unicas = sorted(df["route"].unique()) if "route" in df.columns else []
+    
+    if rotas_unicas:
+        opcoes_radio, mapeamento_reverso = [], {}
+        for r_orig in rotas_unicas:
+            lbl = f"📍 {obter_nome_banco_ou_limpo(r_orig)}"
+            opcoes_radio.append(lbl)
+            mapeamento_reverso[lbl] = r_orig
 
-    abas = st.tabs(["🏠 Dashboard", "🧑‍✈️ Visão por Motorista", "📥 Exportar"])
+        col_m1, col_m2 = st.columns([1.5, 3])
+        with col_m1:
+            lbl_sel = st.radio("Rotas do Dia", options=opcoes_radio, label_visibility="collapsed")
+            mot_ativo = mapeamento_reverso[lbl_sel]
+            
+            if papel in ["supervisor", "adm"]:
+                st.markdown("---")
+                novo_nome = st.text_input("Alterar nome do condutor:", value=obter_nome_banco_ou_limpo(mot_ativo))
+                if st.button("💾 Salvar Condutor"):
+                    salvar_vinculo_db(mot_ativo.split(" - ", 1)[-1] if " - " in mot_ativo else mot_ativo, novo_nome.strip())
+                    st.rerun()
 
-    # --- ABA 1: DASHBOARD ---
-    with abas[0]:
-        total = len(df)
-        notificados = int(df["_notificado"].sum())
-        sucesso = int((get_series(df, "_status_visual") == "✅ Sucesso").sum())
-        falhou = int((get_series(df, "_status_visual") == "❌ Falhou").sum())
-        pendentes = total - sucesso - falhou
+            if papel == "adm":
+                st.markdown("---")
+                st.error("🚨 Zona de Exclusão")
+                if st.button("🗑️ Excluir Carga"):
+                    deletar_rota_db(mot_ativo, data_consulta)
+                    st.rerun()
 
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Total", total)
-        k2.metric("Notificados", notificados)
-        k3.metric("Sucesso", sucesso)
-        k4.metric("Falhas", falhou)
-        k5.metric("Pendentes", pendentes)
-
-        st.dataframe(pd.DataFrame({
-            "Ordem": get_series(df, "order"),
-            "Motorista": get_series(df, "route").apply(obter_nome_banco_ou_limpo),
-            "Cliente": get_series(df, "title"),
-            "Status": get_series(df, "_status_visual", "⏳ Pendente"),
-            "Check-out": get_series(df, "checkout_time").apply(formatar_data),
-        }), use_container_width=True)
-
-    # --- ABA 2: VISÃO POR MOTORISTA ---
-    with abas[1]:
-        rotas_unicas = sorted(df["route"].unique())
-        # (Aqui você insere a lógica de Grid, paginação e cards de motorista que você já possuía)
-        st.write(f"Gerenciando {len(rotas_unicas)} rotas...")
-        # ... (seu código de grid aqui)
-
-    # --- ABA 3: EXPORTAR ---
-    with abas[2]:
-        if papel in ["supervisor", "adm"]:
-            df_excel = df.copy() # Simplificado para export
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_excel.to_excel(writer, index=False)
-            st.download_button("📥 Baixar Planilha", data=output.getvalue(), 
-                               file_name=f"Relatorio_{data_consulta}.xlsx")
-        else:
-            st.warning("Acesso restrito à exportação.")
+        with col_m2:
+            df_rota = df[df["route"] == mot_ativo]
+            st.dataframe(pd.DataFrame({
+                "Cliente": get_series(df_rota, "title"), 
+                "Status": get_series(df_rota, "_status_visual"),
+                "Observação": get_series(df_rota, "checkout_observation")
+            }), use_container_width=True, hide_index=True)
