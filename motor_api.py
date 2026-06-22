@@ -55,7 +55,7 @@ def derivar_status_visual(payload: dict) -> dict:
 
 def extrair_chave_permanente(nome_rota: str) -> str:
     if not nome_rota:
-        return "Sem Rota"
+        return "SEM_ROTA"  # Ajustado para bater com o padrão do Streamlit
     partes = nome_rota.split(" - ")
     return partes[1].strip() if len(partes) > 1 else nome_rota.strip()
 
@@ -81,13 +81,15 @@ async def receber_webhook(request: Request):
             
         doc_id = f"{data_entrega}_{id_chave}"
         
-        # Monta o documento com todos os dados planos na raiz do Firestore
+        # CORREÇÃO CRUCIAL: Monta o documento com mapeamentos para a API E para o Streamlit
         documento = {
             "id_chave": id_chave,
             "data_entrega": data_entrega,
-            "route": payload.get("route", "Rota não identificada"),
+            "route": payload.get("route", "Rota não identificada"), # Usado pela API
+            "rota": payload.get("route", "Rota não identificada"),  # Usado pelo deletar_rota_db do Streamlit
             "recebido_em": payload.get("_recebido_em"),
-            **payload
+            "payload": payload,                                     # Usado pelo obter_tickets_db do Streamlit
+            **payload                                               # Mantém campos planos para os endpoints da API
         }
         
         db.collection("entregas").document(doc_id).set(documento)
@@ -100,14 +102,13 @@ async def receber_webhook(request: Request):
 def datas_disponiveis():
     try:
         docs = db.collection("entregas").select(["data_entrega"]).stream()
-        datas = set()
+        datas = {}
         for doc in docs:
             d_val = doc.to_dict().get("data_entrega")
             if d_val:
-                datas.add(d_val)
+                datas[d_val] = datas.get(d_val, 0) + 1
         
-        # Ordena decrescente para o painel mostrar os dias mais recentes primeiro
-        resultado = [{"data_entrega": d, "total": 0} for d in sorted(list(datas), reverse=True)]
+        resultado = [{"data_entrega": k, "total": v} for k, v in sorted(datas.items(), reverse=True)]
         return resultado
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -147,7 +148,6 @@ def resumo_motoristas(data_selecionada: str = Query(...)):
             else: 
                 rotas[r]["pendente"] += 1
 
-        # Busca a tabela de de-para para traduzir o nome das rotas
         dp_docs = db.collection("de_para_motoristas").stream()
         de_para = {doc.id: doc.to_dict().get("nome_motorista") for doc in dp_docs}
 
