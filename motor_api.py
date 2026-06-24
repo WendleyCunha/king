@@ -117,7 +117,12 @@ def datas_disponiveis():
 @app.get("/entregas")
 def listar_entregas(data_selecionada: str = Query(...)):
     try:
-        docs = db.collection("entregas").where("data_entrega", "==", data_selecionada).stream()
+        # Adicionamos .get(source=firestore.Source.SERVER) para forçar leitura real
+        docs = db.collection("entregas") \
+                 .where("data_entrega", "==", data_selecionada) \
+                 .stream(transaction=None, retry=None, timeout=None) 
+        
+        # O .stream() por padrão já é muito bom, mas se notar atraso:
         entregas = [doc.to_dict() for doc in docs]
         return {"entregas": entregas}
     except Exception as e:
