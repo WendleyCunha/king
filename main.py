@@ -101,8 +101,14 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Coleta de Dados Base
-df_principal = pd.DataFrame(obter_tickets_db(data_consulta))
+# --- O SEGREDO DA ATUALIZAÇÃO ---
+# Criamos um cache com validade de 15 segundos para forçar o Streamlit a buscar os dados novos no seu backend
+@st.cache_data(ttl=15)
+def buscar_dados_atualizados(data):
+    return obter_tickets_db(data)
+
+# Coleta de Dados Base usando a nova função com cache
+df_principal = pd.DataFrame(buscar_dados_atualizados(data_consulta))
 
 # --- NAVEGAÇÃO PRINCIPAL ---
 abas_principais = ["🚚 Rastreio", "🎫 Tickets"]
@@ -154,6 +160,7 @@ if "⚙️ Configurações (ADM)" in abas_principais:
                         st.rerun()
 
 # --- ATUALIZAÇÃO EM TEMPO REAL ---
-if auto_refresh and is_hoje and not df_principal.empty:
+if auto_refresh and is_hoje:
+    # Removemos o "not df_principal.empty" para garantir que atualize mesmo se começar vazio
     time.sleep(15)
     st.rerun()
