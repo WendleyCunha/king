@@ -349,7 +349,5 @@ def renderizar_rastreio(papel: str, user: dict = None,
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary", use_container_width=True)
 
-    # Auto-refresh silencioso
-    if is_hoje:
-        time.sleep(20)
-        st.rerun()
+    # Auto-refresh controlado pelo main.py
+    return is_hoje
