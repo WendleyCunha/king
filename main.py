@@ -5,8 +5,9 @@ import os, time, base64
 
 from database import (
     verificar_login, criar_usuario, listar_usuarios, deletar_usuario,
-    atualizar_modulos_usuario, obter_tickets_db, obter_datas_disponiveis_db,
-    modulos_do_usuario, tem_permissao, pode_editar, pode_exportar, pode_deletar,
+    atualizar_modulos_usuario, alterar_senha_usuario,
+    obter_tickets_db, obter_datas_disponiveis_db,
+    modulos_do_usuario, tem_permissao, pode_exportar, pode_deletar,
     MODULOS_PADRAO,
 )
 from modulo.mod_rastreio import renderizar_rastreio
@@ -16,26 +17,26 @@ try:
 except ImportError:
     def renderizar_tickets(papel): st.info("🚧 Módulo de Tickets em desenvolvimento...")
 
-st.set_page_config(page_title="KingStar · Painel Integrado",
-                   layout="wide", page_icon="🚚",
-                   initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="KingStar · Painel Integrado",
+    layout="wide", page_icon="🚚",
+    initial_sidebar_state="expanded"
+)
 
 BRT = timezone(timedelta(hours=-3))
 def agora_brt(): return datetime.now(BRT).strftime("%H:%M:%S")
-def hoje_brt():  return datetime.now(BRT).date().isoformat()
-def ontem_brt(): return (datetime.now(BRT).date() - timedelta(days=1)).isoformat()
 
 def get_logo():
     if os.path.exists("logo.png"):
         with open("logo.png","rb") as f: return base64.b64encode(f.read()).decode()
     return None
 
+# ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .stApp { background-color: #f4f6f9; }
 .block-container { padding-top: 4rem !important; }
 
-/* Sidebar clara */
 section[data-testid="stSidebar"] {
     background-color: #ffffff !important;
     border-right: 1px solid #dbe2e9 !important;
@@ -66,8 +67,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     display:flex; justify-content:space-between; align-items:center; margin-bottom:2px; }
 .soon-tag { font-size:0.6rem; background:#f0f2f5; color:#9aabb8;
     padding:2px 7px; border-radius:8px; font-weight:600; }
-
-/* Cabeçalho */
 .ks-header {
     background:#ffffff; border-left:5px solid #C9A84C;
     border-radius:12px; padding:16px 24px; margin-bottom:20px;
@@ -82,8 +81,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 .ks-nivel { display:inline-block; padding:3px 10px; border-radius:10px;
     font-size:0.72rem; font-weight:700;
     background:rgba(201,168,76,.15); color:#7a5f1a; }
-
-/* KPI */
 .kpi-card { background:#fff; border-radius:12px; padding:18px 12px;
     text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.05); }
 .kpi-card.gold  { border-top:4px solid #C9A84C; }
@@ -98,8 +95,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 .kpi-card.green .kpi-value { color:#27ae60; }
 .kpi-card.blue  .kpi-value { color:#2980b9; }
 .kpi-card.red   .kpi-value { color:#e74c3c; }
-
-/* Cards motorista */
 .driver-card { background:#fff; border:1px solid #e2e8f0; border-radius:12px;
     padding:14px; margin-bottom:6px; border-top:4px solid #C9A84C; }
 .tag { display:inline-block; padding:3px 9px; border-radius:10px;
@@ -111,48 +106,53 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ── LOGIN ─────────────────────────────────────────────────────────
+# ── INIT SESSION STATE ─────────────────────────────────────────────
 if "user"         not in st.session_state: st.session_state.user = None
 if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "rastreio"
 
+# ── LOGIN — PARE AQUI SE NÃO LOGADO ──────────────────────────────
 if st.session_state.user is None:
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col, _ = st.columns([1,1,1])
     with col:
         lb = get_logo()
         if lb:
-            st.markdown(f'<div style="text-align:center;margin-bottom:20px;">'
-                        f'<img src="data:image/png;base64,{lb}" style="height:80px;"></div>',
-                        unsafe_allow_html=True)
-        st.markdown("<h2 style='text-align:center;color:#2c3e50;margin-bottom:20px;'>🔐 Acesso Restrito</h2>",
-                    unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="text-align:center;margin-bottom:20px;">'
+                f'<img src="data:image/png;base64,{lb}" style="height:80px;"></div>',
+                unsafe_allow_html=True)
+        st.markdown(
+            "<h2 style='text-align:center;color:#2c3e50;margin-bottom:20px;'>🔐 Acesso Restrito</h2>",
+            unsafe_allow_html=True)
         usuario = st.text_input("Usuário")
         senha   = st.text_input("Senha", type="password")
         if st.button("Entrar", type="primary", use_container_width=True):
-            user = verificar_login(usuario, senha)
-            if user:
-                st.session_state.user = user
+            u = verificar_login(usuario, senha)
+            if u:
+                st.session_state.user = u
                 st.rerun()
             else:
                 st.error("Credenciais inválidas.")
-    st.stop()
+    st.stop()  # ← NADA renderiza abaixo se não logado
 
+# ── USUÁRIO CONFIRMADO ────────────────────────────────────────────
 user  = st.session_state.user
-papel = user["role"]
+papel = user.get("role", "operacional")
 mods  = modulos_do_usuario(user)
 
 # ── SIDEBAR ───────────────────────────────────────────────────────
 with st.sidebar:
     lb = get_logo()
     if lb:
-        st.markdown(f'<div style="text-align:center;padding:18px 0 14px;">'
-                    f'<img src="data:image/png;base64,{lb}" style="height:50px;"></div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="text-align:center;padding:18px 0 14px;">'
+            f'<img src="data:image/png;base64,{lb}" style="height:50px;"></div>',
+            unsafe_allow_html=True)
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:0 8px 10px;"></div>',
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Operacional</span>', unsafe_allow_html=True)
 
-    for key, label in [("rastreio","Rastreio"),("tickets","Tickets")]:
+    for key, label in [("rastreio","Rastreio"), ("tickets","Tickets")]:
         if key not in mods: continue
         ativo = st.session_state.modulo_ativo == key
         if st.button(label, key=f"nav_{key}", use_container_width=True,
@@ -170,15 +170,18 @@ with st.sidebar:
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Em Breve</span>', unsafe_allow_html=True)
-    for lbl in ["Painel Atendente","ERP Base","Analytics"]:
-        st.markdown(f'<div class="nav-soon">{lbl}<span class="soon-tag">em breve</span></div>',
-                    unsafe_allow_html=True)
+    for lbl in ["Painel Atendente", "ERP Base", "Analytics"]:
+        st.markdown(
+            f'<div class="nav-soon">{lbl}<span class="soon-tag">em breve</span></div>',
+            unsafe_allow_html=True)
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 8px;"></div>',
                 unsafe_allow_html=True)
-    st.markdown('<div style="font-size:0.7rem;color:#b0bec5;padding:0 4px 16px;">'
-                'v2.0 · Firebase · Brasília (BRT)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:0.7rem;color:#b0bec5;padding:0 4px 16px;">'
+        'v2.0 · Firebase · Brasília (BRT)</div>',
+        unsafe_allow_html=True)
 
-# ── CABEÇALHO — sem seletor de data ───────────────────────────────
+# ── CABEÇALHO ─────────────────────────────────────────────────────
 lb        = get_logo()
 logo_html = (f'<img src="data:image/png;base64,{lb}" style="height:50px;margin-right:18px;">'
              if lb else "")
@@ -212,18 +215,20 @@ with hc2:
         st.session_state.user = None
         st.rerun()
 
-# ── DADOS e ROTEAMENTO ────────────────────────────────────────────
-datas_db   = obter_datas_disponiveis_db()
-hoje       = hoje_brt()
-ontem      = ontem_brt()
+# ── DADOS ─────────────────────────────────────────────────────────
+datas_db     = obter_datas_disponiveis_db()
 modulo_ativo = st.session_state.modulo_ativo
 
+# ── ROTEAMENTO ────────────────────────────────────────────────────
 if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
-    is_hoje = renderizar_rastreio(papel, user,
-                                  datas_db=datas_db, pode_exp=pode_exportar(user))
-    # Auto-refresh silencioso só quando logado e no dia atual
-    if is_hoje and st.session_state.user is not None:
+    is_hoje = renderizar_rastreio(
+        papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
+    )
+    # Auto-refresh silencioso — usando placeholder para não piscar login
+    if is_hoje:
+        placeholder = st.empty()
         time.sleep(20)
+        placeholder.empty()
         st.rerun()
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
@@ -231,7 +236,7 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
-    aba_u, aba_m = st.tabs(["👥 Usuários", "🔒 Permissões por Módulo"])
+    aba_u, aba_m = st.tabs(["👥 Usuários", "🔒 Permissões"])
 
     with aba_u:
         with st.expander("➕ Cadastrar Novo Usuário", expanded=True):
@@ -250,16 +255,20 @@ elif modulo_ativo == "config" and papel == "adm":
                         criar_usuario(n_nome, n_user, n_senha, n_nivel, ms)
                         st.success(f"Usuário **{n_user}** criado!")
                         time.sleep(1); st.rerun()
-                    else: st.warning("Preencha todos os campos.")
+                    else:
+                        st.warning("Preencha todos os campos.")
+
         st.markdown("---")
+        st.markdown("### Usuários Ativos")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
             with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {u.get('role','—').upper()}"):
                 if uname != "admin":
-                    if st.button("Excluir", key=f"del_{uname}_{i_u}"):
+                    if st.button("🗑️ Excluir usuário", key=f"del_{uname}_{i_u}"):
                         deletar_usuario(uname); st.rerun()
 
     with aba_m:
+        st.markdown("### Permissões por Usuário")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
             umods = u.get("modulos", MODULOS_PADRAO.get(u.get("role","operacional"), []))
@@ -267,9 +276,43 @@ elif modulo_ativo == "config" and papel == "adm":
                 ma, mb = st.columns(2)
                 nr = ma.checkbox("Rastreio", value="rastreio" in umods, key=f"r_{uname}")
                 nt = mb.checkbox("Tickets",  value="tickets"  in umods, key=f"t_{uname}")
-                if st.button("Salvar", key=f"sv_{uname}", type="primary"):
+                if st.button("💾 Salvar", key=f"sv_{uname}", type="primary"):
                     ns = [m for m,v in [("rastreio",nr),("tickets",nt),("exportar",nr)] if v]
                     atualizar_modulos_usuario(uname, ns)
                     st.success("Salvo!"); time.sleep(.5); st.rerun()
+
 else:
-    st.warning("Módulo não disponível para seu perfil.")
+    # ── MINHA CONTA — qualquer usuário logado pode trocar a senha ──
+    st.subheader("👤 Minha Conta")
+    st.markdown(f"**Nome:** {user['nome']}  |  **Login:** `{user.get('usuario','')}`  |  **Nível:** {papel.upper()}")
+    st.markdown("---")
+    st.markdown("### 🔑 Alterar Senha")
+    with st.form("form_senha"):
+        s_atual  = st.text_input("Senha atual", type="password")
+        s_nova   = st.text_input("Nova senha", type="password")
+        s_conf   = st.text_input("Confirmar nova senha", type="password")
+        if st.form_submit_button("Alterar Senha", type="primary"):
+            if not s_atual or not s_nova or not s_conf:
+                st.warning("Preencha todos os campos.")
+            elif s_nova != s_conf:
+                st.error("As senhas não coincidem.")
+            elif len(s_nova) < 6:
+                st.error("A nova senha deve ter pelo menos 6 caracteres.")
+            else:
+                ok, msg = alterar_senha_usuario(user.get("usuario",""), s_atual, s_nova)
+                if ok:
+                    st.success(msg)
+                    time.sleep(1)
+                    st.session_state.user = None
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+# ── BOTÃO MINHA CONTA na sidebar ──────────────────────────────────
+with st.sidebar:
+    st.markdown('<div style="border-top:1px solid #e2e8f0;margin:8px 8px 10px;"></div>',
+                unsafe_allow_html=True)
+    if st.button("👤 Minha Conta", key="nav_conta", use_container_width=True,
+                 type="secondary"):
+        st.session_state.modulo_ativo = "conta"
+        st.rerun()
