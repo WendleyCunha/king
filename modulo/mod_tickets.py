@@ -7,14 +7,16 @@ Fase 3: Importa histórico Zendesk → Firestore e desliga Zendesk
 import streamlit as st
 import pandas as pd
 import time
+import sys
+import os
 from datetime import datetime, timezone, timedelta
 
-try:
-    import sys, os
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from database import get_db
-except:
-    pass
+# Garante que o diretório raiz está no path
+_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+from database import get_db
 
 BRT = timezone(timedelta(hours=-3))
 
