@@ -15,7 +15,7 @@ from modulo.mod_rastreio import renderizar_rastreio
 try:
     from modulo.mod_tickets import renderizar_tickets
 except ImportError:
-    def renderizar_tickets(papel): st.info("🚧 Módulo de Tickets em desenvolvimento...")
+    def renderizar_tickets(papel, user=None): st.info("🚧 Módulo de Tickets em desenvolvimento...")
 
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
@@ -237,7 +237,7 @@ if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
         )
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
-    renderizar_tickets(papel)
+    renderizar_tickets(papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
