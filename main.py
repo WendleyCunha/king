@@ -27,11 +27,9 @@ def ontem_brt(): return (datetime.now(BRT).date() - timedelta(days=1)).isoformat
 
 def get_logo():
     if os.path.exists("logo.png"):
-        with open("logo.png", "rb") as f:
-            return base64.b64encode(f.read()).decode()
+        with open("logo.png","rb") as f: return base64.b64encode(f.read()).decode()
     return None
 
-# ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .stApp { background-color: #f4f6f9; }
@@ -55,14 +53,12 @@ section[data-testid="stSidebar"] .stButton > button {
     font-weight: 500 !important;
 }
 section[data-testid="stSidebar"] .stButton > button:hover {
-    background: #f0f2f5 !important;
-    border-color: #C9A84C !important;
+    background: #f0f2f5 !important; border-color: #C9A84C !important;
 }
 section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     background: rgba(201,168,76,0.1) !important;
     border-color: #C9A84C !important;
-    color: #7a5f1a !important;
-    font-weight: 700 !important;
+    color: #7a5f1a !important; font-weight: 700 !important;
 }
 .nav-section { font-size:0.68rem; font-weight:700; text-transform:uppercase;
     letter-spacing:1.5px; color:#9aabb8; padding:14px 4px 6px; display:block; }
@@ -74,8 +70,9 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 /* Cabeçalho */
 .ks-header {
     background:#ffffff; border-left:5px solid #C9A84C;
-    border-radius:12px; padding:16px 24px;
-    margin-bottom:12px; box-shadow:0 2px 8px rgba(0,0,0,0.05);
+    border-radius:12px; padding:16px 24px; margin-bottom:20px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.05);
+    display:flex; align-items:center; gap:18px;
 }
 .ks-title { font-size:1.4rem; font-weight:800; color:#2c3e50; margin:0; }
 .ks-sub { font-size:0.8rem; color:#64778d; margin-top:3px; }
@@ -89,15 +86,14 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 /* KPI */
 .kpi-card { background:#fff; border-radius:12px; padding:18px 12px;
     text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.05); }
-.kpi-card.gold   { border-top:4px solid #C9A84C; }
-.kpi-card.green  { border-top:4px solid #27ae60; }
-.kpi-card.blue   { border-top:4px solid #2980b9; }
-.kpi-card.red    { border-top:4px solid #e74c3c; }
-.kpi-card.gray   { border-top:4px solid #95a5a6; }
+.kpi-card.gold  { border-top:4px solid #C9A84C; }
+.kpi-card.green { border-top:4px solid #27ae60; }
+.kpi-card.blue  { border-top:4px solid #2980b9; }
+.kpi-card.red   { border-top:4px solid #e74c3c; }
+.kpi-card.gray  { border-top:4px solid #95a5a6; }
 .kpi-label { color:#64778d; font-size:0.72rem; font-weight:700;
     text-transform:uppercase; letter-spacing:1px; }
-.kpi-value { font-size:2rem; font-weight:800; color:#2c3e50;
-    line-height:1.2; margin:4px 0 2px; }
+.kpi-value { font-size:2rem; font-weight:800; color:#2c3e50; line-height:1.2; margin:4px 0 2px; }
 .kpi-sub { font-size:0.78rem; font-weight:600; color:#C9A84C; }
 .kpi-card.green .kpi-value { color:#27ae60; }
 .kpi-card.blue  .kpi-value { color:#2980b9; }
@@ -121,7 +117,7 @@ if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "rast
 
 if not st.session_state.user:
     st.markdown("<br><br>", unsafe_allow_html=True)
-    _, col, _ = st.columns([1, 1, 1])
+    _, col, _ = st.columns([1,1,1])
     with col:
         lb = get_logo()
         if lb:
@@ -141,7 +137,6 @@ if not st.session_state.user:
                 st.error("Credenciais inválidas.")
     st.stop()
 
-# ── SESSÃO ────────────────────────────────────────────────────────
 user  = st.session_state.user
 papel = user["role"]
 mods  = modulos_do_usuario(user)
@@ -155,11 +150,9 @@ with st.sidebar:
                     unsafe_allow_html=True)
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:0 8px 10px;"></div>',
                 unsafe_allow_html=True)
-
     st.markdown('<span class="nav-section">Operacional</span>', unsafe_allow_html=True)
 
-    # Exportar é aba dentro do Rastreio — não aparece na sidebar
-    for key, label in [("rastreio","Rastreio"), ("tickets","Tickets")]:
+    for key, label in [("rastreio","Rastreio"),("tickets","Tickets")]:
         if key not in mods: continue
         ativo = st.session_state.modulo_ativo == key
         if st.button(label, key=f"nav_{key}", use_container_width=True,
@@ -177,87 +170,57 @@ with st.sidebar:
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Em Breve</span>', unsafe_allow_html=True)
-    for label in ["Painel Atendente", "ERP Base", "Analytics"]:
-        st.markdown(f'<div class="nav-soon">{label}'
-                    f'<span class="soon-tag">em breve</span></div>',
+    for lbl in ["Painel Atendente","ERP Base","Analytics"]:
+        st.markdown(f'<div class="nav-soon">{lbl}<span class="soon-tag">em breve</span></div>',
                     unsafe_allow_html=True)
-
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 8px;"></div>',
                 unsafe_allow_html=True)
     st.markdown('<div style="font-size:0.7rem;color:#b0bec5;padding:0 4px 16px;">'
                 'v2.0 · Firebase · Brasília (BRT)</div>', unsafe_allow_html=True)
 
-# ── DADOS ─────────────────────────────────────────────────────────
-datas_db   = obter_datas_disponiveis_db()
-hoje       = hoje_brt()
-ontem      = ontem_brt()
-datas_disp = [d["data"] for d in datas_db]
-
-opcoes_datas = []
-if hoje in datas_disp or not datas_disp: opcoes_datas.append(f"Hoje ({hoje})")
-if ontem in datas_disp: opcoes_datas.append(f"Ontem ({ontem})")
-for item in datas_db:
-    if item["data"] not in (hoje, ontem):
-        try:    opcoes_datas.append(f"{datetime.strptime(item['data'],'%Y-%m-%d').strftime('%d/%m/%Y')} — {item['total']}")
-        except: opcoes_datas.append(item["data"])
-if not opcoes_datas: opcoes_datas = [f"Hoje ({hoje})"]
-
-# ── CABEÇALHO ─────────────────────────────────────────────────────
-lb         = get_logo()
-logo_html  = f'<img src="data:image/png;base64,{lb}" style="height:48px;margin-right:18px;">' if lb else ""
-pills_html = "".join(
+# ── CABEÇALHO — sem seletor de data ───────────────────────────────
+lb        = get_logo()
+logo_html = (f'<img src="data:image/png;base64,{lb}" style="height:50px;margin-right:18px;">'
+             if lb else "")
+pills = "".join(
     f'<span class="ks-pill">{"Rastreio" if m=="rastreio" else "Tickets"}</span>'
     for m in mods if m in ("rastreio","tickets")
 )
 
-st.markdown(f"""
-<div class="ks-header" style="display:flex;align-items:center;gap:0;">
-    {logo_html}
-    <div style="flex:1;">
-        <div class="ks-title">Painel de Entregas · KingStar</div>
-        <div class="ks-sub">
-            KingStar Colchoes &nbsp;·&nbsp; Eco 360° &nbsp;·&nbsp; SimpliRoute &nbsp;·&nbsp;
-            <span style="color:#C9A84C;font-weight:700;">Tempo Real</span>
-            &nbsp;·&nbsp; {agora_brt()}
+hc1, hc2 = st.columns([9, 1])
+with hc1:
+    st.markdown(f"""
+    <div class="ks-header">
+        {logo_html}
+        <div style="flex:1;">
+            <div class="ks-title">Painel de Entregas · KingStar</div>
+            <div class="ks-sub">
+                KingStar Colchoes &nbsp;·&nbsp; Eco 360° &nbsp;·&nbsp; SimpliRoute &nbsp;·&nbsp;
+                <span style="color:#C9A84C;font-weight:700;">Tempo Real</span>
+                &nbsp;·&nbsp; {agora_brt()}
+            </div>
+        </div>
+        <div style="text-align:right;white-space:nowrap;">
+            <div style="font-size:0.88rem;font-weight:700;color:#2c3e50;margin-bottom:4px;">{user['nome']}</div>
+            <div>{pills}<span class="ks-nivel">{papel.upper()}</span></div>
         </div>
     </div>
-    <div style="text-align:right;white-space:nowrap;">
-        <div style="font-size:0.88rem;font-weight:700;color:#2c3e50;margin-bottom:4px;">
-            {user['nome']}
-        </div>
-        <div>{pills_html}<span class="ks-nivel">{papel.upper()}</span></div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Linha de controles abaixo do cabeçalho
-cc1, cc2, cc3 = st.columns([5, 2.5, 0.7])
-with cc2:
-    data_sel = st.selectbox("", opcoes_datas, label_visibility="collapsed", key="data_sel")
-with cc3:
-    if st.button("Sair", key="btn_sair"):
+    """, unsafe_allow_html=True)
+with hc2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("Sair", key="btn_sair", use_container_width=True):
         st.session_state.user = None
         st.rerun()
 
-st.markdown('<hr style="margin:6px 0 16px;border:none;border-top:1px solid #e2e8f0;">',
-            unsafe_allow_html=True)
-
-# Resolve data
-if   "Hoje"  in data_sel: data_consulta = hoje
-elif "Ontem" in data_sel: data_consulta = ontem
-else:
-    try:    data_consulta = datetime.strptime(data_sel.split("—")[0].strip(), "%d/%m/%Y").strftime("%Y-%m-%d")
-    except: data_consulta = hoje
-is_hoje = (data_consulta == hoje)
-
-tickets_raw  = obter_tickets_db(data_consulta)
-df_principal = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
+# ── DADOS e ROTEAMENTO ────────────────────────────────────────────
+datas_db   = obter_datas_disponiveis_db()
+hoje       = hoje_brt()
+ontem      = ontem_brt()
 modulo_ativo = st.session_state.modulo_ativo
 
-# ── ROTEAMENTO ────────────────────────────────────────────────────
 if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
-    # Exportar é ABA dentro do Rastreio
-    renderizar_rastreio(df_principal, data_consulta, papel, user,
+    # data_consulta resolvida DENTRO do rastreio
+    renderizar_rastreio(papel, user,
                         datas_db=datas_db, pode_exp=pode_exportar(user))
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
@@ -265,39 +228,35 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
-    aba_u, aba_m = st.tabs(["👥 Usuários", "🔒 Permissoes por Modulo"])
+    aba_u, aba_m = st.tabs(["👥 Usuários", "🔒 Permissões por Módulo"])
 
     with aba_u:
         with st.expander("➕ Cadastrar Novo Usuário", expanded=True):
             with st.form("form_novo"):
-                c1, c2    = st.columns(2)
-                n_nome    = c1.text_input("Nome Completo")
-                n_user    = c2.text_input("Login")
-                n_senha   = c1.text_input("Senha", type="password")
-                n_nivel   = c2.selectbox("Nível", ["operacional","supervisor","adm"])
-                ma, mb    = st.columns(2)
-                m_r       = ma.checkbox("Rastreio", value=True)
-                m_t       = mb.checkbox("Tickets", value=n_nivel in ("supervisor","adm"))
+                c1, c2  = st.columns(2)
+                n_nome  = c1.text_input("Nome Completo")
+                n_user  = c2.text_input("Login")
+                n_senha = c1.text_input("Senha", type="password")
+                n_nivel = c2.selectbox("Nível", ["operacional","supervisor","adm"])
+                ma, mb  = st.columns(2)
+                m_r     = ma.checkbox("Rastreio", value=True)
+                m_t     = mb.checkbox("Tickets", value=n_nivel in ("supervisor","adm"))
                 if st.form_submit_button("Criar"):
                     if n_nome and n_user and n_senha:
-                        ms = ([("rastreio",m_r),("tickets",m_t),("exportar",m_r)])
-                        criar_usuario(n_nome, n_user, n_senha, n_nivel,
-                                      [m for m,v in ms if v])
+                        ms = [m for m,v in [("rastreio",m_r),("tickets",m_t),("exportar",m_r)] if v]
+                        criar_usuario(n_nome, n_user, n_senha, n_nivel, ms)
                         st.success(f"Usuário **{n_user}** criado!")
                         time.sleep(1); st.rerun()
                     else: st.warning("Preencha todos os campos.")
-
         st.markdown("---")
-        st.markdown("### Usuários Ativos")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
             with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {u.get('role','—').upper()}"):
                 if uname != "admin":
-                    if st.button("Excluir usuario", key=f"del_{uname}_{i_u}"):
+                    if st.button("Excluir", key=f"del_{uname}_{i_u}"):
                         deletar_usuario(uname); st.rerun()
 
     with aba_m:
-        st.markdown("### Permissoes por Usuario")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
             umods = u.get("modulos", MODULOS_PADRAO.get(u.get("role","operacional"), []))
@@ -305,14 +264,9 @@ elif modulo_ativo == "config" and papel == "adm":
                 ma, mb = st.columns(2)
                 nr = ma.checkbox("Rastreio", value="rastreio" in umods, key=f"r_{uname}")
                 nt = mb.checkbox("Tickets",  value="tickets"  in umods, key=f"t_{uname}")
-                if st.button("Salvar permissoes", key=f"sv_{uname}", type="primary"):
+                if st.button("Salvar", key=f"sv_{uname}", type="primary"):
                     ns = [m for m,v in [("rastreio",nr),("tickets",nt),("exportar",nr)] if v]
                     atualizar_modulos_usuario(uname, ns)
                     st.success("Salvo!"); time.sleep(.5); st.rerun()
 else:
-    st.warning("Modulo nao disponivel para seu perfil.")
-
-# ── AUTO-REFRESH ──────────────────────────────────────────────────
-if is_hoje and modulo_ativo == "rastreio":
-    time.sleep(20)
-    st.rerun()
+    st.warning("Módulo não disponível para seu perfil.")
