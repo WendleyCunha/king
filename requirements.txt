@@ -1,7 +1,5 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-firebase-admin==6.5.0
-google-cloud-firestore==2.16.0
-google-auth==2.29.0
-pydantic==2.7.1
-python-multipart==0.0.9
+streamlit>=1.35.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+google-cloud-firestore>=2.16.0
+google-auth>=2.29.0
