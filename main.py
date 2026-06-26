@@ -226,8 +226,6 @@ if not opcoes_datas: opcoes_datas = [f"Hoje ({hoje})"]
 # Linha 1 do cabeçalho: logo + título + usuário + sair
 hc1, hc2, hc3, hc4 = st.columns([1, 3.5, 2.5, 0.7])
 with hc1:
-    if lb: st.markdown(f'<div style="padding:6px 0;">{html_logo}</div>', unsafe_allow_html=True)
-with hc1:
     if lb:
         st.markdown(f'<div style="padding:4px 0;"><img src="data:image/png;base64,{lb}" style="height:48px;"></div>', unsafe_allow_html=True)
 with hc2:
