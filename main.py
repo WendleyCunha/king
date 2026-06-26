@@ -112,6 +112,11 @@ if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "rast
 
 # ── LOGIN — PARE AQUI SE NÃO LOGADO ──────────────────────────────
 if st.session_state.user is None:
+    # Esconde sidebar durante login
+    st.markdown("""
+    <style>
+    section[data-testid="stSidebar"] { display: none !important; }
+    </style>""", unsafe_allow_html=True)
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col, _ = st.columns([1,1,1])
     with col:
@@ -133,7 +138,7 @@ if st.session_state.user is None:
                 st.rerun()
             else:
                 st.error("Credenciais inválidas.")
-    st.stop()  # ← NADA renderiza abaixo se não logado
+    st.stop()
 
 # ── USUÁRIO CONFIRMADO ────────────────────────────────────────────
 user  = st.session_state.user
@@ -224,12 +229,12 @@ if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
     is_hoje = renderizar_rastreio(
         papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
     )
-    # Auto-refresh silencioso — usando placeholder para não piscar login
+    # Auto-refresh via meta HTML — não bloqueia o thread, não causa flash
     if is_hoje:
-        placeholder = st.empty()
-        time.sleep(20)
-        placeholder.empty()
-        st.rerun()
+        st.markdown(
+            '<meta http-equiv="refresh" content="20">',
+            unsafe_allow_html=True
+        )
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
     renderizar_tickets(papel)
