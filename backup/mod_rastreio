@@ -59,38 +59,69 @@ def aplicar_busca(df, termo):
     nome_mask = get_series(df,"route").apply(nome_motorista).str.lower().str.contains(t,na=False)
     return df[mask | nome_mask]
 
-# ─────────────────────────────────────────────────────────────────
-def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
-                        user: dict = None, datas_db: list = None, pode_exp: bool = False):
+# ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
+# Assinatura nova: data_consulta resolvida AQUI dentro
+def renderizar_rastreio(papel: str, user: dict = None,
+                        datas_db: list = None, pode_exp: bool = False):
     if user is None: user = {"role": papel}
     if datas_db is None: datas_db = []
+
+    hoje  = datetime.now(BRT).date().isoformat()
+    ontem = (datetime.now(BRT).date() - __import__('datetime').timedelta(days=1)).isoformat()
+    datas_disp = [d["data"] for d in datas_db]
+
+    # ── Seletor de data + busca numa linha ───────────────────────
+    fc1, fc2, fc3, fc4 = st.columns([2, 2, 1.5, 1.5])
+    with fc1:
+        opcoes = []
+        if hoje in datas_disp or not datas_disp: opcoes.append(f"Hoje ({hoje})")
+        if ontem in datas_disp: opcoes.append(f"Ontem ({ontem})")
+        for item in datas_db:
+            if item["data"] not in (hoje, ontem):
+                try:    opcoes.append(f"{datetime.strptime(item['data'],'%Y-%m-%d').strftime('%d/%m/%Y')} — {item['total']}")
+                except: opcoes.append(item["data"])
+        if not opcoes: opcoes = [f"Hoje ({hoje})"]
+        data_sel = st.selectbox("📅 Período", opcoes, label_visibility="visible", key="data_sel_rastreio")
+
+    with fc2:
+        termo = st.text_input("🔍 Buscar", placeholder="Placa, motorista, cliente, telefone, tracking...",
+                              label_visibility="visible", key="busca_rastreio")
+    with fc3:
+        f_st = st.selectbox("Status", ["Todos","✅ Sucesso","❌ Falhou","📱 Notificado","⏳ Pendente"],
+                            label_visibility="visible", key="f_status")
+    with fc4:
+        f_nt = st.selectbox("Notificação", ["Todas","Sim","Não"],
+                            label_visibility="visible", key="f_notif")
+
+    # Resolve data
+    if   "Hoje"  in data_sel: data_consulta = hoje
+    elif "Ontem" in data_sel: data_consulta = ontem
+    else:
+        try:    data_consulta = datetime.strptime(data_sel.split("—")[0].strip(),"%d/%m/%Y").strftime("%Y-%m-%d")
+        except: data_consulta = hoje
+    is_hoje = (data_consulta == hoje)
+
+    # Carrega dados
+    tickets_raw = obter_tickets_db(data_consulta)
+    df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
+
     if df.empty:
         st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
+        pass  # refresh controlado pelo main.py
         return
 
     df = garantir_colunas(df.copy())
 
-    # ── Busca ─────────────────────────────────────────────────────
-    c1, c2, c3 = st.columns([3, 1.5, 1.5])
-    with c1:
-        termo = st.text_input("", placeholder="🔍  Buscar: placa, motorista, cliente, endereço, telefone, tracking...",
-                              label_visibility="collapsed", key="busca")
-    with c2:
-        f_st = st.selectbox("", ["Todos os status","✅ Sucesso","❌ Falhou","📱 Notificado","⏳ Pendente","🚚 Em rota"],
-                            label_visibility="collapsed", key="f_status")
-    with c3:
-        f_nt = st.selectbox("", ["Notificacao: Todas","Sim","Nao"],
-                            label_visibility="collapsed", key="f_notif")
-
+    # Aplica filtros
     df_f = aplicar_busca(df, termo)
-    if f_st != "Todos os status": df_f = df_f[df_f["_status_visual"] == f_st]
-    if f_nt == "Sim":  df_f = df_f[df_f["_notificado"] == True]
-    elif f_nt == "Nao": df_f = df_f[df_f["_notificado"] == False]
+    if f_st != "Todos":  df_f = df_f[df_f["_status_visual"] == f_st]
+    if f_nt == "Sim":    df_f = df_f[df_f["_notificado"] == True]
+    elif f_nt == "Não":  df_f = df_f[df_f["_notificado"] == False]
     if termo and df_f.empty:
         st.warning(f"Nenhum resultado para **{termo}**."); return
 
     # ── Abas ──────────────────────────────────────────────────────
-    abas_nomes = ["🏠 Dashboard", "🧑 Visao por Motorista"]
+    abas_nomes = ["🏠 Dashboard", "🧑 Visão por Motorista"]
     if pode_exp: abas_nomes.append("📥 Exportar")
     abas = st.tabs(abas_nomes)
 
@@ -105,12 +136,12 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
                         if r and "não identificada" not in str(r).lower()])
 
         k1,k2,k3,k4,k5,k6 = st.columns(6)
-        k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga do dia</div></div>', unsafe_allow_html=True)
-        k2.markdown(f'<div class="kpi-card green"><div class="kpi-label">📱 Notificados</div><div class="kpi-value">{notif}</div><div class="kpi-sub">{round(notif/total*100,1) if total else 0}%</div></div>', unsafe_allow_html=True)
-        k3.markdown(f'<div class="kpi-card blue"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total else 0}%</div></div>', unsafe_allow_html=True)
-        k4.markdown(f'<div class="kpi-card red"><div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total else 0}%</div></div>', unsafe_allow_html=True)
-        k5.markdown(f'<div class="kpi-card gray"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendente}</div><div class="kpi-sub">Na rua</div></div>', unsafe_allow_html=True)
-        k6.markdown(f'<div class="kpi-card gold"><div class="kpi-label">🧑 Motoristas</div><div class="kpi-value">{motores}</div><div class="kpi-sub">Em operacao</div></div>', unsafe_allow_html=True)
+        k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga do dia</div></div>',unsafe_allow_html=True)
+        k2.markdown(f'<div class="kpi-card green"><div class="kpi-label">📱 Notificados</div><div class="kpi-value">{notif}</div><div class="kpi-sub">{round(notif/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+        k3.markdown(f'<div class="kpi-card blue"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+        k4.markdown(f'<div class="kpi-card red"><div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+        k5.markdown(f'<div class="kpi-card gray"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendente}</div><div class="kpi-sub">Na rua</div></div>',unsafe_allow_html=True)
+        k6.markdown(f'<div class="kpi-card gold"><div class="kpi-label">🧑 Motoristas</div><div class="kpi-value">{motores}</div><div class="kpi-sub">Em operação</div></div>',unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         if termo: st.info(f"🔍 {len(df_f)} resultado(s) para **{termo}**")
@@ -121,13 +152,13 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
             st.markdown("### 🧑 Motoristas em Operação")
             cols = st.columns(min(len(rotas), 4))
             for idx, rota in enumerate(rotas):
-                dr    = df_f[df_f["route"]==rota]
-                nome  = nome_motorista(rota)
-                tot   = len(dr); ok = int((dr["_status_visual"]=="✅ Sucesso").sum())
-                fail  = int((dr["_status_visual"]=="❌ Falhou").sum())
-                nt    = int(dr["_notificado"].sum())
-                pct_n = round(nt/tot*100,1) if tot else 0
-                pct_o = round(ok/tot*100) if tot else 0
+                dr   = df_f[df_f["route"]==rota]
+                nome = nome_motorista(rota)
+                tot  = len(dr); ok = int((dr["_status_visual"]=="✅ Sucesso").sum())
+                fail = int((dr["_status_visual"]=="❌ Falhou").sum())
+                nt   = int(dr["_notificado"].sum())
+                pct_n= round(nt/tot*100,1) if tot else 0
+                pct_o= round(ok/tot*100) if tot else 0
                 with cols[idx%4]:
                     st.markdown(f"""
                     <div class="driver-card">
@@ -173,9 +204,9 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
             "Ordem":    get_series(df_f,"order"),
             "Motorista":get_series(df_f,"route").apply(nome_motorista),
             "Cliente":  get_series(df_f,"title"),
-            "Endereco": get_series(df_f,"address"),
+            "Endereço": get_series(df_f,"address"),
             "Status":   df_f["_status_visual"],
-            "Notif.":   df_f["_notificado"].apply(lambda x:"Sim" if x else "Nao"),
+            "Notif.":   df_f["_notificado"].apply(lambda x:"Sim" if x else "Não"),
             "Notif. em":get_series(df_f,"on_its_way").apply(formatar_data),
             "Check-out":get_series(df_f,"checkout_time").apply(formatar_data),
             "Telefone": get_series(df_f,"contact_phone"),
@@ -188,15 +219,15 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
                  if r and "não identificada" not in str(r).lower()] if "route" in df.columns else []
         if not rotas: st.info("Nenhuma rota registrada."); return
 
-        opcoes, mapa = [], {}
+        opcoes_m, mapa = [], {}
         for r in rotas:
             n   = int(df[df["route"]==r]["_notificado"].sum())
             lbl = f"{nome_motorista(r)} (📱 {n})"
-            opcoes.append(lbl); mapa[lbl] = r
+            opcoes_m.append(lbl); mapa[lbl] = r
 
         col_m, col_d = st.columns([1.5, 3])
         with col_m:
-            sel       = st.radio("", opcoes, label_visibility="collapsed")
+            sel       = st.radio("", opcoes_m, label_visibility="collapsed")
             mot_ativo = mapa[sel]
 
             if pode_editar(user):
@@ -208,14 +239,14 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
             else:
                 st.markdown("---")
                 st.caption(f"Condutor: **{nome_motorista(mot_ativo)}**")
-                st.caption("🔒 Edicao restrita.")
+                st.caption("🔒 Edição restrita.")
 
             if pode_deletar(user):
                 st.markdown("---"); st.error("Zona de Perigo")
-                if st.checkbox("Liberar exclusao", key=f"chk_{mot_ativo}"):
+                if st.checkbox("Liberar exclusão", key=f"chk_{mot_ativo}"):
                     if st.button("Excluir Rota", key=f"del_{mot_ativo}", use_container_width=True):
                         deletar_rota_db(mot_ativo, data_consulta)
-                        st.success("Excluido!"); time.sleep(1); st.rerun()
+                        st.success("Excluído!"); time.sleep(1); st.rerun()
 
         with col_d:
             dr   = df[df["route"]==mot_ativo].copy()
@@ -236,17 +267,17 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
                 <div style="background:#e8ecf0;border-radius:4px;height:6px;margin:10px 0 3px;">
                   <div style="background:#2980b9;height:6px;border-radius:4px;width:{pct}%;"></div>
                 </div>
-                <span style="font-size:0.73rem;color:#64778d;">{ok}/{tot} concluidas ({pct}%)</span>
+                <span style="font-size:0.73rem;color:#64778d;">{ok}/{tot} concluídas ({pct}%)</span>
             </div>""", unsafe_allow_html=True)
 
-            tf, tfl = st.tabs(["📋 Fila de Clientes","⚠️ Ocorrencias"])
+            tf, tfl = st.tabs(["📋 Fila de Clientes","⚠️ Ocorrências"])
             with tf:
                 st.dataframe(pd.DataFrame({
                     "Ordem":    get_series(dr,"order"),
                     "Cliente":  get_series(dr,"title"),
-                    "Endereco": get_series(dr,"address"),
+                    "Endereço": get_series(dr,"address"),
                     "Status":   dr["_status_visual"],
-                    "Notif.":   dr["_notificado"].apply(lambda x:"Sim" if x else "Nao"),
+                    "Notif.":   dr["_notificado"].apply(lambda x:"Sim" if x else "Não"),
                     "Notif. em":get_series(dr,"on_its_way").apply(formatar_data),
                     "Check-in": get_series(dr,"checkin_time").apply(formatar_data),
                     "Check-out":get_series(dr,"checkout_time").apply(formatar_data),
@@ -257,30 +288,29 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
                 }), use_container_width=True, hide_index=True)
             with tfl:
                 df_err = dr[dr["_status_visual"]=="❌ Falhou"]
-                if df_err.empty: st.success("Nenhuma ocorrencia.")
+                if df_err.empty: st.success("Nenhuma ocorrência.")
                 else:
                     st.dataframe(pd.DataFrame({
                         "Ordem":  get_series(df_err,"order"),
                         "Cliente":get_series(df_err,"title"),
                         "Motivo": get_series(df_err,"checkout_observation"),
                         "Detalhe":get_series(df_err,"checkout_comment","—"),
-                        "Horario":get_series(df_err,"checkout_time").apply(formatar_data),
+                        "Horário":get_series(df_err,"checkout_time").apply(formatar_data),
                     }), use_container_width=True, hide_index=True)
 
-    # ══ EXPORTAR (aba interna do Rastreio) ════════════════════════
+    # ══ EXPORTAR ══════════════════════════════════════════════════
     if pode_exp:
         with abas[2]:
-            st.markdown("### 💾 Exportacao de Dados")
-            if df.empty: st.warning("Nenhum dado para exportar."); return
+            st.markdown("### 💾 Exportação de Dados")
 
             def montar(df_src):
                 return pd.DataFrame({
                     "Ordem":      get_series(df_src,"order"),
                     "Motorista":  get_series(df_src,"route").apply(nome_motorista),
                     "Cliente":    get_series(df_src,"title"),
-                    "Endereco":   get_series(df_src,"address"),
+                    "Endereço":   get_series(df_src,"address"),
                     "Status":     get_series(df_src,"_status_visual","⏳ Pendente"),
-                    "Notificado": get_series(df_src,"_notificado").apply(lambda x:"Sim" if x else "Nao"),
+                    "Notificado": get_series(df_src,"_notificado").apply(lambda x:"Sim" if x else "Não"),
                     "Notif. em":  get_series(df_src,"on_its_way").apply(formatar_data),
                     "Check-in":   get_series(df_src,"checkin_time").apply(formatar_data),
                     "Check-out":  get_series(df_src,"checkout_time").apply(formatar_data),
@@ -291,7 +321,7 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
 
             ec1, ec2 = st.columns(2)
             with ec1:
-                st.markdown(f"#### Dia: `{data_consulta}`")
+                st.markdown(f"#### 📅 Dia: `{data_consulta}`")
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as w: montar(df).to_excel(w, index=False)
                 st.download_button(f"📥 Baixar {data_consulta}", out.getvalue(),
@@ -301,7 +331,7 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
             with ec2:
                 mes     = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%Y-%m")
                 mes_lbl = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%B/%Y")
-                st.markdown(f"#### Mes: `{mes_lbl}`")
+                st.markdown(f"#### 🗓️ Mês: `{mes_lbl}`")
                 if st.button(f"Carregar {mes_lbl}", use_container_width=True):
                     datas_mes = [d["data"] for d in datas_db if d["data"].startswith(mes)]
                     frames=[]; prog=st.progress(0)
@@ -318,3 +348,6 @@ def renderizar_rastreio(df: pd.DataFrame, data_consulta: str, papel: str,
                             f"KingStar_{mes}.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary", use_container_width=True)
+
+    # Auto-refresh controlado pelo main.py
+    return is_hoje
