@@ -32,83 +32,103 @@ def logo_b64():
 # ── CSS ──────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Remove padding padrão */
-.block-container { padding-top: 1rem !important; }
+/* Fundo geral */
+.stApp { background-color: #f4f6f9; }
+.block-container { padding-top: 0.5rem !important; }
 
-/* Sidebar minimalista — só navegação */
+/* ── Sidebar clara ── */
 section[data-testid="stSidebar"] {
-    background: #1a242f !important;
-    min-width: 220px !important; max-width: 220px !important;
+    background-color: #ffffff !important;
+    border-right: 1px solid #dbe2e9 !important;
 }
-section[data-testid="stSidebar"] * { color: #a0b0c0 !important; }
+/* Remove ícone/seta do collapse da sidebar */
+section[data-testid="stSidebar"] button[data-testid="baseButton-headerNoPadding"] { display: none !important; }
+/* Botões da sidebar sem borda/sombra padrão do Streamlit */
+section[data-testid="stSidebar"] .stButton > button {
+    border: 1px solid #dbe2e9 !important;
+    background: #f8f9fa !important;
+    color: #2c3e50 !important;
+    font-weight: 500 !important;
+    font-size: 0.88rem !important;
+    text-align: left !important;
+    border-radius: 8px !important;
+    margin-bottom: 4px !important;
+    padding: 10px 14px !important;
+    width: 100% !important;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background: #f0f2f5 !important;
+    border-color: #C9A84C !important;
+}
+/* Botão ativo (primary) na sidebar */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: rgba(201,168,76,0.12) !important;
+    border-color: #C9A84C !important;
+    color: #8a6a1e !important;
+    font-weight: 700 !important;
+}
+/* Títulos de seção na sidebar */
+.nav-section-title {
+    font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.5px; color: #9aabb8;
+    padding: 14px 4px 6px; margin: 0; display: block;
+}
+/* Item "em breve" na sidebar */
+.nav-soon {
+    padding: 8px 14px; border-radius: 8px; font-size: 0.85rem;
+    color: #b0bec5; display: flex; align-items: center;
+    justify-content: space-between; margin-bottom: 2px;
+}
+.soon-badge {
+    font-size: 0.62rem; background: #f0f2f5; color: #9aabb8;
+    padding: 2px 7px; border-radius: 8px; font-weight: 600;
+}
 
-/* Cabeçalho */
+/* ── Cabeçalho ── */
 .ks-header {
-    display: flex; align-items: center; justify-content: space-between;
-    background: #ffffff; border-radius: 12px; padding: 14px 24px;
-    margin-bottom: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.06);
-    border-left: 5px solid #C9A84C;
+    display: flex; align-items: center;
+    background: #ffffff; border-radius: 12px; padding: 16px 24px;
+    margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    border-left: 5px solid #C9A84C; gap: 16px;
 }
-.ks-header-left  { display: flex; align-items: center; gap: 16px; }
-.ks-header-right { display: flex; align-items: center; gap: 12px; }
-.ks-user-pill {
-    display: flex; align-items: center; gap: 8px;
-    background: #f4f6f9; border-radius: 20px; padding: 6px 14px;
-    font-size: 0.85rem; font-weight: 600; color: #2c3e50;
-}
+.ks-title { font-size: 1.5rem; font-weight: 800; color: #2c3e50; margin: 0; }
+.ks-sub   { font-size: 0.82rem; color: #64778d; margin: 2px 0 0; }
+.ks-sep   { flex: 1; }
 .ks-nivel-badge {
-    padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;
-    background: rgba(201,168,76,.2); color: #b0913b;
+    padding: 4px 12px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;
+    background: rgba(201,168,76,.15); color: #8a6a1e;
 }
-.ks-mod-badge {
-    padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;
-    background: rgba(52,152,219,.12); color: #2980b9; margin-right: 4px;
+.ks-mod-pill {
+    display: inline-block; padding: 3px 10px; border-radius: 10px;
+    font-size: 0.72rem; font-weight: 700; margin-right: 3px;
+    background: rgba(52,152,219,.1); color: #2980b9;
 }
 
-/* KPI cards */
+/* ── KPI cards ── */
 .kpi-card {
     background: #fff; border-radius: 12px; padding: 18px 14px;
     text-align: center; border-top: 4px solid #C9A84C;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.05); height: 100%;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05); height: 100%;
 }
-.kpi-label { color: #64778d; font-size: 0.78rem; font-weight: 600;
+.kpi-label { color: #64778d; font-size: 0.75rem; font-weight: 600;
              text-transform: uppercase; letter-spacing: 1px; }
 .kpi-value { color: #2c3e50; font-size: 2rem; font-weight: 800; line-height: 1.2; margin-top: 4px; }
-.kpi-sub   { color: #C9A84C; font-size: 0.82rem; margin-top: 3px; font-weight: 600; }
+.kpi-sub   { color: #C9A84C; font-size: 0.8rem; margin-top: 3px; font-weight: 600; }
 .kpi-card.notif  { border-top-color: #27ae60; } .kpi-card.notif .kpi-value  { color: #2ecc71; }
 .kpi-card.falhou { border-top-color: #e74c3c; } .kpi-card.falhou .kpi-value { color: #e74c3c; }
 .kpi-card.sucesso{ border-top-color: #2980b9; } .kpi-card.sucesso .kpi-value{ color: #3498db; }
 
-/* Driver card */
+/* ── Driver card ── */
 .driver-card {
     background: #fff; border: 1px solid #dbe2e9; border-radius: 12px;
     padding: 14px; margin-bottom: 6px; border-top: 4px solid #C9A84C;
 }
 .tag { display:inline-block; padding:3px 10px; border-radius:12px;
        font-size:0.75rem; font-weight:700; margin:2px; }
-.tag-gold  { background:rgba(201,168,76,.15); color:#b0913b; }
+.tag-gold  { background:rgba(201,168,76,.15); color:#8a6a1e; }
 .tag-green { background:rgba(46,204,113,.12); color:#27ae60; }
 .tag-blue  { background:rgba(52,152,219,.12); color:#2980b9; }
 .tag-red   { background:rgba(231,76,60,.12);  color:#c0392b; }
-
-/* Sidebar nav links */
-.nav-modulo {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 16px; border-radius: 8px; margin: 2px 8px;
-    font-size: 0.88rem; font-weight: 500; cursor: pointer;
-    transition: background .15s;
-}
-.nav-modulo:hover { background: rgba(255,255,255,.08); }
-.nav-modulo.active { background: rgba(201,168,76,.2); color: #C9A84C !important; font-weight: 700; }
-.nav-section-title {
-    font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 1.5px; color: #4a6278 !important;
-    padding: 16px 16px 6px; margin: 0;
-}
-.soon-badge {
-    font-size: 0.6rem; background: rgba(255,255,255,.1);
-    padding: 2px 6px; border-radius: 8px; margin-left: auto;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -138,49 +158,48 @@ user  = st.session_state.user
 papel = user["role"]
 mods  = modulos_do_usuario(user)
 
-# ── SIDEBAR — só navegação ────────────────────────────────────────
+# ── SIDEBAR — navegação clara ─────────────────────────────────────
 with st.sidebar:
     lb = logo_b64()
     if lb:
-        st.markdown(f'<div style="text-align:center;padding:20px 0 12px;"><img src="data:image/png;base64,{lb}" style="height:50px;filter:brightness(1.1);"></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="text-align:center;padding:20px 0 16px;"><img src="data:image/png;base64,{lb}" style="height:52px;"></div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div style="text-align:center;padding:20px 0;font-size:1.5rem;">🚚</div>', unsafe_allow_html=True)
+        st.markdown('<div style="text-align:center;padding:20px 0;color:#2c3e50;font-weight:700;font-size:1.1rem;">KingStar</div>', unsafe_allow_html=True)
 
-    st.markdown('<div style="border-top:1px solid #2d3d4f;margin:0 16px 8px;"></div>', unsafe_allow_html=True)
-    st.markdown('<p class="nav-section-title">Operacional</p>', unsafe_allow_html=True)
+    st.markdown('<div style="border-top:1px solid #dbe2e9;margin:0 8px 12px;"></div>', unsafe_allow_html=True)
+    st.markdown('<span class="nav-section-title">Operacional</span>', unsafe_allow_html=True)
 
     nav_items = [
-        ("rastreio",  "🚚", "Rastreio",       "rastreio"  in mods, False),
-        ("tickets",   "🎫", "Tickets",         "tickets"   in mods, False),
-        ("exportar",  "📥", "Exportar",        pode_exportar(user),  False),
-    ]
-    nav_em_breve = [
-        ("atendente", "💬", "Painel Atendente", False, True),
-        ("erp",       "🗂️",  "ERP Base",         False, True),
-        ("analytics", "📊", "Analytics",        False, True),
+        ("rastreio", "Rastreio",  "rastreio" in mods),
+        ("tickets",  "Tickets",   "tickets"  in mods),
+        ("exportar", "Exportar",  pode_exportar(user)),
     ]
 
-    for key, icon, label, liberado, soon in nav_items:
+    for key, label, liberado in nav_items:
         if not liberado: continue
-        ativo = "active" if st.session_state.modulo_ativo == key else ""
-        if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True,
+        ativo = st.session_state.modulo_ativo == key
+        if st.button(label, key=f"nav_{key}", use_container_width=True,
                      type="primary" if ativo else "secondary"):
             st.session_state.modulo_ativo = key
             st.rerun()
 
     if papel == "adm":
-        if st.button("⚙️  Configurações", key="nav_config", use_container_width=True,
-                     type="primary" if st.session_state.modulo_ativo=="config" else "secondary"):
+        ativo_cfg = st.session_state.modulo_ativo == "config"
+        if st.button("Configuracoes", key="nav_config", use_container_width=True,
+                     type="primary" if ativo_cfg else "secondary"):
             st.session_state.modulo_ativo = "config"
             st.rerun()
 
-    st.markdown('<p class="nav-section-title" style="margin-top:16px;">Em Breve</p>', unsafe_allow_html=True)
-    for key, icon, label, _, _ in nav_em_breve:
-        st.markdown(f'<div class="nav-modulo" style="opacity:.45;">{icon} {label} <span class="soon-badge" style="color:#4a6278 !important;">soon</span></div>', unsafe_allow_html=True)
+    st.markdown('<div style="border-top:1px solid #dbe2e9;margin:16px 8px 12px;"></div>', unsafe_allow_html=True)
+    st.markdown('<span class="nav-section-title">Em Breve</span>', unsafe_allow_html=True)
 
-    st.markdown('<div style="border-top:1px solid #2d3d4f;margin:16px 16px 8px;"></div>', unsafe_allow_html=True)
-    st.markdown('<p class="nav-section-title">Sistema</p>', unsafe_allow_html=True)
-    st.markdown(f'<div style="padding:8px 16px;font-size:0.78rem;color:#4a6278 !important;">v2.0 · Firebase · BRT</div>', unsafe_allow_html=True)
+    for label in ["Painel Atendente", "ERP Base", "Analytics"]:
+        st.markdown(
+            f'<div class="nav-soon">{label} <span class="soon-badge">em breve</span></div>',
+            unsafe_allow_html=True)
+
+    st.markdown('<div style="border-top:1px solid #dbe2e9;margin:16px 8px 8px;"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="padding:4px 4px 16px;font-size:0.72rem;color:#9aabb8;">v2.0 · Firebase · Brasília (BRT)</div>', unsafe_allow_html=True)
 
 # ── DADOS ─────────────────────────────────────────────────────────
 datas_db   = obter_datas_disponiveis_db()
@@ -188,16 +207,13 @@ hoje       = hoje_brt()
 ontem      = ontem_brt()
 datas_disp = [d["data"] for d in datas_db]
 
-# ── CABEÇALHO com usuário, data e sair ───────────────────────────
-lb = logo_b64()
-html_logo = f'<img src="data:image/png;base64,{lb}" style="height:44px;">' if lb else "🚚"
-
+# ── CABEÇALHO ─────────────────────────────────────────────────────
+lb        = logo_b64()
 mods_html = "".join([
-    f'<span class="ks-mod-badge">{"🚚" if m=="rastreio" else "🎫" if m=="tickets" else "📥"} {m.capitalize()}</span>'
+    f'<span class="ks-mod-pill">{"Rastreio" if m=="rastreio" else "Tickets" if m=="tickets" else "Exportar"}</span>'
     for m in mods
 ])
 
-# Selectbox de data no cabeçalho
 opcoes_datas = []
 if hoje in datas_disp or not datas_disp: opcoes_datas.append(f"Hoje ({hoje})")
 if ontem in datas_disp: opcoes_datas.append(f"Ontem ({ontem})")
@@ -207,29 +223,38 @@ for item in datas_db:
         except: opcoes_datas.append(item["data"])
 if not opcoes_datas: opcoes_datas = [f"Hoje ({hoje})"]
 
-hc1, hc2, hc3, hc4, hc5 = st.columns([1.2, 3, 2, 1.5, 0.8])
+# Linha 1 do cabeçalho: logo + título + usuário + sair
+hc1, hc2, hc3, hc4 = st.columns([1, 3.5, 2.5, 0.7])
 with hc1:
     if lb: st.markdown(f'<div style="padding:6px 0;">{html_logo}</div>', unsafe_allow_html=True)
+with hc1:
+    if lb:
+        st.markdown(f'<div style="padding:4px 0;"><img src="data:image/png;base64,{lb}" style="height:48px;"></div>', unsafe_allow_html=True)
 with hc2:
     st.markdown(f"""
-    <div style="padding:6px 0;">
-        <div style="font-size:1.1rem;font-weight:800;color:#2c3e50;">Painel Integrado · KingStar</div>
-        <div style="font-size:0.8rem;color:#64778d;">Eco 360º · SimpliRoute · <span style="color:#C9A84C;font-weight:700;">🕐 {agora_brt()}</span></div>
+    <div style="padding:5px 0;">
+        <div style="font-size:1.25rem;font-weight:800;color:#2c3e50;line-height:1.2;">Painel de Entregas · KingStar</div>
+        <div style="font-size:0.8rem;color:#64778d;margin-top:2px;">
+            KingStar Colchoes &nbsp;·&nbsp; Eco 360° &nbsp;·&nbsp; SimpliRoute &nbsp;·&nbsp;
+            <span style="color:#C9A84C;font-weight:700;">Tempo Real</span>
+            &nbsp;·&nbsp; <span style="color:#aaa;">{agora_brt()}</span>
+        </div>
     </div>""", unsafe_allow_html=True)
 with hc3:
-    data_sel = st.selectbox("", opcoes_datas, label_visibility="collapsed", key="data_sel_header")
+    st.markdown('<div style="padding-top:4px;">', unsafe_allow_html=True)
+    data_sel = st.selectbox("Periodo", opcoes_datas, label_visibility="collapsed", key="data_sel_header")
+    st.markdown('</div>', unsafe_allow_html=True)
 with hc4:
     st.markdown(f"""
-    <div style="padding:6px 0;text-align:right;">
-        <div style="font-size:0.82rem;font-weight:700;color:#2c3e50;">👤 {user['nome']}</div>
-        <div>{mods_html}<span class="ks-nivel-badge">{papel.upper()}</span></div>
+    <div style="padding:5px 0;text-align:right;">
+        <div style="font-size:0.85rem;font-weight:700;color:#2c3e50;">{user['nome']}</div>
+        <div style="margin-top:3px;">{mods_html}<span class="ks-nivel-badge">{papel.upper()}</span></div>
     </div>""", unsafe_allow_html=True)
-with hc5:
     if st.button("Sair", key="btn_sair"):
         st.session_state.user = None
         st.rerun()
 
-st.markdown('<hr style="margin:0 0 16px;border:none;border-top:1px solid #e8ecf0;">', unsafe_allow_html=True)
+st.markdown('<hr style="margin:4px 0 16px;border:none;border-top:1px solid #e8ecf0;">', unsafe_allow_html=True)
 
 # Resolve data_consulta
 if   "Hoje"  in data_sel: data_consulta = hoje
