@@ -115,7 +115,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 if "user"         not in st.session_state: st.session_state.user = None
 if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "rastreio"
 
-if not st.session_state.user:
+if st.session_state.user is None:
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col, _ = st.columns([1,1,1])
     with col:
@@ -219,9 +219,12 @@ ontem      = ontem_brt()
 modulo_ativo = st.session_state.modulo_ativo
 
 if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
-    # data_consulta resolvida DENTRO do rastreio
-    renderizar_rastreio(papel, user,
-                        datas_db=datas_db, pode_exp=pode_exportar(user))
+    is_hoje = renderizar_rastreio(papel, user,
+                                  datas_db=datas_db, pode_exp=pode_exportar(user))
+    # Auto-refresh silencioso só quando logado e no dia atual
+    if is_hoje and st.session_state.user is not None:
+        time.sleep(20)
+        st.rerun()
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
     renderizar_tickets(papel)
