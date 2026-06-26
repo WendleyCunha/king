@@ -33,7 +33,7 @@ def get_logo():
 st.markdown("""
 <style>
 .stApp { background-color: #f4f6f9; }
-.block-container { padding-top: 0.5rem !important; }
+.block-container { padding-top: 2.5rem !important; }
 
 /* Sidebar clara */
 section[data-testid="stSidebar"] {
