@@ -107,7 +107,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
 
     if df.empty:
         st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
-        pass  # refresh controlado pelo main.py
+        if is_hoje: time.sleep(20); st.rerun()
         return
 
     df = garantir_colunas(df.copy())
