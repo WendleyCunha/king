@@ -50,13 +50,19 @@ STATUS_CFG = {
 }
 
 PRIO_CFG = {
-    "urgente": ("Urgente","#FEE2E2","#991B1B"),
+    "urgente": ("Urgente","#EFD9A0","#6B4E0F"),
     "alta":    ("Alta",   "#FFF7ED","#9A3412"),
     "normal":  ("Normal", "#F0FDF4","#166534"),
     "baixa":   ("Baixa",  "#F1F5F9","#475569"),
 }
 
 STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")  # pendentes p/ SLA
+
+# ── Paleta dourada (sem vermelho) ──────────────────────────────────
+GOLD       = "#C9A84C"   # dourado base
+GOLD_WARN  = "#D4A12C"   # faltando <30min  (ouro médio)
+GOLD_VENC  = "#8A6D1F"   # SLA vencido      (ouro escuro / bronze)
+GREEN_OK   = "#16A34A"   # barra saudável
 
 # ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
@@ -150,6 +156,49 @@ def ticket_vencido_pendente(t) -> bool:
         return False
     _, _, venc = sla_restante(t.get("criado_em",""), t.get("horas_sla", 24))
     return venc
+
+# ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
+def _atribuido_a(t, user) -> bool:
+    """O ticket caiu para o usuário logado atender (atendente/atribuído)?"""
+    uname = user.get("usuario","")
+    nome  = user.get("nome","")
+    return (uname in t.get("atendentes", [])
+            or t.get("atribuido_para") in (uname, nome))
+
+def classificar_fila(t, user) -> str:
+    """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma).
+    O ticket nunca está em duas caixas — apenas caminha entre elas.
+
+    Precedência:
+      1) meus        → tickets ABERTOS pelo usuário logado (a qualquer depto),
+                       independente do status (é o acompanhamento do que eu abri).
+      2) (a partir daqui, só tickets que caíram para EU atender)
+      3) vencidos    → pendente e com SLA estourado.
+      4) aberto      → recém-nascido (status 'aberto'), sem interação.
+      5) urgente     → já em interação (em andamento/aguardando) e prioridade urgente.
+      6) em_andamento→ já em interação, prioridade normal.
+      7) None        → resolvidos/cancelados ou que não são meus.
+    """
+    uname = user.get("usuario","")
+    # 1) Tickets que EU abri (acompanhamento) — têm prioridade sobre as demais
+    if t.get("aberto_por") == uname:
+        return "meus"
+    # 2) Daqui pra frente, só o que caiu para eu atender
+    if not _atribuido_a(t, user):
+        return None
+    status = t.get("status")
+    if status not in STATUS_ABERTOS:          # resolvido/cancelado → fora das caixas
+        return None
+    # 3) SLA estourado tem prioridade
+    if ticket_vencido_pendente(t):
+        return "vencidos"
+    # 4) Recém-nascido, sem interação
+    if status == "aberto":
+        return "aberto"
+    # 5/6) Já em interação (em_andamento/aguardando)
+    if t.get("prioridade") == "urgente":
+        return "urgente"
+    return "em_andamento"
 
 # ── Visibilidade por papel (Regra 5) ───────────────────────────────
 def _usuario_atende(t, user) -> bool:
@@ -289,10 +338,10 @@ def renderizar_tickets(papel: str, user: dict = None):
     <style>
     .tk-badge { background:#e2e8f0; color:#475569; padding:2px 8px;
         border-radius:10px; font-size:0.72rem; font-weight:700; }
-    .tk-badge-red { background:#FEE2E2; color:#991B1B; }
+    .tk-badge-red { background:#FBF3D9; color:#8A6D1F; }
     .tk-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-left:4px solid #C9A84C; }
-    .tk-card.vencido { border-left:4px solid #DC2626; box-shadow:0 0 0 1px #FECACA inset; }
+    .tk-card.vencido { border-left:4px solid #8A6D1F; box-shadow:0 0 0 1px #E8D9A6 inset; }
     .tk-card-header { display:flex; justify-content:space-between;
         align-items:flex-start; margin-bottom:6px; }
     .tk-card-title { font-size:0.92rem; font-weight:700; color:#2c3e50; }
@@ -300,12 +349,12 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-sla-bar { background:#e8ecf0; border-radius:4px; height:5px; margin:8px 0 4px; }
     .tk-sla-fill { height:5px; border-radius:4px; }
     .tk-sla-text { font-size:0.7rem; color:#64778d; }
-    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.20;} }
+    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
     .tk-blink { animation: tkpiscar 1s infinite;
-        background:#DC2626; color:#fff; padding:2px 10px; border-radius:12px;
+        background:#8A6D1F; color:#fff; padding:2px 10px; border-radius:12px;
         font-size:0.72rem; font-weight:800; display:inline-block; }
     .tk-banner { animation: tkpiscar 1.2s infinite;
-        background:#FEE2E2; color:#991B1B; border:2px solid #DC2626;
+        background:#FBF3D9; color:#7A5C12; border:2px solid #8A6D1F;
         border-radius:10px; padding:12px 16px; margin-bottom:14px;
         font-weight:800; font-size:0.95rem; }
     .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
@@ -321,25 +370,34 @@ def renderizar_tickets(papel: str, user: dict = None):
         padding:12px 14px 8px !important; margin-bottom:0 !important;
         transition:background .15s, box-shadow .15s; }
     div[class*="st-key-tkcard_"] button:hover {
-        background:#eef4ff !important; border-color:#C9A84C !important; }
+        background:#FBF6E6 !important; border-color:#C9A84C !important; }
     div[class*="st-key-tkcard_venc_"] button {
-        border-left-color:#DC2626 !important; animation:tkbordapiscar 1s infinite; }
+        border-left-color:#8A6D1F !important; animation:tkbordapiscar 1s infinite; }
     div[class*="st-key-tkcard_warn_"] button {
-        border-left-color:#F59E0B !important; animation:tkbordapiscarsuave 1.6s infinite; }
-    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,0);} 50%{box-shadow:0 0 0 3px rgba(220,38,38,.30);} }
-    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0);} 50%{box-shadow:0 0 0 3px rgba(245,158,11,.25);} }
+        border-left-color:#D4A12C !important; animation:tkbordapiscarsuave 1.6s infinite; }
+    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);} 50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);} }
+    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(212,161,44,0);} 50%{box-shadow:0 0 0 3px rgba(212,161,44,.30);} }
     .tk-cardbody { background:#fff; border:1px solid #e2e8f0; border-top:none;
         border-left:4px solid #C9A84C; border-radius:0 0 10px 10px;
         padding:4px 14px 12px; margin:-10px 0 12px; }
-    .tk-cardbody.venc { border-left-color:#DC2626; }
-    .tk-cardbody.warn { border-left-color:#F59E0B; }
+    .tk-cardbody.venc { border-left-color:#8A6D1F; }
+    .tk-cardbody.warn { border-left-color:#D4A12C; }
     .tk-cardmeta { font-size:0.75rem; color:#64778d; margin:2px 0 6px; }
-    /* badges piscantes do SLA */
-    .tk-blink-venc { animation:tkpiscar 1s infinite; background:#DC2626; color:#fff;
+    /* badges piscantes do SLA (paleta dourada) */
+    .tk-blink-venc { animation:tkpiscar 1s infinite; background:#8A6D1F; color:#fff;
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:800; }
-    .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FEF3C7; color:#92400E;
-        border:1px solid #FCD34D; padding:1px 8px; border-radius:10px;
+    .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FBF3D9; color:#7A5C12;
+        border:1px solid #D4A12C; padding:1px 8px; border-radius:10px;
         font-size:0.7rem; font-weight:700; }
+    /* Botões "primary" em dourado (some o vermelho do tema) */
+    button[kind="primary"], button[data-testid="baseButton-primary"],
+    [data-testid="stBaseButton-primary"] {
+        background-color:#C9A84C !important; border-color:#C9A84C !important;
+        color:#fff !important; }
+    button[kind="primary"]:hover, button[data-testid="baseButton-primary"]:hover,
+    [data-testid="stBaseButton-primary"]:hover {
+        background-color:#b8973f !important; border-color:#b8973f !important;
+        color:#fff !important; }
     </style>
     """), unsafe_allow_html=True)
 
@@ -350,12 +408,18 @@ def renderizar_tickets(papel: str, user: dict = None):
 
     uname = user.get("usuario","")
 
-    # ── Conjuntos das filas ───────────────────────────────────────
-    meus      = [t for t in todos if t.get("aberto_por") == uname]   # abertos por mim
-    f_abertos = [t for t in todos if t.get("status") == "aberto"]
-    f_andam   = [t for t in todos if t.get("status") == "em_andamento"]
-    f_urg     = [t for t in todos if t.get("prioridade") == "urgente"]
-    f_venc    = [t for t in todos if ticket_vencido_pendente(t)]
+    # ── Conjuntos das filas (MUTUAMENTE EXCLUSIVOS) ───────────────
+    # Cada ticket cai em no máximo uma caixa de trabalho (classificar_fila).
+    buckets = {"meus": [], "aberto": [], "em_andamento": [], "urgente": [], "vencidos": []}
+    for t in todos:
+        f = classificar_fila(t, user)
+        if f:
+            buckets[f].append(t)
+    meus      = buckets["meus"]
+    f_abertos = buckets["aberto"]
+    f_andam   = buckets["em_andamento"]
+    f_urg     = buckets["urgente"]
+    f_venc    = buckets["vencidos"]
     f_global  = todos_geral                                          # GLOBAL: de todos
 
     # ── Largura ajustável dos painéis ─────────────────────────────
@@ -420,12 +484,10 @@ def renderizar_tickets(papel: str, user: dict = None):
     with col_main:
         modo = st.session_state.tk_modo
 
-        # Banner piscante de SLA vencido — em qualquer modo
-        meus_vencidos   = [t for t in meus if ticket_vencido_pendente(t)]
-        alerta_lista = meus_vencidos if papel == "operacional" else f_venc
-        if alerta_lista:
+        # Banner piscante de SLA vencido — em qualquer modo (paleta dourada)
+        if f_venc:
             st.markdown(_html(
-                f'<div class="tk-banner">⚠️ {len(alerta_lista)} ticket(s) com SLA VENCIDO '
+                f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com SLA ESTOURADO '
                 f'aguardando tratativa! Verifique a fila "SLA vencidos".</div>'
             ), unsafe_allow_html=True)
 
@@ -450,6 +512,23 @@ def renderizar_tickets(papel: str, user: dict = None):
 
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
+            elif fila == "meus":
+                # Meus tickets: agrupado por DEPARTAMENTO (pra quem eu abri),
+                # mostrando status e se estourou ou não o prazo.
+                from collections import defaultdict
+                grupos = defaultdict(list)
+                for t in filtrados:
+                    grupos[t.get("departamento") or t.get("categoria") or "—"].append(t)
+                for dep in sorted(grupos):
+                    lst    = grupos[dep]
+                    n_venc = sum(1 for t in lst if ticket_vencido_pendente(t))
+                    extra  = f' · <span style="color:#8A6D1F;font-weight:700;">⏳ {n_venc} com prazo estourado</span>' if n_venc else ""
+                    st.markdown(_html(
+                        f'<div style="margin:14px 0 6px;font-weight:700;color:#2c3e50;">'
+                        f'🏢 {esc(dep)} <span style="color:#64778d;font-weight:500;">— '
+                        f'{len(lst)} ticket(s)</span>{extra}</div>'), unsafe_allow_html=True)
+                    for t in lst:
+                        _render_card_clicavel(t, user, papel)
             else:
                 for t in filtrados:
                     _render_card_clicavel(t, user, papel)
@@ -493,8 +572,8 @@ def _render_card_clicavel(t, user, papel):
     num_com = len(t.get("comentarios", []))
 
     # Cor da barra de tempo (mantém o verde quando saudável)
-    if   estado == "venc": barra = "#DC2626"
-    elif estado == "warn": barra = "#F59E0B"
+    if   estado == "venc": barra = GOLD_VENC
+    elif estado == "warn": barra = GOLD_WARN
     elif spct > 70:        barra = "#CA8A04"
     else:                  barra = "#16A34A"
 
@@ -531,7 +610,7 @@ def _render_card(t):
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
     origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
-    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
     num_com = len(t.get("comentarios",[]))
     pendente_vencido = ticket_vencido_pendente(t)
 
@@ -592,7 +671,7 @@ def _detalhe_corpo(t, tid, user, papel):
     sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
     pendente_vencido = ticket_vencido_pendente(t)
 
     if pendente_vencido:
