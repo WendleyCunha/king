@@ -13,6 +13,7 @@ Correções / novidades nesta versão:
         - operacional → só os próprios tickets
         - supervisor  → todos os tickets + aba "Equipe" do seu departamento
         - adm         → tudo de todos
+  [6] ADM pode excluir TODOS os tickets pelo painel Sync Zendesk.
 """
 import streamlit as st
 import pandas as pd
@@ -329,6 +330,22 @@ def sync_zendesk() -> tuple:
         return True, len(tickets), f"{len(tickets)} tickets sincronizados"
     except Exception as e:
         return False, 0, str(e)
+
+# ── Exclusão total (ADM) ───────────────────────────────────────────
+def deletar_todos_tickets() -> int:
+    """Deleta TODOS os documentos da coleção de tickets. Retorna a quantidade."""
+    db = get_db()
+    total = 0
+    while True:
+        docs = list(db.collection(COLECAO).limit(400).stream())
+        if not docs:
+            break
+        batch = db.batch()
+        for doc in docs:
+            batch.delete(doc.reference)
+            total += 1
+        batch.commit()
+    return total
 
 # ═══════════════════════════════════════════════════════════════════
 # RENDERIZAÇÃO
@@ -1083,6 +1100,7 @@ def _render_sync():
             prog.empty()
             st.success(f"✅ {total} tickets importados para o Firestore!")
 
+    # ── Estatísticas ──────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Tickets no Firestore por origem")
     todos2 = listar_tickets()
@@ -1092,3 +1110,48 @@ def _render_sync():
         columns=["Origem","Qtd"]
     )
     st.dataframe(df_orig, use_container_width=True, hide_index=True)
+
+    # ── ⚠️ ZONA DE PERIGO — exclusão total (só ADM) ───────────────
+    st.markdown("---")
+    st.markdown(_html("""
+    <div style="border:2px solid #8A6D1F;border-radius:12px;padding:16px 20px;
+                background:#FBF3D9;margin-top:8px;">
+        <span style="font-size:1rem;font-weight:800;color:#7A5C12;">
+            ⚠️ Zona de Perigo — Exclusão Total de Tickets
+        </span><br>
+        <span style="font-size:0.82rem;color:#7A5C12;">
+            Esta ação remove <b>permanentemente</b> todos os tickets do banco de dados.
+            Não pode ser desfeita.
+        </span>
+    </div>
+    """), unsafe_allow_html=True)
+
+    st.markdown("")
+    total_tickets = len(todos2)
+    st.caption(f"Atualmente há **{total_tickets}** ticket(s) no banco de dados.")
+
+    conf1 = st.checkbox(
+        f"Confirmo que quero excluir TODOS os {total_tickets} ticket(s) do banco de dados.",
+        key="del_conf1"
+    )
+    conf2 = st.checkbox(
+        "Entendo que esta ação é IRREVERSÍVEL e não há como recuperar os dados.",
+        key="del_conf2"
+    )
+
+    botao_ativo = conf1 and conf2
+    if st.button(
+        "🗑️ Excluir TODOS os tickets permanentemente",
+        type="primary",
+        use_container_width=True,
+        disabled=not botao_ativo,
+        key="btn_del_todos"
+    ):
+        with st.spinner(f"Excluindo {total_tickets} ticket(s)..."):
+            qt = deletar_todos_tickets()
+        st.success(f"✅ {qt} ticket(s) excluído(s) com sucesso. O banco de dados está vazio.")
+        for k in ("del_conf1", "del_conf2"):
+            if k in st.session_state:
+                del st.session_state[k]
+        time.sleep(1.5)
+        st.rerun()
