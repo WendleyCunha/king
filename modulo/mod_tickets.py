@@ -115,6 +115,28 @@ def ticket_visivel(t, user, papel) -> bool:
     # operacional
     return _usuario_atende(t, user)
 
+# ── Popup (modal) de detalhe ───────────────────────────────────────
+def abrir_ticket_popup(tid, user, papel):
+    """Abre o detalhe do ticket num POPUP (st.dialog). Se a versão do
+    Streamlit não suportar, cai no modo detalhe inline."""
+    deco = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if deco is None:
+        st.session_state.tk_detalhe = tid
+        st.session_state.tk_modo    = "detalhe"
+        st.rerun()
+        return
+    try:
+        @deco("Detalhe do Ticket", width="large")
+        def _popup():
+            _carregar_e_render_detalhe(tid, user, papel, modal=True)
+        _popup()
+    except TypeError:
+        # versões antigas sem o parâmetro width
+        @deco("Detalhe do Ticket")
+        def _popup2():
+            _carregar_e_render_detalhe(tid, user, papel, modal=True)
+        _popup2()
+
 # ── CRUD Firestore ─────────────────────────────────────────────────
 def listar_tickets() -> list:
     docs = get_db().collection(COLECAO).stream()
@@ -244,8 +266,14 @@ def renderizar_tickets(papel: str, user: dict = None):
     if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
     if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
 
-    # ── Layout: filas + conteúdo ──────────────────────────────────
-    col_filas, col_main = st.columns([1, 3.5])
+    # ── Layout: filas + barra vertical + conteúdo ─────────────────
+    col_filas, col_sep, col_main = st.columns([1, 0.06, 3.4])
+
+    with col_sep:
+        st.markdown(_html(
+            '<div style="border-left:2px solid #C9A84C;min-height:680px;'
+            'width:1px;margin:0 auto;opacity:.6;"></div>'
+        ), unsafe_allow_html=True)
 
     with col_filas:
         st.markdown("**Filas de Trabalho**")
@@ -320,10 +348,11 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.markdown(f"**{len(filtrados)} ticket(s)**")
                 for t in filtrados:
                     _render_card(t)
-                    if st.button("Abrir", key=f"open_{t.get('id','')}"):
-                        st.session_state.tk_detalhe = t.get("id")
-                        st.session_state.tk_modo    = "detalhe"
-                        st.rerun()
+                    id_vis = t.get("id_zendesk", t.get("id","")[:8])
+                    # Botão full-width "colado" ao card → abre POPUP
+                    if st.button(f"🔍  Abrir  #{id_vis}", key=f"open_{t.get('id','')}",
+                                 use_container_width=True):
+                        abrir_ticket_popup(t.get("id"), user, papel)
 
         # ══ DETALHE ══════════════════════════════════════════════
         elif modo == "detalhe":
@@ -359,7 +388,9 @@ def _render_card(t):
     tabul  = esc(t.get("tabulacao") or "")
     titulo = esc(str(t.get("assunto","Sem título"))[:55])
     id_vis = esc(t.get("id_zendesk", tid[:8]))
-    solic  = esc(t.get("solicitante_nome", t.get("solicitante","—")))
+    cliente = esc(t.get("cliente_nome") or t.get("solicitante_nome", t.get("solicitante","—")))
+    cli_cod = t.get("cliente_codigo")
+    cliente_txt = f"{cliente}" + (f" ({esc(cli_cod)})" if cli_cod else "")
     criado = esc(t.get("criado_em","")[:16])
 
     blink    = '<span class="tk-blink">SLA VENCIDO</span>' if pendente_vencido else ""
@@ -372,7 +403,7 @@ def _render_card(t):
             <div>
                 <div class="tk-card-title">{origem_icon} #{id_vis} — {titulo}</div>
                 <div class="tk-card-meta">
-                    🏢 {dep}{meta_tab} &nbsp;·&nbsp; {solic} &nbsp;·&nbsp; {criado}{meta_com}
+                    🏢 {dep}{meta_tab} &nbsp;·&nbsp; 🧾 {cliente_txt} &nbsp;·&nbsp; {criado}{meta_com}
                 </div>
             </div>
             <div style="text-align:right;white-space:nowrap;">
@@ -386,25 +417,32 @@ def _render_card(t):
     </div>"""), unsafe_allow_html=True)
 
 
-def _render_detalhe(tid, user, papel):
+def _carregar_e_render_detalhe(tid, user, papel, modal=False):
+    """Carrega o ticket e renderiza o corpo. Usado pelo popup e pelo modo inline."""
     if not tid:
-        st.session_state.tk_modo = "lista"; st.rerun(); return
+        if not modal:
+            st.session_state.tk_modo = "lista"; st.rerun()
+        return
     doc = get_db().collection(COLECAO).document(tid).get()
     if not doc.exists:
         st.error("Ticket não encontrado.")
-        if st.button("← Voltar para a fila"):
-            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
         return
+    _detalhe_corpo(doc.to_dict(), tid, user, papel)
 
-    t = doc.to_dict()
+
+def _render_detalhe(tid, user, papel):
+    """Modo inline (fallback quando não há st.dialog)."""
+    if st.button("← Voltar para a fila"):
+        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+    _carregar_e_render_detalhe(tid, user, papel, modal=False)
+
+
+def _detalhe_corpo(t, tid, user, papel):
     sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
     sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
     pendente_vencido = ticket_vencido_pendente(t)
-
-    if st.button("← Voltar para a fila"):
-        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
 
     if pendente_vencido:
         st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o SLA VENCIDO!</div>'),
@@ -417,6 +455,9 @@ def _render_detalhe(tid, user, papel):
     criado = esc(t.get("criado_em","")[:16])
     atend  = t.get("atendentes", [])
     atend_str = esc(", ".join(atend)) if atend else "🌐 Todo o departamento"
+    cli_cod  = esc(t.get("cliente_codigo") or "—")
+    cli_nome = esc(t.get("cliente_nome") or "—")
+    solicit  = esc(t.get("solicitante_nome") or "—")
 
     st.markdown(_html(f"""
     <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};
@@ -428,25 +469,30 @@ def _render_detalhe(tid, user, papel):
                 🏢 {dep} &nbsp;·&nbsp; 📋 {tabul} &nbsp;·&nbsp; {criado}
             </span>
         </div>
+        <div style="font-size:0.8rem;color:#2c3e50;margin-bottom:6px;">
+            🧾 Cliente: <b>{cli_nome}</b> &nbsp;·&nbsp; Código: <b>{cli_cod}</b>
+        </div>
         <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
-            👥 Atendentes: {atend_str} &nbsp;·&nbsp; ⏱ SLA: <b style="color:{sla_cor};">{esc(sl)}</b>
+            🙋 Solicitante: {solicit} &nbsp;·&nbsp; 👥 Atendentes: {atend_str}
+            &nbsp;·&nbsp; ⏱ SLA: <b style="color:{sla_cor};">{esc(sl)}</b>
         </div>
     </div>"""), unsafe_allow_html=True)
 
-    # Descrição — texto puro e seguro (NÃO renderiza HTML do usuário)
+    # Descrição — texto puro e seguro
     st.markdown("**📝 Descrição**")
     st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
-                 height=140, disabled=True, label_visibility="collapsed")
+                 height=140, disabled=True, label_visibility="collapsed",
+                 key=f"desc_{tid}")
 
     # Ações — supervisor/adm
     if papel in ("supervisor","adm"):
         da1, da2, da3 = st.columns(3)
         novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
-            index=list(STATUS_CFG.keys()).index(t.get("status","aberto")), key="det_status")
+            index=list(STATUS_CFG.keys()).index(t.get("status","aberto")), key=f"det_status_{tid}")
         nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
-            index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")), key="det_prio")
+            index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")), key=f"det_prio_{tid}")
         da3.markdown("<br>", unsafe_allow_html=True)
-        if da3.button("💾 Salvar", type="primary", use_container_width=True):
+        if da3.button("💾 Salvar", type="primary", use_container_width=True, key=f"det_save_{tid}"):
             atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
             st.success("Atualizado!"); time.sleep(.4); st.rerun()
 
@@ -530,14 +576,21 @@ def _render_novo(user):
         assunto    = nc1.text_input("Assunto *", placeholder="Descreva o problema")
         prioridade = nc2.selectbox("Prioridade", list(PRIO_CFG.keys()),
                                    index=list(PRIO_CFG.keys()).index(prio_padrao))
+
+        # Dados do CLIENTE (Solicitante = usuário logado, automático)
+        cl1, cl2 = st.columns([1,2])
+        cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234")
+        cli_nome   = cl2.text_input("Nome do cliente *", placeholder="Ex: João da Silva")
+
         descricao  = st.text_area("Descrição *", height=120)
-        nd1, nd2 = st.columns(2)
-        sol_nome  = nd1.text_input("Solicitante", value=user.get("nome",""))
-        sol_email = nd2.text_input("E-mail", placeholder="email@kingstar.com.br")
+
+        st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**")
 
         if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
             if not assunto.strip() or not descricao.strip():
                 st.error("Preencha Assunto e Descrição.")
+            elif not cli_codigo.strip() or not cli_nome.strip():
+                st.error("Informe o Código e o Nome do cliente.")
             else:
                 novo_id = criar_ticket({
                     "assunto": assunto.strip(), "descricao": descricao.strip(),
@@ -548,7 +601,9 @@ def _render_novo(user):
                     "prioridade": prioridade,
                     "horas_sla": sla_h,               # Regra 4
                     "atendentes": dest["atendentes"], # Regra 2
-                    "solicitante_nome": sol_nome, "solicitante_email": sol_email,
+                    "cliente_codigo": cli_codigo.strip(),
+                    "cliente_nome": cli_nome.strip(),
+                    "solicitante_nome": user.get("nome",""),   # sempre o logado
                     "aberto_por": user.get("usuario",""),
                 })
                 st.success(f"✅ Chamado **#{novo_id[:8]}** aberto em **{dep_sel}**! "
@@ -616,10 +671,9 @@ def _render_equipe(user, papel, todos_geral):
             with st.expander(f"Ver tickets de {nome} ({len(meus)})"):
                 for t in meus:
                     _render_card(t)
-                    if st.button("Abrir", key=f"eqopen_{uname}_{t.get('id','')}"):
-                        st.session_state.tk_detalhe = t.get("id")
-                        st.session_state.tk_modo    = "detalhe"
-                        st.rerun()
+                    if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
+                                 key=f"eqopen_{uname}_{t.get('id','')}", use_container_width=True):
+                        abrir_ticket_popup(t.get("id"), user, papel)
 
 
 def _render_sync():
