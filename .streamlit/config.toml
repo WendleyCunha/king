@@ -1,0 +1,11 @@
+[theme]
+# Cor primária dourada da KingStar — substitui o vermelho padrão do Streamlit
+# em botões, bordas de foco de campos, sliders, etc. (inclusive dentro de popups)
+primaryColor = "#C9A84C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F2E8"
+textColor = "#2C3E50"
+
+[server]
+# Mantém a sessão estável (evita recarregar a página inteira)
+runOnSave = false
