@@ -9,6 +9,10 @@ from database import (
     obter_tickets_db, obter_datas_disponiveis_db,
     modulos_do_usuario, tem_permissao, pode_exportar, pode_deletar,
     MODULOS_PADRAO,
+    # ── novas funções ──
+    listar_departamentos, criar_departamento, deletar_departamento,
+    atualizar_departamento_usuario,
+    listar_tabulacoes, criar_tabulacao, atualizar_tabulacao, deletar_tabulacao,
 )
 from modulo.mod_rastreio import renderizar_rastreio
 
@@ -241,43 +245,70 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
-    aba_u, aba_m = st.tabs(["👥 Usuários", "🔒 Permissões"])
+    aba_u, aba_m, aba_dep, aba_tab = st.tabs(
+        ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "📋 Tabulação"]
+    )
 
+    # ─── ABA USUÁRIOS ─────────────────────────────────────────────
     with aba_u:
+        deps      = listar_departamentos()
+        dep_nomes = [d["nome"] for d in deps]
+
         with st.expander("➕ Cadastrar Novo Usuário", expanded=True):
+            if not dep_nomes:
+                st.info("⚠️ Cadastre um departamento na aba **Departamentos** antes de criar usuários.")
             with st.form("form_novo"):
                 c1, c2  = st.columns(2)
                 n_nome  = c1.text_input("Nome Completo")
                 n_user  = c2.text_input("Login")
                 n_senha = c1.text_input("Senha", type="password")
                 n_nivel = c2.selectbox("Nível", ["operacional","supervisor","adm"])
+                # ── Campo DEPARTAMENTO (Regra 1) ──
+                n_dep   = st.selectbox("Departamento",
+                                       options=(["— Selecione —"] + dep_nomes),
+                                       help="Tickets do departamento caem automaticamente para este usuário.")
                 ma, mb  = st.columns(2)
                 m_r     = ma.checkbox("Rastreio", value=True)
                 m_t     = mb.checkbox("Tickets", value=n_nivel in ("supervisor","adm"))
                 if st.form_submit_button("Criar"):
-                    if n_nome and n_user and n_senha:
-                        ms = [m for m,v in [("rastreio",m_r),("tickets",m_t),("exportar",m_r)] if v]
-                        criar_usuario(n_nome, n_user, n_senha, n_nivel, ms)
-                        st.success(f"Usuário **{n_user}** criado!")
-                        time.sleep(1); st.rerun()
-                    else:
+                    if not (n_nome and n_user and n_senha):
                         st.warning("Preencha todos os campos.")
+                    elif n_dep == "— Selecione —":
+                        st.warning("Selecione um departamento.")
+                    else:
+                        ms = [m for m,v in [("rastreio",m_r),("tickets",m_t),("exportar",m_r)] if v]
+                        criar_usuario(n_nome, n_user, n_senha, n_nivel, ms, departamento=n_dep)
+                        st.success(f"Usuário **{n_user}** criado no depto **{n_dep}**!")
+                        time.sleep(1); st.rerun()
 
         st.markdown("---")
         st.markdown("### Usuários Ativos")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
-            with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {u.get('role','—').upper()}"):
+            dep   = u.get("departamento", "—") or "—"
+            with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {u.get('role','—').upper()} · 🏢 {dep}"):
+                # Trocar departamento de usuário existente
+                if dep_nomes:
+                    idx = (dep_nomes.index(dep) + 1) if dep in dep_nomes else 0
+                    novo_dep = st.selectbox("Departamento",
+                                            ["— Selecione —"] + dep_nomes,
+                                            index=idx, key=f"dep_{uname}_{i_u}")
+                    if st.button("💾 Atualizar departamento", key=f"svdep_{uname}_{i_u}"):
+                        if novo_dep != "— Selecione —":
+                            atualizar_departamento_usuario(uname, novo_dep)
+                            st.success("Departamento atualizado!"); time.sleep(.5); st.rerun()
                 if uname != "admin":
                     if st.button("🗑️ Excluir usuário", key=f"del_{uname}_{i_u}"):
                         deletar_usuario(uname); st.rerun()
 
+    # ─── ABA PERMISSÕES ───────────────────────────────────────────
     with aba_m:
         st.markdown("### Permissões por Usuário")
         for i_u, u in enumerate(listar_usuarios()):
             uname = u.get("usuario", f"u{i_u}")
             umods = u.get("modulos", MODULOS_PADRAO.get(u.get("role","operacional"), []))
-            with st.expander(f"**{u.get('nome','—')}** · `{uname}`"):
+            dep   = u.get("departamento", "—") or "—"
+            with st.expander(f"**{u.get('nome','—')}** · `{uname}` · 🏢 {dep}"):
                 ma, mb = st.columns(2)
                 nr = ma.checkbox("Rastreio", value="rastreio" in umods, key=f"r_{uname}")
                 nt = mb.checkbox("Tickets",  value="tickets"  in umods, key=f"t_{uname}")
@@ -286,10 +317,130 @@ elif modulo_ativo == "config" and papel == "adm":
                     atualizar_modulos_usuario(uname, ns)
                     st.success("Salvo!"); time.sleep(.5); st.rerun()
 
+    # ─── ABA DEPARTAMENTOS ────────────────────────────────────────
+    with aba_dep:
+        st.markdown("### 🏢 Departamentos")
+        with st.expander("➕ Novo Departamento", expanded=True):
+            with st.form("form_dep"):
+                d_nome = st.text_input("Nome do Departamento",
+                                       placeholder="Ex: Pós-venda, Logística, Financeiro...")
+                d_desc = st.text_area("Descrição (opcional)", height=80)
+                if st.form_submit_button("Criar Departamento"):
+                    ok, msg = criar_departamento(d_nome, d_desc)
+                    (st.success if ok else st.error)(msg)
+                    if ok: time.sleep(.8); st.rerun()
+
+        st.markdown("---")
+        deps = listar_departamentos()
+        if not deps:
+            st.info("Nenhum departamento cadastrado ainda.")
+        for dep in deps:
+            users_dep = [u for u in listar_usuarios() if u.get("departamento") == dep["nome"]]
+            tabs_dep  = [t for t in listar_tabulacoes() if t.get("departamento") == dep["nome"]]
+            with st.expander(f"🏢 **{dep['nome']}** · 👤 {len(users_dep)} usuário(s) · 📋 {len(tabs_dep)} tabulação(ões)"):
+                if dep.get("descricao"):
+                    st.caption(dep["descricao"])
+                if users_dep:
+                    st.markdown("**Usuários:** " + ", ".join(f"`{u['usuario']}`" for u in users_dep))
+                if tabs_dep:
+                    st.markdown("**Tabulações:** " + ", ".join(f"`{t['nome']}`" for t in tabs_dep))
+                if st.button(f"🗑️ Excluir '{dep['nome']}'", key=f"deldep_{dep['id']}"):
+                    ok, msg = deletar_departamento(dep["id"])
+                    (st.success if ok else st.error)(msg)
+                    if ok: time.sleep(.5); st.rerun()
+
+    # ─── ABA TABULAÇÃO ────────────────────────────────────────────
+    with aba_tab:
+        st.markdown("### 📋 Tabulações por Departamento")
+        st.caption("Crie motivos/categorias por departamento e vincule atendentes específicos "
+                   "(ou deixe liberado para todo o departamento).")
+
+        deps           = listar_departamentos()
+        dep_nomes      = [d["nome"] for d in deps]
+        todos_usuarios = listar_usuarios()
+
+        with st.expander("➕ Nova Tabulação", expanded=True):
+            if not dep_nomes:
+                st.warning("⚠️ Cadastre um departamento antes de criar tabulações.")
+            else:
+                with st.form("form_tab"):
+                    tc1, tc2 = st.columns(2)
+                    t_nome = tc1.text_input("Nome da Tabulação",
+                                            placeholder="Ex: Troca de produto, Entrega atrasada...")
+                    t_dep  = tc2.selectbox("Departamento", dep_nomes)
+                    t_desc = st.text_area("Descrição (opcional)", height=70)
+
+                    # Atendentes do departamento escolhido (Regra 4)
+                    users_do_dep = [u for u in todos_usuarios if u.get("departamento") == t_dep]
+                    opts = {u["usuario"]: u.get("nome", u["usuario"]) for u in users_do_dep}
+                    t_atendentes = st.multiselect(
+                        "Atendentes específicos (vazio = todo o departamento)",
+                        options=list(opts.keys()),
+                        format_func=lambda x: f"{opts.get(x,x)} ({x})"
+                    )
+                    tp1, tp2 = st.columns(2)
+                    t_prio  = tp1.selectbox("Prioridade padrão", ["Normal","Alta","Urgente","Baixa"])
+                    t_sla   = tp2.number_input("SLA (horas)", min_value=1, max_value=720, value=24, step=1)
+
+                    if st.form_submit_button("Criar Tabulação"):
+                        ok, msg = criar_tabulacao(
+                            nome=t_nome, departamento=t_dep, descricao=t_desc,
+                            atendentes=t_atendentes, prioridade=t_prio, sla_horas=t_sla
+                        )
+                        (st.success if ok else st.error)(msg)
+                        if ok: time.sleep(.8); st.rerun()
+                st.caption("💡 Os atendentes listados são apenas os do departamento selecionado.")
+
+        st.markdown("---")
+        filtro = st.selectbox("🔍 Filtrar por departamento", ["Todos"] + dep_nomes, key="tab_filtro")
+        tabulacoes = listar_tabulacoes()
+        if filtro != "Todos":
+            tabulacoes = [t for t in tabulacoes if t.get("departamento") == filtro]
+
+        if not tabulacoes:
+            st.info("Nenhuma tabulação cadastrada.")
+        for tab in tabulacoes:
+            atend = tab.get("atendentes", [])
+            atend_str = (", ".join(f"`{a}`" for a in atend) if atend else "🌐 Todo o departamento")
+            with st.expander(f"📋 **{tab['nome']}** · 🏢 {tab.get('departamento','—')} · ⏱ {tab.get('sla_horas',24)}h"):
+                st.markdown(f"**Atendentes:** {atend_str}")
+                if tab.get("descricao"):
+                    st.markdown(f"**Descrição:** {tab['descricao']}")
+
+                st.markdown("**Editar:**")
+                users_dep = [u for u in todos_usuarios if u.get("departamento") == tab.get("departamento")]
+                opts = {u["usuario"]: u.get("nome", u["usuario"]) for u in users_dep}
+                # garante que atendentes já salvos apareçam mesmo se trocaram de depto
+                for a in atend:
+                    opts.setdefault(a, a)
+                novos = st.multiselect(
+                    "Atendentes", options=list(opts.keys()), default=atend,
+                    format_func=lambda x: f"{opts.get(x,x)} ({x})",
+                    key=f"atd_{tab['id']}"
+                )
+                e1, e2 = st.columns(2)
+                nova_prio = e1.selectbox("Prioridade", ["Normal","Alta","Urgente","Baixa"],
+                                         index=["Normal","Alta","Urgente","Baixa"].index(tab.get("prioridade","Normal")),
+                                         key=f"prio_{tab['id']}")
+                novo_sla  = e2.number_input("SLA (h)", min_value=1, max_value=720,
+                                            value=int(tab.get("sla_horas",24)), key=f"sla_{tab['id']}")
+                b1, b2 = st.columns(2)
+                if b1.button("💾 Salvar", key=f"svtab_{tab['id']}", type="primary"):
+                    ok, msg = atualizar_tabulacao(tab["id"], atendentes=novos,
+                                                  prioridade=nova_prio, sla_horas=novo_sla)
+                    (st.success if ok else st.error)(msg)
+                    if ok: time.sleep(.5); st.rerun()
+                if b2.button("🗑️ Excluir", key=f"deltab_{tab['id']}"):
+                    ok, msg = deletar_tabulacao(tab["id"])
+                    (st.success if ok else st.error)(msg)
+                    if ok: time.sleep(.5); st.rerun()
+
 else:
     # ── MINHA CONTA — qualquer usuário logado pode trocar a senha ──
     st.subheader("👤 Minha Conta")
-    st.markdown(f"**Nome:** {user['nome']}  |  **Login:** `{user.get('usuario','')}`  |  **Nível:** {papel.upper()}")
+    dep_user = user.get("departamento", "—") or "—"
+    st.markdown(f"**Nome:** {user['nome']}  |  **Login:** `{user.get('usuario','')}`  |  "
+                f"**Nível:** {papel.upper()}  |  **Departamento:** {dep_user}")
     st.markdown("---")
     st.markdown("### 🔑 Alterar Senha")
     with st.form("form_senha"):
