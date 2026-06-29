@@ -422,11 +422,20 @@ def renderizar_tickets(papel: str, user: dict = None):
     [data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover {
         background-color:#b8973f !important; border-color:#b8973f !important;
         color:#fff !important; }
+    /* TODO botão de formulário (Salvar/Enviar/Encerrar) em dourado — robusto p/ qualquer versão */
+    [data-testid="stFormSubmitButton"] button {
+        background-color:#C9A84C !important; border-color:#C9A84C !important; color:#fff !important; }
+    [data-testid="stFormSubmitButton"] button:hover {
+        background-color:#b8973f !important; border-color:#b8973f !important; color:#fff !important; }
     /* Foco de campos em dourado (remove a borda vermelha do tema) */
     .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
         border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
-    div[data-baseweb="select"] > div:focus-within {
+    div[data-baseweb="select"] > div:focus-within,
+    div[data-baseweb="select"] > div[aria-expanded="true"],
+    div[data-baseweb="input"]:focus-within {
         border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
+    /* cursor/realce do baseweb (caret) que fica vermelho */
+    div[data-baseweb="base-input"] input { caret-color:#C9A84C !important; }
     </style>
     """), unsafe_allow_html=True)
 
@@ -806,20 +815,23 @@ def _detalhe_corpo(t, tid, user, papel):
 
     # Novo comentário
     st.markdown("---")
+    pode_encerrar = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
     with st.form(f"form_com_{tid}", clear_on_submit=True):
         novo_com = st.text_area("Escrever resposta / comentário", height=80,
                                 placeholder="Digite a tratativa...")
         cc1, cc2 = st.columns([3,1])
         enviar = cc2.form_submit_button("Enviar", type="primary", use_container_width=True)
         encerrar = False
-        if papel in ("supervisor","adm"):
-            encerrar = cc1.form_submit_button("✅ Encerrar Ticket")
+        if pode_encerrar and t.get("status") in STATUS_ABERTOS:
+            encerrar = cc1.form_submit_button("✅ Encerrar Ticket (marcar como Resolvido)")
         if enviar and novo_com.strip():
             adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
             st.success("Enviado!"); time.sleep(.3); st.rerun()
         if encerrar:
-            atualizar_ticket(tid, {"status":"resolvido"})
-            st.success("Ticket encerrado!"); time.sleep(.5)
+            atualizar_ticket(tid, {"status": "resolvido"})
+            st.success("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
+                       "permanece em 'Todos os tickets'.")
+            time.sleep(.8)
             st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
 
 
