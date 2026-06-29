@@ -127,6 +127,23 @@ def pill(texto, bg, cor):
     return (f'<span style="background:{bg};color:{cor};padding:2px 10px;'
             f'border-radius:12px;font-size:0.72rem;font-weight:700;">{esc(texto)}</span>')
 
+def sla_estado(t) -> str:
+    """Retorna o estado do SLA: 'ok', 'warn' (faltam <=30min) ou 'venc' (estourou).
+    Só vale para tickets pendentes; resolvidos/cancelados sempre 'ok'."""
+    if t.get("status") not in STATUS_ABERTOS:
+        return "ok"
+    try:
+        dt = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        limite = dt + timedelta(hours=t.get("horas_sla", 24))
+        restante = (limite - datetime.now(BRT)).total_seconds()
+    except Exception:
+        return "ok"
+    if restante <= 0:
+        return "venc"
+    if restante <= 1800:      # 30 minutos
+        return "warn"
+    return "ok"
+
 def ticket_vencido_pendente(t) -> bool:
     """True se o SLA estourou E o ticket ainda está pendente."""
     if t.get("status") not in STATUS_ABERTOS:
@@ -293,16 +310,62 @@ def renderizar_tickets(papel: str, user: dict = None):
         font-weight:800; font-size:0.95rem; }
     .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-top:4px solid #C9A84C; }
+
+    /* ── Card clicável (o título é um botão) ── */
+    div[class*="st-key-tkcard_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-bottom:none !important; border-left:4px solid #C9A84C !important;
+        border-radius:10px 10px 0 0 !important; color:#2c3e50 !important;
+        font-weight:700 !important; font-size:0.92rem !important;
+        padding:12px 14px 8px !important; margin-bottom:0 !important;
+        transition:background .15s, box-shadow .15s; }
+    div[class*="st-key-tkcard_"] button:hover {
+        background:#eef4ff !important; border-color:#C9A84C !important; }
+    div[class*="st-key-tkcard_venc_"] button {
+        border-left-color:#DC2626 !important; animation:tkbordapiscar 1s infinite; }
+    div[class*="st-key-tkcard_warn_"] button {
+        border-left-color:#F59E0B !important; animation:tkbordapiscarsuave 1.6s infinite; }
+    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,0);} 50%{box-shadow:0 0 0 3px rgba(220,38,38,.30);} }
+    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0);} 50%{box-shadow:0 0 0 3px rgba(245,158,11,.25);} }
+    .tk-cardbody { background:#fff; border:1px solid #e2e8f0; border-top:none;
+        border-left:4px solid #C9A84C; border-radius:0 0 10px 10px;
+        padding:4px 14px 12px; margin:-10px 0 12px; }
+    .tk-cardbody.venc { border-left-color:#DC2626; }
+    .tk-cardbody.warn { border-left-color:#F59E0B; }
+    .tk-cardmeta { font-size:0.75rem; color:#64778d; margin:2px 0 6px; }
+    /* badges piscantes do SLA */
+    .tk-blink-venc { animation:tkpiscar 1s infinite; background:#DC2626; color:#fff;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:800; }
+    .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FEF3C7; color:#92400E;
+        border:1px solid #FCD34D; padding:1px 8px; border-radius:10px;
+        font-size:0.7rem; font-weight:700; }
     </style>
     """), unsafe_allow_html=True)
 
     # ── Estado ────────────────────────────────────────────────────
-    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "todos"
+    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "meus"
     if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
     if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
 
+    uname = user.get("usuario","")
+
+    # ── Conjuntos das filas ───────────────────────────────────────
+    meus      = [t for t in todos if t.get("aberto_por") == uname]   # abertos por mim
+    f_abertos = [t for t in todos if t.get("status") == "aberto"]
+    f_andam   = [t for t in todos if t.get("status") == "em_andamento"]
+    f_urg     = [t for t in todos if t.get("prioridade") == "urgente"]
+    f_venc    = [t for t in todos if ticket_vencido_pendente(t)]
+    f_global  = todos_geral                                          # GLOBAL: de todos
+
+    # ── Largura ajustável dos painéis ─────────────────────────────
+    with st.expander("↔️ Ajustar largura dos painéis", expanded=False):
+        st.slider("Largura da coluna de filas", 0.6, 2.4,
+                  float(st.session_state.get("tk_larg", 1.0)), 0.1, key="tk_larg")
+    larg = float(st.session_state.get("tk_larg", 1.0))
+
     # ── Layout: filas + barra vertical + conteúdo ─────────────────
-    col_filas, col_sep, col_main = st.columns([1, 0.06, 3.4])
+    col_filas, col_sep, col_main = st.columns([larg, 0.06, 4.0])
 
     with col_sep:
         st.markdown(_html(
@@ -312,17 +375,14 @@ def renderizar_tickets(papel: str, user: dict = None):
 
     with col_filas:
         st.markdown("**Filas de Trabalho**")
-        filas = [
-            ("todos",        "Todos os Tickets", ct["todos"],        False),
-            ("aberto",       "Abertos",          ct["aberto"],       False),
-            ("em_andamento", "Em Andamento",     ct["em_andamento"], False),
-            ("aguardando",   "Aguardando",       ct["aguardando"],   False),
-            ("resolvido",    "Resolvidos",       ct["resolvido"],    False),
-            ("urgente",      "Urgentes",         ct["urgente"],      ct["urgente"]>0),
-            ("vencidos",     "SLA Vencido",      ct["vencidos"],     ct["vencidos"]>0),
-            ("zendesk",      "Zendesk / TERMOS", ct["zendesk"],      False),
+        caixa1 = [
+            ("meus",         "📌 Meus tickets", len(meus)),
+            ("aberto",       "Abertos",         len(f_abertos)),
+            ("em_andamento", "Em andamento",    len(f_andam)),
+            ("urgente",      "Urgentes",        len(f_urg)),
+            ("vencidos",     "SLA vencidos",    len(f_venc)),
         ]
-        for key, label, qtd, _alerta in filas:
+        for key, label, qtd in caixa1:
             if st.button(f"{label}  ({qtd})", key=f"fila_{key}",
                          use_container_width=True,
                          type="primary" if st.session_state.tk_fila == key else "secondary"):
@@ -330,6 +390,18 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.session_state.tk_modo    = "lista"
                 st.session_state.tk_detalhe = None
                 st.rerun()
+
+        # Caixa separada — VISÃO GLOBAL (todos os tickets de todos)
+        st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
+                    unsafe_allow_html=True)
+        st.caption("VISÃO GLOBAL")
+        if st.button(f"🌐 Todos os tickets  ({len(f_global)})", key="fila_global",
+                     use_container_width=True,
+                     type="primary" if st.session_state.tk_fila == "global" else "secondary"):
+            st.session_state.tk_fila    = "global"
+            st.session_state.tk_modo    = "lista"
+            st.session_state.tk_detalhe = None
+            st.rerun()
 
         st.markdown("---")
         st.markdown("**Ações**")
@@ -348,24 +420,23 @@ def renderizar_tickets(papel: str, user: dict = None):
     with col_main:
         modo = st.session_state.tk_modo
 
-        # Banner piscante de SLA vencido (Regra 4) — em qualquer modo
-        meus_vencidos   = [t for t in todos if ticket_vencido_pendente(t) and _usuario_atende(t, user)]
-        escopo_vencidos = [t for t in todos if ticket_vencido_pendente(t)]
-        alerta_lista = meus_vencidos if papel == "operacional" else escopo_vencidos
+        # Banner piscante de SLA vencido — em qualquer modo
+        meus_vencidos   = [t for t in meus if ticket_vencido_pendente(t)]
+        alerta_lista = meus_vencidos if papel == "operacional" else f_venc
         if alerta_lista:
             st.markdown(_html(
                 f'<div class="tk-banner">⚠️ {len(alerta_lista)} ticket(s) com SLA VENCIDO '
-                f'aguardando tratativa! Verifique a fila "SLA Vencido".</div>'
+                f'aguardando tratativa! Verifique a fila "SLA vencidos".</div>'
             ), unsafe_allow_html=True)
 
         # ══ LISTA ════════════════════════════════════════════════
         if modo in ("lista", None):
             fila = st.session_state.tk_fila
-            if   fila == "todos":    filtrados = todos
-            elif fila == "urgente":  filtrados = [t for t in todos if t.get("prioridade")=="urgente"]
-            elif fila == "vencidos": filtrados = [t for t in todos if ticket_vencido_pendente(t)]
-            elif fila == "zendesk":  filtrados = [t for t in todos if "zendesk" in t.get("origem","")]
-            else:                    filtrados = [t for t in todos if t.get("status")==fila]
+            mapa_fila = {
+                "meus": meus, "aberto": f_abertos, "em_andamento": f_andam,
+                "urgente": f_urg, "vencidos": f_venc, "global": f_global,
+            }
+            filtrados = mapa_fila.get(fila, todos)
 
             busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
                                   label_visibility="collapsed", key="tk_busca")
@@ -373,17 +444,15 @@ def renderizar_tickets(papel: str, user: dict = None):
                 b = busca.strip().lower()
                 filtrados = [t for t in filtrados if b in texto_busca(t)]
 
+            nomes_fila = {k: l for k, l, _ in caixa1}
+            nomes_fila["global"] = "🌐 Todos os tickets"
+            st.markdown(f"**{nomes_fila.get(fila, fila)} — {len(filtrados)} ticket(s)**")
+
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
             else:
-                st.markdown(f"**{len(filtrados)} ticket(s)**")
                 for t in filtrados:
-                    _render_card(t)
-                    id_vis = t.get("id_zendesk", t.get("id","")[:8])
-                    # Botão full-width "colado" ao card → abre POPUP
-                    if st.button(f"🔍  Abrir  #{id_vis}", key=f"open_{t.get('id','')}",
-                                 use_container_width=True):
-                        abrir_ticket_popup(t.get("id"), user, papel)
+                    _render_card_clicavel(t, user, papel)
 
         # ══ DETALHE ══════════════════════════════════════════════
         elif modo == "detalhe":
@@ -405,6 +474,57 @@ def renderizar_tickets(papel: str, user: dict = None):
 # ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
+def _render_card_clicavel(t, user, papel):
+    """Card cujo título é um BOTÃO (clica em cima → abre o popup).
+    Borda/realce piscam conforme o SLA (suave a 30min, forte se vencido)
+    e a barra de tempo (verde/âmbar/vermelha) é mantida."""
+    tid    = t.get("id","")
+    estado = sla_estado(t)                       # ok | warn | venc
+    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sv = STATUS_CFG.get(t.get("status","aberto"), ("—",))[0]
+    pv = PRIO_CFG.get(t.get("prioridade","normal"), ("—",))[0]
+    icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
+    idv  = t.get("id_zendesk", tid[:8])
+    titulo = str(t.get("assunto","Sem título"))[:60]
+    dep    = t.get("departamento") or t.get("categoria") or "—"
+    cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
+    cli_cod = t.get("cliente_codigo")
+    cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
+    num_com = len(t.get("comentarios", []))
+
+    # Cor da barra de tempo (mantém o verde quando saudável)
+    if   estado == "venc": barra = "#DC2626"
+    elif estado == "warn": barra = "#F59E0B"
+    elif spct > 70:        barra = "#CA8A04"
+    else:                  barra = "#16A34A"
+
+    # Badge piscante por estado
+    if estado == "venc":
+        badge = '<span class="tk-blink-venc">⛔ SLA VENCIDO</span>'
+    elif estado == "warn":
+        badge = '<span class="tk-blink-warn">⏰ Faltam &lt; 30min</span>'
+    else:
+        badge = ""
+
+    # Título clicável = abre o popup
+    if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
+                 use_container_width=True):
+        abrir_ticket_popup(tid, user, papel)
+
+    meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
+    st.markdown(_html(f"""
+    <div class="tk-cardbody {estado if estado!='ok' else ''}">
+        <div class="tk-cardmeta">
+            🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)} &nbsp;·&nbsp;
+            <b>{esc(sv)}</b> / {esc(pv)}{meta_com} &nbsp; {badge}
+        </div>
+        <div class="tk-sla-bar">
+            <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{barra};"></div>
+        </div>
+        <div class="tk-sla-text">SLA: <b style="color:{barra};">{esc(sl)}</b></div>
+    </div>"""), unsafe_allow_html=True)
+
+
 def _render_card(t):
     tid   = t.get("id","")
     sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
