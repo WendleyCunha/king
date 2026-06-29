@@ -46,6 +46,7 @@ STATUS_CFG = {
     "em_andamento": ("Em Andamento", "#EFF6FF","#1D5FAE","#2563EB"),
     "aguardando":   ("Aguardando",   "#FFF7ED","#9A3412","#EA580C"),
     "resolvido":    ("Resolvido",    "#DCFCE7","#15803D","#16A34A"),
+    "finalizado":   ("Finalizado",   "#F3ECD9","#6B5A2A","#A98C3D"),
     "cancelado":    ("Cancelado",    "#F1F5F9","#475569","#64748B"),
 }
 
@@ -165,29 +166,48 @@ def _atribuido_a(t, user) -> bool:
     return (uname in t.get("atendentes", [])
             or t.get("atribuido_para") in (uname, nome))
 
+JANELA_VALIDACAO_H = 24   # horas que o autor tem para validar um ticket resolvido
+
+def _horas_desde_atualizacao(t) -> float:
+    try:
+        dt = datetime.fromisoformat(str(t.get("atualizado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        return (datetime.now(BRT) - dt).total_seconds() / 3600.0
+    except Exception:
+        return 0.0
+
+def resolvido_em_validacao(t) -> bool:
+    """Resolvido há menos de 24h, sem nova interação → ainda aguarda validação do autor."""
+    return t.get("status") == "resolvido" and _horas_desde_atualizacao(t) < JANELA_VALIDACAO_H
+
 def classificar_fila(t, user) -> str:
     """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma).
     O ticket nunca está em duas caixas — apenas caminha entre elas.
 
     Precedência:
-      1) meus        → tickets ABERTOS pelo usuário logado (a qualquer depto),
-                       independente do status (é o acompanhamento do que eu abri).
+      1) meus        → tickets ABERTOS pelo usuário logado.
+                       Se resolvido: fica em 'meus' por até 24h para o autor VALIDAR;
+                       depois disso (ou se finalizado/cancelado) sai de 'meus'.
       2) (a partir daqui, só tickets que caíram para EU atender)
       3) vencidos    → pendente e com SLA estourado.
       4) aberto      → recém-nascido (status 'aberto'), sem interação.
-      5) urgente     → já em interação (em andamento/aguardando) e prioridade urgente.
+      5) urgente     → já em interação e prioridade urgente.
       6) em_andamento→ já em interação, prioridade normal.
-      7) None        → resolvidos/cancelados ou que não são meus.
+      7) None        → resolvidos/finalizados/cancelados ou que não são meus.
     """
     uname = user.get("usuario","")
-    # 1) Tickets que EU abri (acompanhamento) — têm prioridade sobre as demais
+    # 1) Tickets que EU abri (acompanhamento / validação)
     if t.get("aberto_por") == uname:
+        status = t.get("status")
+        if status in ("cancelado", "finalizado"):
+            return None
+        if status == "resolvido":
+            return "meus" if resolvido_em_validacao(t) else None
         return "meus"
     # 2) Daqui pra frente, só o que caiu para eu atender
     if not _atribuido_a(t, user):
         return None
     status = t.get("status")
-    if status not in STATUS_ABERTOS:          # resolvido/cancelado → fora das caixas
+    if status not in STATUS_ABERTOS:          # resolvido/finalizado/cancelado → fora
         return None
     # 3) SLA estourado tem prioridade
     if ticket_vencido_pendente(t):
@@ -389,15 +409,24 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FBF3D9; color:#7A5C12;
         border:1px solid #D4A12C; padding:1px 8px; border-radius:10px;
         font-size:0.7rem; font-weight:700; }
-    /* Botões "primary" em dourado (some o vermelho do tema) */
-    button[kind="primary"], button[data-testid="baseButton-primary"],
-    [data-testid="stBaseButton-primary"] {
+    .tk-badge-val { background:#F3ECD9; color:#6B5A2A; border:1px solid #A98C3D;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
+    /* Botões "primary" e de formulário em dourado (some o vermelho do tema) */
+    button[kind="primary"], button[kind="primaryFormSubmit"],
+    button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
+    [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
         background-color:#C9A84C !important; border-color:#C9A84C !important;
         color:#fff !important; }
-    button[kind="primary"]:hover, button[data-testid="baseButton-primary"]:hover,
-    [data-testid="stBaseButton-primary"]:hover {
+    button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover,
+    button[data-testid="baseButton-primary"]:hover, button[data-testid="baseButton-primaryFormSubmit"]:hover,
+    [data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover {
         background-color:#b8973f !important; border-color:#b8973f !important;
         color:#fff !important; }
+    /* Foco de campos em dourado (remove a borda vermelha do tema) */
+    .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+        border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
+    div[data-baseweb="select"] > div:focus-within {
+        border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
     </style>
     """), unsafe_allow_html=True)
 
@@ -585,6 +614,11 @@ def _render_card_clicavel(t, user, papel):
     else:
         badge = ""
 
+    # Aguardando validação do autor (resolvido, dentro da janela de 24h)
+    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario") \
+            and resolvido_em_validacao(t):
+        badge += ' <span class="tk-badge-val">✔ valide este chamado</span>'
+
     # Título clicável = abre o popup
     if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
                  use_container_width=True):
@@ -730,6 +764,25 @@ def _detalhe_corpo(t, tid, user, papel):
                 atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
                 st.success("Atualizado! O ticket foi movido de fila.")
                 time.sleep(.5); st.rerun()
+
+    # Validação do AUTOR — quando o ticket foi resolvido, quem abriu valida
+    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario"):
+        st.markdown(_html(
+            '<div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;'
+            'padding:12px 14px;margin:6px 0 12px;color:#6B5A2A;font-weight:600;">'
+            '✔ Este chamado foi marcado como <b>Resolvido</b>. Valide para encerrar '
+            'definitivamente, ou reabra se não foi resolvido.<br>'
+            '<span style="font-weight:500;font-size:0.82rem;">Sem ação em 24h, ele é '
+            'encerrado automaticamente.</span></div>'), unsafe_allow_html=True)
+        cva, cvb = st.columns(2)
+        if cva.button("✅ Validar e encerrar", key=f"val_{tid}", type="primary",
+                      use_container_width=True):
+            atualizar_ticket(tid, {"status": "finalizado"})
+            st.success("Chamado encerrado!"); time.sleep(.5)
+            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+        if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
+            atualizar_ticket(tid, {"status": "em_andamento"})
+            st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
 
     # Histórico
     st.markdown("#### 💬 Histórico")
