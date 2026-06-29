@@ -757,43 +757,62 @@ def _detalhe_corpo(t, tid, user, papel):
                  height=140, disabled=True, label_visibility="collapsed",
                  key=f"desc_{tid}")
 
-    # Ações — supervisor/adm (dentro de um FORM para gravar de forma confiável,
-    # inclusive dentro do popup — assim mover de fila funciona)
-    if papel in ("supervisor","adm"):
-        with st.form(f"form_status_{tid}"):
-            da1, da2 = st.columns(2)
-            novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
-                index=list(STATUS_CFG.keys()).index(t.get("status","aberto")),
-                format_func=lambda k: STATUS_CFG[k][0], key=f"det_status_{tid}")
-            nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
-                index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")),
-                format_func=lambda k: PRIO_CFG[k][0], key=f"det_prio_{tid}")
-            if st.form_submit_button("💾 Salvar alterações", type="primary",
-                                     use_container_width=True):
-                atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
-                st.success("Atualizado! O ticket foi movido de fila.")
-                time.sleep(.5); st.rerun()
+    status_atual = t.get("status", "aberto")
+    terminal     = status_atual in ("finalizado", "cancelado")
+    pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
+    # Status editável só pelo atendente/supervisor/adm e enquanto não terminal.
+    # A PRIORIDADE nunca é editável aqui (vem do cadastro da tabulação).
+    status_edit  = pode_agir and not terminal
+    # Status que o atendente pode definir (sem 'finalizado' — isso é da validação do autor)
+    STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
 
-    # Validação do AUTOR — quando o ticket foi resolvido, quem abriu valida
-    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario"):
-        st.markdown(_html(
-            '<div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;'
-            'padding:12px 14px;margin:6px 0 12px;color:#6B5A2A;font-weight:600;">'
-            '✔ Este chamado foi marcado como <b>Resolvido</b>. Valide para encerrar '
-            'definitivamente, ou reabra se não foi resolvido.<br>'
-            '<span style="font-weight:500;font-size:0.82rem;">Sem ação em 24h, ele é '
-            'encerrado automaticamente.</span></div>'), unsafe_allow_html=True)
-        cva, cvb = st.columns(2)
-        if cva.button("✅ Validar e encerrar", key=f"val_{tid}", type="primary",
-                      use_container_width=True):
-            atualizar_ticket(tid, {"status": "finalizado"})
-            st.success("Chamado encerrado!"); time.sleep(.5)
-            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
-        if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
-            atualizar_ticket(tid, {"status": "em_andamento"})
-            st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
+    # ── Tratativa: Status + Prioridade + resposta + Enviar (tudo junto) ──
+    st.markdown("---")
+    with st.form(f"form_trat_{tid}", clear_on_submit=True):
+        cs1, cs2 = st.columns(2)
+        with cs1:
+            if status_edit:
+                idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
+                novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
+                                           format_func=lambda k: STATUS_CFG[k][0],
+                                           key=f"det_status_{tid}")
+            else:
+                novo_status = status_atual
+                st.markdown("**Status**")
+                st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
+        with cs2:
+            st.markdown("**Prioridade**")
+            st.markdown(
+                pill(pv, pbg, pc) +
+                ' <span style="font-size:0.7rem;color:#94a3b8;">(definida na tabulação)</span>',
+                unsafe_allow_html=True)
 
-    # Histórico
+        novo_com = st.text_area("Escrever resposta / comentário", height=90,
+                                placeholder="Digite a tratativa...", key=f"com_{tid}")
+        enviar = st.form_submit_button("Enviar", type="primary", use_container_width=True)
+
+        if enviar:
+            updates = {}
+            if status_edit and novo_status != status_atual:
+                updates["status"] = novo_status
+            tem_com = bool(novo_com and novo_com.strip())
+            if tem_com:
+                adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
+            if updates:
+                atualizar_ticket(tid, updates)
+            if tem_com or updates:
+                msg = "Enviado!"
+                if updates.get("status") == "resolvido":
+                    msg = ("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
+                           "permanece em 'Todos os tickets'.")
+                st.success(msg); time.sleep(.5)
+                if updates.get("status") in ("resolvido", "cancelado"):
+                    st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None
+                st.rerun()
+            else:
+                st.warning("Escreva uma resposta ou altere o status antes de enviar.")
+
+    # ── Histórico dos comentários ──
     st.markdown("#### 💬 Histórico")
     comentarios = t.get("comentarios", [])
     if not comentarios:
@@ -813,26 +832,26 @@ def _detalhe_corpo(t, tid, user, papel):
                 f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
                 f'</div></div>'), unsafe_allow_html=True)
 
-    # Novo comentário
-    st.markdown("---")
-    pode_encerrar = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
-    with st.form(f"form_com_{tid}", clear_on_submit=True):
-        novo_com = st.text_area("Escrever resposta / comentário", height=80,
-                                placeholder="Digite a tratativa...")
-        cc1, cc2 = st.columns([3,1])
-        enviar = cc2.form_submit_button("Enviar", type="primary", use_container_width=True)
-        encerrar = False
-        if pode_encerrar and t.get("status") in STATUS_ABERTOS:
-            encerrar = cc1.form_submit_button("✅ Encerrar Ticket (marcar como Resolvido)")
-        if enviar and novo_com.strip():
-            adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
-            st.success("Enviado!"); time.sleep(.3); st.rerun()
-        if encerrar:
-            atualizar_ticket(tid, {"status": "resolvido"})
-            st.success("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
-                       "permanece em 'Todos os tickets'.")
-            time.sleep(.8)
+    # ── Validação do AUTOR (no FIM do layout) ──
+    # Quando resolvido, quem abriu valida (encerra) ou reabre.
+    if status_atual == "resolvido" and t.get("aberto_por") == user.get("usuario"):
+        st.markdown("---")
+        st.markdown(_html(
+            '<div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;'
+            'padding:12px 14px;margin:6px 0 10px;color:#6B5A2A;font-weight:600;">'
+            '✔ Este chamado foi marcado como <b>Resolvido</b>. Valide para encerrar '
+            'definitivamente, ou reabra se não foi resolvido.<br>'
+            '<span style="font-weight:500;font-size:0.82rem;">Sem ação em 24h, ele é '
+            'encerrado automaticamente.</span></div>'), unsafe_allow_html=True)
+        cva, cvb = st.columns(2)
+        if cva.button("✅ Validar e encerrar", key=f"val_{tid}", type="primary",
+                      use_container_width=True):
+            atualizar_ticket(tid, {"status": "finalizado"})
+            st.success("Chamado encerrado!"); time.sleep(.5)
             st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+        if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
+            atualizar_ticket(tid, {"status": "em_andamento"})
+            st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
 
 
 def _render_novo(user):
