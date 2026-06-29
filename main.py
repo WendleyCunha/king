@@ -77,6 +77,11 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     box-shadow:0 2px 8px rgba(0,0,0,0.05);
     display:flex; align-items:center; gap:18px;
 }
+/* Cabeçalho FIXO ao rolar a página */
+div[data-testid="stHorizontalBlock"]:has(.ks-header) {
+    position: sticky; top: 0; z-index: 999;
+    background: #f4f6f9; padding-top: 6px; padding-bottom: 6px;
+}
 .ks-title { font-size:1.4rem; font-weight:800; color:#2c3e50; margin:0; }
 .ks-sub { font-size:0.8rem; color:#64778d; margin-top:3px; }
 .ks-pill { display:inline-block; padding:3px 10px; border-radius:10px;
@@ -233,12 +238,15 @@ if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
     is_hoje = renderizar_rastreio(
         papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
     )
-    # Auto-refresh via meta HTML — não bloqueia o thread, não causa flash
+    # Auto-refresh SEM recarregar a página (não derruba a sessão / não pede senha).
+    # Requer: streamlit-autorefresh no requirements.txt
     if is_hoje:
-        st.markdown(
-            '<meta http-equiv="refresh" content="20">',
-            unsafe_allow_html=True
-        )
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=20000, key="rastreio_auto_refresh")
+        except Exception:
+            # fallback: não usa <meta refresh> (que recarrega tudo e desloga)
+            pass
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
     renderizar_tickets(papel, user)
