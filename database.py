@@ -81,6 +81,18 @@ def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
 def atualizar_modulos_usuario(usuario: str, modulos: list):
     get_db().collection("usuarios").document(usuario).update({"modulos": modulos})
 
+def redefinir_senha_usuario(usuario: str, nova_senha: str):
+    """Reset de senha pelo admin — não exige a senha atual."""
+    if usuario == "admin":
+        return False, "A senha do admin master não pode ser alterada aqui."
+    doc = get_db().collection("usuarios").document(usuario).get()
+    if not doc.exists:
+        return False, "Usuário não encontrado."
+    get_db().collection("usuarios").document(usuario).update(
+        {"senha_hash": hash_senha(nova_senha)}
+    )
+    return True, "Senha redefinida com sucesso."
+
 def atualizar_departamento_usuario(usuario: str, departamento: str):
     get_db().collection("usuarios").document(usuario).update({"departamento": departamento})
 
