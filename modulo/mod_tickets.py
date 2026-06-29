@@ -1,38 +1,45 @@
 """
-KingStar — Módulo de Tickets
-Visual inspirado no tickets.html: filas laterais, cards com SLA, badges por status.
-Grava no Firestore. Token Zendesk preservado para sync.
+KingStar — Módulo de Tickets  (v3)
+─────────────────────────────────────────────────────────────────────────────
+Correções / novidades nesta versão:
+  [1] Bug do HTML aparecendo como código-fonte → corrigido com _html()
+      (remove a indentação que o Markdown interpretava como bloco de código)
+      + escape do texto livre do usuário (assunto, descrição, etc).
+  [2] Abertura escolhe o DEPARTAMENTO. Só usuários do depto tratam o ticket
+      (roteamento via resolver_destinatario_ticket).
+  [3] Só aparecem as TABULAÇÕES vinculadas ao departamento escolhido.
+  [4] SLA vem da tabulação e gera ALERTA PISCANTE quando vence com ticket pendente.
+  [5] Visibilidade por papel:
+        - operacional → só os próprios tickets
+        - supervisor  → todos os tickets + aba "Equipe" do seu departamento
+        - adm         → tudo de todos
 """
 import streamlit as st
 import pandas as pd
 import time
 import sys
 import os
+import html as _htmlmod
 from datetime import datetime, timezone, timedelta
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-from database import get_db
+from database import (
+    get_db,
+    listar_departamentos, listar_tabulacoes, resolver_destinatario_ticket,
+    listar_usuarios,
+)
 
 BRT     = timezone(timedelta(hours=-3))
 COLECAO = "tickets"
 
-# ── Configurações ─────────────────────────────────────────────────
+# ── Configurações Zendesk ─────────────────────────────────────────
 ZENDESK_SUBDOMAIN = "kingstarcolchoessupport"
 ZENDESK_EMAIL     = "wendley.cunha@kingstarcolchoes.com.br"
 ZENDESK_TOKEN     = "tXqPtSws0qZMh4uiZnADQbeqUd2t2UjHUFlliTP8"
 ZENDESK_VIEW_ID   = "30824480549655"
-
-CATEGORIAS = {
-    "Garantia":       ["Troca de produto","Defeito de fabricação","Prazo vencido","Outros"],
-    "Logística":      ["Atraso na entrega","Produto errado","Avaria no transporte","Outros"],
-    "Financeiro":     ["Divergência de valor","Reembolso","Cobrança indevida","Outros"],
-    "Pós-venda":      ["Dúvida sobre produto","Montagem","Limpeza e conservação","Outros"],
-    "Administrativo": ["Documentação","Contrato","RH","Outros"],
-    "TI":             ["Sistema fora do ar","Erro no sistema","Acesso bloqueado","Outros"],
-}
 
 STATUS_CFG = {
     "aberto":       ("Aberto",       "#FEF9C3","#854D0E","#CA8A04"),
@@ -49,9 +56,19 @@ PRIO_CFG = {
     "baixa":   ("Baixa",  "#F1F5F9","#475569"),
 }
 
+STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")  # pendentes p/ SLA
+
 # ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
     return datetime.now(BRT).strftime("%Y-%m-%d %H:%M:%S")
+
+def _html(s: str) -> str:
+    """Remove a indentação de cada linha (que vira 'bloco de código' no Markdown)."""
+    return "\n".join(linha.lstrip() for linha in s.splitlines())
+
+def esc(v) -> str:
+    """Escapa texto livre do usuário antes de injetar no HTML."""
+    return _htmlmod.escape(str(v if v is not None else ""))
 
 def sla_restante(criado_em: str, horas_sla: int = 24) -> tuple:
     """Retorna (texto, pct_usado, vencido)."""
@@ -68,12 +85,35 @@ def sla_restante(criado_em: str, horas_sla: int = 24) -> tuple:
         h = int(diff.total_seconds() // 3600)
         m = int((diff.total_seconds() % 3600) // 60)
         return (f"{h}h {m}m" if h > 0 else f"{m}min"), pct, False
-    except:
+    except Exception:
         return "—", 0, False
 
 def pill(texto, bg, cor):
     return (f'<span style="background:{bg};color:{cor};padding:2px 10px;'
-            f'border-radius:12px;font-size:0.72rem;font-weight:700;">{texto}</span>')
+            f'border-radius:12px;font-size:0.72rem;font-weight:700;">{esc(texto)}</span>')
+
+def ticket_vencido_pendente(t) -> bool:
+    """True se o SLA estourou E o ticket ainda está pendente."""
+    if t.get("status") not in STATUS_ABERTOS:
+        return False
+    _, _, venc = sla_restante(t.get("criado_em",""), t.get("horas_sla", 24))
+    return venc
+
+# ── Visibilidade por papel (Regra 5) ───────────────────────────────
+def _usuario_atende(t, user) -> bool:
+    uname = user.get("usuario","")
+    nome  = user.get("nome","")
+    return (uname in t.get("atendentes", [])
+            or t.get("atribuido_para") in (uname, nome)
+            or t.get("aberto_por") == uname)
+
+def ticket_visivel(t, user, papel) -> bool:
+    if papel == "adm":
+        return True
+    if papel == "supervisor":
+        return t.get("departamento","") == (user.get("departamento","") or "—")
+    # operacional
+    return _usuario_atende(t, user)
 
 # ── CRUD Firestore ─────────────────────────────────────────────────
 def listar_tickets() -> list:
@@ -84,14 +124,16 @@ def listar_tickets() -> list:
     )
 
 def criar_ticket(dados: dict) -> str:
-    ref = get_db().collection(COLECAO).document()
-    dados.update({
+    ref  = get_db().collection(COLECAO).document()
+    base = {
         "id": ref.id, "criado_em": agora_brt(),
-        "atualizado_em": agora_brt(), "status": "aberto",
-        "origem": "interno", "comentarios": [],
-        "horas_sla": 24,
-    })
-    ref.set(dados)
+        "atualizado_em": agora_brt(), "origem": "interno",
+        "comentarios": [],
+    }
+    base.update(dados)                  # respeita status/horas_sla/prioridade enviados
+    base.setdefault("status", "aberto")
+    base.setdefault("horas_sla", 24)
+    ref.set(base)
     return ref.id
 
 def atualizar_ticket(tid: str, dados: dict):
@@ -132,6 +174,8 @@ def sync_zendesk() -> tuple:
                 "status":       mapa.get(t.get("status","open"),"aberto"),
                 "prioridade":   mprio.get(t.get("priority","normal"),"normal"),
                 "categoria":    "Zendesk/TERMOS",
+                "departamento": "",            # Zendesk não tem depto interno
+                "tabulacao":    "",
                 "criado_em":    t.get("created_at","")[:19].replace("T"," "),
                 "atualizado_em":t.get("updated_at","")[:19].replace("T"," "),
                 "origem":       "zendesk",
@@ -143,14 +187,18 @@ def sync_zendesk() -> tuple:
     except Exception as e:
         return False, 0, str(e)
 
-# ── RENDERIZAÇÃO ───────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# RENDERIZAÇÃO
+# ═══════════════════════════════════════════════════════════════════
 def renderizar_tickets(papel: str, user: dict = None):
     if user is None:
-        user = {"role": papel, "nome": "Usuário", "usuario": "user"}
+        user = {"role": papel, "nome": "Usuário", "usuario": "user", "departamento": ""}
 
-    todos = listar_tickets()
+    todos_geral = listar_tickets()
+    # Aplica visibilidade por papel (Regra 5)
+    todos = [t for t in todos_geral if ticket_visivel(t, user, papel)]
 
-    # ── Contagens por fila ────────────────────────────────────────
+    # ── Contagens por fila (já com escopo do papel) ───────────────
     ct = {
         "todos":       len(todos),
         "aberto":      sum(1 for t in todos if t.get("status")=="aberto"),
@@ -159,23 +207,18 @@ def renderizar_tickets(papel: str, user: dict = None):
         "resolvido":   sum(1 for t in todos if t.get("status")=="resolvido"),
         "urgente":     sum(1 for t in todos if t.get("prioridade")=="urgente"),
         "zendesk":     sum(1 for t in todos if "zendesk" in t.get("origem","")),
+        "vencidos":    sum(1 for t in todos if ticket_vencido_pendente(t)),
     }
 
     # ── CSS específico do módulo ──────────────────────────────────
-    st.markdown("""
+    st.markdown(_html("""
     <style>
-    .tk-fila-btn { cursor:pointer; padding:10px 14px; border-radius:8px; margin-bottom:4px;
-        display:flex; justify-content:space-between; align-items:center;
-        font-size:0.88rem; font-weight:500; color:#2c3e50;
-        background:#f8f9fa; border:1px solid #e2e8f0; transition:all .15s; }
-    .tk-fila-btn:hover { background:#f0f2f5; border-color:#C9A84C; }
-    .tk-fila-btn.ativa { background:rgba(201,168,76,.1); border-color:#C9A84C;
-        color:#7a5f1a; font-weight:700; }
     .tk-badge { background:#e2e8f0; color:#475569; padding:2px 8px;
         border-radius:10px; font-size:0.72rem; font-weight:700; }
     .tk-badge-red { background:#FEE2E2; color:#991B1B; }
     .tk-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-left:4px solid #C9A84C; }
+    .tk-card.vencido { border-left:4px solid #DC2626; box-shadow:0 0 0 1px #FECACA inset; }
     .tk-card-header { display:flex; justify-content:space-between;
         align-items:flex-start; margin-bottom:6px; }
     .tk-card-title { font-size:0.92rem; font-weight:700; color:#2c3e50; }
@@ -183,334 +226,458 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-sla-bar { background:#e8ecf0; border-radius:4px; height:5px; margin:8px 0 4px; }
     .tk-sla-fill { height:5px; border-radius:4px; }
     .tk-sla-text { font-size:0.7rem; color:#64778d; }
+    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.20;} }
+    .tk-blink { animation: tkpiscar 1s infinite;
+        background:#DC2626; color:#fff; padding:2px 10px; border-radius:12px;
+        font-size:0.72rem; font-weight:800; display:inline-block; }
+    .tk-banner { animation: tkpiscar 1.2s infinite;
+        background:#FEE2E2; color:#991B1B; border:2px solid #DC2626;
+        border-radius:10px; padding:12px 16px; margin-bottom:14px;
+        font-weight:800; font-size:0.95rem; }
+    .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
+        padding:14px 16px; margin-bottom:8px; border-top:4px solid #C9A84C; }
     </style>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
-    # ── Layout: sidebar de filas + conteúdo ───────────────────────
+    # ── Estado ────────────────────────────────────────────────────
+    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "todos"
+    if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
+    if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
+
+    # ── Layout: filas + conteúdo ──────────────────────────────────
     col_filas, col_main = st.columns([1, 3.5])
-
-    # Fila selecionada
-    if "tk_fila" not in st.session_state:
-        st.session_state.tk_fila = "todos"
-    if "tk_detalhe" not in st.session_state:
-        st.session_state.tk_detalhe = None
-    if "tk_modo" not in st.session_state:
-        st.session_state.tk_modo = "lista"  # lista | novo | detalhe | sync
 
     with col_filas:
         st.markdown("**Filas de Trabalho**")
-
         filas = [
-            ("todos",        f"Todos os Tickets",     ct["todos"],        False),
-            ("aberto",       "Abertos",                ct["aberto"],       False),
-            ("em_andamento", "Em Andamento",           ct["em_andamento"], False),
-            ("aguardando",   "Aguardando",             ct["aguardando"],   False),
-            ("resolvido",    "Resolvidos",             ct["resolvido"],    False),
-            ("urgente",      "Urgentes",               ct["urgente"],      ct["urgente"]>0),
-            ("zendesk",      "Zendesk / TERMOS",       ct["zendesk"],      False),
+            ("todos",        "Todos os Tickets", ct["todos"],        False),
+            ("aberto",       "Abertos",          ct["aberto"],       False),
+            ("em_andamento", "Em Andamento",     ct["em_andamento"], False),
+            ("aguardando",   "Aguardando",       ct["aguardando"],   False),
+            ("resolvido",    "Resolvidos",       ct["resolvido"],    False),
+            ("urgente",      "Urgentes",         ct["urgente"],      ct["urgente"]>0),
+            ("vencidos",     "SLA Vencido",      ct["vencidos"],     ct["vencidos"]>0),
+            ("zendesk",      "Zendesk / TERMOS", ct["zendesk"],      False),
         ]
-
-        for key, label, qtd, alerta in filas:
-            ativa = "ativa" if st.session_state.tk_fila == key else ""
-            badge_cls = "tk-badge-red" if alerta else "tk-badge"
-            if st.button(
-                f"{label}  ({qtd})",
-                key=f"fila_{key}",
-                use_container_width=True,
-                type="primary" if st.session_state.tk_fila == key else "secondary"
-            ):
-                st.session_state.tk_fila  = key
-                st.session_state.tk_modo  = "lista"
+        for key, label, qtd, _alerta in filas:
+            if st.button(f"{label}  ({qtd})", key=f"fila_{key}",
+                         use_container_width=True,
+                         type="primary" if st.session_state.tk_fila == key else "secondary"):
+                st.session_state.tk_fila    = key
+                st.session_state.tk_modo    = "lista"
                 st.session_state.tk_detalhe = None
                 st.rerun()
 
         st.markdown("---")
         st.markdown("**Ações**")
         if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
-            st.session_state.tk_modo = "novo"
-            st.rerun()
+            st.session_state.tk_modo = "novo"; st.rerun()
+
+        if papel in ("supervisor", "adm"):
+            if st.button("👥 Equipe", use_container_width=True):
+                st.session_state.tk_modo = "equipe"; st.rerun()
+
         if papel == "adm":
             if st.button("🔄 Sync Zendesk", use_container_width=True):
-                st.session_state.tk_modo = "sync"
-                st.rerun()
+                st.session_state.tk_modo = "sync"; st.rerun()
 
     # ── Conteúdo principal ────────────────────────────────────────
     with col_main:
+        modo = st.session_state.tk_modo
 
-        # ══ MODO LISTA ══════════════════════════════════════════
-        if st.session_state.tk_modo in ("lista", None):
+        # Banner piscante de SLA vencido (Regra 4) — em qualquer modo
+        meus_vencidos   = [t for t in todos if ticket_vencido_pendente(t) and _usuario_atende(t, user)]
+        escopo_vencidos = [t for t in todos if ticket_vencido_pendente(t)]
+        alerta_lista = meus_vencidos if papel == "operacional" else escopo_vencidos
+        if alerta_lista:
+            st.markdown(_html(
+                f'<div class="tk-banner">⚠️ {len(alerta_lista)} ticket(s) com SLA VENCIDO '
+                f'aguardando tratativa! Verifique a fila "SLA Vencido".</div>'
+            ), unsafe_allow_html=True)
 
-            # Filtra por fila
+        # ══ LISTA ════════════════════════════════════════════════
+        if modo in ("lista", None):
             fila = st.session_state.tk_fila
-            if fila == "todos":
-                filtrados = todos
-            elif fila == "urgente":
-                filtrados = [t for t in todos if t.get("prioridade")=="urgente"]
-            elif fila == "zendesk":
-                filtrados = [t for t in todos if "zendesk" in t.get("origem","")]
-            else:
-                filtrados = [t for t in todos if t.get("status")==fila]
+            if   fila == "todos":    filtrados = todos
+            elif fila == "urgente":  filtrados = [t for t in todos if t.get("prioridade")=="urgente"]
+            elif fila == "vencidos": filtrados = [t for t in todos if ticket_vencido_pendente(t)]
+            elif fila == "zendesk":  filtrados = [t for t in todos if "zendesk" in t.get("origem","")]
+            else:                    filtrados = [t for t in todos if t.get("status")==fila]
 
-            # Busca rápida
-            busca = st.text_input(
-                "", placeholder="Buscar por ID, assunto, solicitante...",
-                label_visibility="collapsed", key="tk_busca"
-            )
+            busca = st.text_input("", placeholder="Buscar por ID, assunto, solicitante...",
+                                  label_visibility="collapsed", key="tk_busca")
             if busca:
                 b = busca.lower()
                 filtrados = [t for t in filtrados if
                     b in str(t.get("assunto","")).lower() or
                     b in str(t.get("id","")).lower() or
                     b in str(t.get("id_zendesk","")).lower() or
-                    b in str(t.get("solicitante_nome","")).lower()
-                ]
+                    b in str(t.get("solicitante_nome","")).lower()]
 
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
             else:
                 st.markdown(f"**{len(filtrados)} ticket(s)**")
                 for t in filtrados:
-                    tid   = t.get("id","")
-                    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
-                    sv, sbg, sc, sbc = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
-                    pv, pbg, pc      = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-                    origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
-                    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
-                    num_com = len(t.get("comentarios",[]))
+                    _render_card(t)
+                    if st.button("Abrir", key=f"open_{t.get('id','')}"):
+                        st.session_state.tk_detalhe = t.get("id")
+                        st.session_state.tk_modo    = "detalhe"
+                        st.rerun()
 
-                    st.markdown(f"""
-                    <div class="tk-card">
-                        <div class="tk-card-header">
-                            <div>
-                                <div class="tk-card-title">
-                                    {origem_icon} #{t.get('id_zendesk', tid[:8])} — {t.get('assunto','Sem título')[:55]}
-                                </div>
-                                <div class="tk-card-meta">
-                                    {t.get('categoria','—')} &nbsp;·&nbsp;
-                                    {t.get('solicitante_nome', t.get('solicitante','—'))} &nbsp;·&nbsp;
-                                    {t.get('criado_em','')[:16]}
-                                    {"&nbsp;·&nbsp; 💬 " + str(num_com) if num_com else ""}
-                                </div>
-                            </div>
-                            <div style="text-align:right;white-space:nowrap;">
-                                {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
-                            </div>
-                        </div>
-                        <div class="tk-sla-bar">
-                            <div class="tk-sla-fill"
-                                 style="width:{spct:.0f}%;background:{sla_cor};"></div>
-                        </div>
-                        <div class="tk-sla-text">
-                            SLA: <b style="color:{sla_cor};">{sl}</b>
-                        </div>
-                    </div>""", unsafe_allow_html=True)
+        # ══ DETALHE ══════════════════════════════════════════════
+        elif modo == "detalhe":
+            _render_detalhe(st.session_state.tk_detalhe, user, papel)
 
-                    bc1, bc2 = st.columns([1, 5])
-                    with bc1:
-                        if st.button("Abrir", key=f"open_{tid}", use_container_width=True):
-                            st.session_state.tk_detalhe = tid
-                            st.session_state.tk_modo    = "detalhe"
-                            st.rerun()
+        # ══ NOVO TICKET (Regras 2, 3, 4) ════════════════════════
+        elif modo == "novo":
+            _render_novo(user)
 
-        # ══ MODO DETALHE ════════════════════════════════════════
-        elif st.session_state.tk_modo == "detalhe":
-            tid = st.session_state.tk_detalhe
-            doc = get_db().collection(COLECAO).document(tid).get()
-            if not doc.exists:
-                st.error("Ticket não encontrado.")
+        # ══ EQUIPE (Regra 5) ═════════════════════════════════════
+        elif modo == "equipe":
+            _render_equipe(user, papel, todos_geral)
+
+        # ══ SYNC ZENDESK ═════════════════════════════════════════
+        elif modo == "sync":
+            _render_sync()
+
+
+# ───────────────────────────────────────────────────────────────────
+# COMPONENTES
+# ───────────────────────────────────────────────────────────────────
+def _render_card(t):
+    tid   = t.get("id","")
+    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
+    pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
+    origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
+    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    num_com = len(t.get("comentarios",[]))
+    pendente_vencido = ticket_vencido_pendente(t)
+
+    dep    = esc(t.get("departamento") or t.get("categoria") or "—")
+    tabul  = esc(t.get("tabulacao") or "")
+    titulo = esc(str(t.get("assunto","Sem título"))[:55])
+    id_vis = esc(t.get("id_zendesk", tid[:8]))
+    solic  = esc(t.get("solicitante_nome", t.get("solicitante","—")))
+    criado = esc(t.get("criado_em","")[:16])
+
+    blink    = '<span class="tk-blink">SLA VENCIDO</span>' if pendente_vencido else ""
+    meta_tab = f"&nbsp;·&nbsp; 📋 {tabul}" if tabul else ""
+    meta_com = f"&nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
+
+    st.markdown(_html(f"""
+    <div class="tk-card {'vencido' if pendente_vencido else ''}">
+        <div class="tk-card-header">
+            <div>
+                <div class="tk-card-title">{origem_icon} #{id_vis} — {titulo}</div>
+                <div class="tk-card-meta">
+                    🏢 {dep}{meta_tab} &nbsp;·&nbsp; {solic} &nbsp;·&nbsp; {criado}{meta_com}
+                </div>
+            </div>
+            <div style="text-align:right;white-space:nowrap;">
+                {blink} {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
+            </div>
+        </div>
+        <div class="tk-sla-bar">
+            <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{sla_cor};"></div>
+        </div>
+        <div class="tk-sla-text">SLA: <b style="color:{sla_cor};">{esc(sl)}</b></div>
+    </div>"""), unsafe_allow_html=True)
+
+
+def _render_detalhe(tid, user, papel):
+    if not tid:
+        st.session_state.tk_modo = "lista"; st.rerun(); return
+    doc = get_db().collection(COLECAO).document(tid).get()
+    if not doc.exists:
+        st.error("Ticket não encontrado.")
+        if st.button("← Voltar para a fila"):
+            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+        return
+
+    t = doc.to_dict()
+    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
+    pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
+    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    pendente_vencido = ticket_vencido_pendente(t)
+
+    if st.button("← Voltar para a fila"):
+        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+
+    if pendente_vencido:
+        st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o SLA VENCIDO!</div>'),
+                    unsafe_allow_html=True)
+
+    id_vis = esc(t.get("id_zendesk", tid[:8]))
+    titulo = esc(t.get("assunto","—"))
+    dep    = esc(t.get("departamento") or t.get("categoria") or "—")
+    tabul  = esc(t.get("tabulacao") or "—")
+    criado = esc(t.get("criado_em","")[:16])
+    atend  = t.get("atendentes", [])
+    atend_str = esc(", ".join(atend)) if atend else "🌐 Todo o departamento"
+
+    st.markdown(_html(f"""
+    <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};
+                border-radius:12px;padding:18px 20px;margin-bottom:16px;">
+        <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
+        <div style="margin-bottom:10px;">
+            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
+            <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
+                🏢 {dep} &nbsp;·&nbsp; 📋 {tabul} &nbsp;·&nbsp; {criado}
+            </span>
+        </div>
+        <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
+            👥 Atendentes: {atend_str} &nbsp;·&nbsp; ⏱ SLA: <b style="color:{sla_cor};">{esc(sl)}</b>
+        </div>
+    </div>"""), unsafe_allow_html=True)
+
+    # Descrição — texto puro e seguro (NÃO renderiza HTML do usuário)
+    st.markdown("**📝 Descrição**")
+    st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
+                 height=140, disabled=True, label_visibility="collapsed")
+
+    # Ações — supervisor/adm
+    if papel in ("supervisor","adm"):
+        da1, da2, da3 = st.columns(3)
+        novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
+            index=list(STATUS_CFG.keys()).index(t.get("status","aberto")), key="det_status")
+        nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
+            index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")), key="det_prio")
+        da3.markdown("<br>", unsafe_allow_html=True)
+        if da3.button("💾 Salvar", type="primary", use_container_width=True):
+            atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
+            st.success("Atualizado!"); time.sleep(.4); st.rerun()
+
+    # Histórico
+    st.markdown("#### 💬 Histórico")
+    comentarios = t.get("comentarios", [])
+    if not comentarios:
+        st.caption("Nenhum comentário ainda.")
+    else:
+        for c in comentarios:
+            alinha = "right" if c.get("autor") == user.get("nome") else "left"
+            bg_com = "#EFF6FF" if alinha == "right" else "#f8f9fa"
+            bord   = "#2563EB" if alinha == "right" else "#C9A84C"
+            st.markdown(_html(
+                f'<div style="text-align:{alinha};margin:6px 0;">'
+                f'<div style="display:inline-block;background:{bg_com};'
+                f'border-left:3px solid {bord};padding:8px 12px;'
+                f'border-radius:8px;max-width:80%;text-align:left;">'
+                f'<b style="font-size:0.8rem;">{esc(c.get("autor",""))}</b>'
+                f'<span style="color:#64778d;font-size:0.72rem;margin-left:6px;">{esc(c.get("data","")[:16])}</span>'
+                f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
+                f'</div></div>'), unsafe_allow_html=True)
+
+    # Novo comentário
+    st.markdown("---")
+    with st.form(f"form_com_{tid}", clear_on_submit=True):
+        novo_com = st.text_area("Escrever resposta / comentário", height=80,
+                                placeholder="Digite a tratativa...")
+        cc1, cc2 = st.columns([3,1])
+        enviar = cc2.form_submit_button("Enviar", type="primary", use_container_width=True)
+        encerrar = False
+        if papel in ("supervisor","adm"):
+            encerrar = cc1.form_submit_button("✅ Encerrar Ticket")
+        if enviar and novo_com.strip():
+            adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
+            st.success("Enviado!"); time.sleep(.3); st.rerun()
+        if encerrar:
+            atualizar_ticket(tid, {"status":"resolvido"})
+            st.success("Ticket encerrado!"); time.sleep(.5)
+            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+
+
+def _render_novo(user):
+    st.markdown("### ➕ Abrir Novo Chamado")
+    if st.button("← Voltar"):
+        st.session_state.tk_modo = "lista"; st.rerun()
+
+    deps = listar_departamentos()
+    dep_nomes = [d["nome"] for d in deps]
+    if not dep_nomes:
+        st.warning("⚠️ Nenhum departamento cadastrado. Peça ao administrador para criar em "
+                   "Configurações → Departamentos.")
+        return
+
+    # Regra 2: escolher o DEPARTAMENTO (selectbox FORA do form p/ filtrar tabulações ao vivo)
+    dep_sel = st.selectbox("Departamento *", dep_nomes, key="novo_dep")
+
+    # Regra 3: só tabulações do departamento escolhido
+    tabs_dep  = [t for t in listar_tabulacoes() if t.get("departamento") == dep_sel]
+    tab_nomes = [t["nome"] for t in tabs_dep]
+    if tab_nomes:
+        tab_sel = st.selectbox("Tabulação *", tab_nomes, key="novo_tab")
+        tab_obj = next((t for t in tabs_dep if t["nome"] == tab_sel), None)
+    else:
+        st.info("Este departamento não tem tabulações. Cadastre em Configurações → Tabulação. "
+                "O ticket será aberto sem tabulação (SLA padrão 24h, para todo o departamento).")
+        tab_sel, tab_obj = None, None
+
+    # Regra 4: SLA / prioridade derivados da tabulação
+    sla_h = int(tab_obj.get("sla_horas", 24)) if tab_obj else 24
+    prio_padrao = (tab_obj.get("prioridade","Normal").lower() if tab_obj else "normal")
+    if prio_padrao not in PRIO_CFG: prio_padrao = "normal"
+
+    # Prévia do roteamento
+    dest = resolver_destinatario_ticket(dep_sel, tab_sel)
+    atend_prev = ", ".join(dest["atendentes"]) if dest["atendentes"] else f"todo o depto {dep_sel}"
+    st.caption(f"⏱ SLA: **{sla_h}h** · 🎯 Prioridade: **{prio_padrao}** · 👥 Vai para: **{atend_prev}**")
+
+    with st.form("form_novo_ticket", clear_on_submit=True):
+        nc1, nc2 = st.columns([3,1])
+        assunto    = nc1.text_input("Assunto *", placeholder="Descreva o problema")
+        prioridade = nc2.selectbox("Prioridade", list(PRIO_CFG.keys()),
+                                   index=list(PRIO_CFG.keys()).index(prio_padrao))
+        descricao  = st.text_area("Descrição *", height=120)
+        nd1, nd2 = st.columns(2)
+        sol_nome  = nd1.text_input("Solicitante", value=user.get("nome",""))
+        sol_email = nd2.text_input("E-mail", placeholder="email@kingstar.com.br")
+
+        if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
+            if not assunto.strip() or not descricao.strip():
+                st.error("Preencha Assunto e Descrição.")
             else:
-                t   = doc.to_dict()
-                sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
-                sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
-                pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-                sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
-
-                if st.button("← Voltar para a fila"):
-                    st.session_state.tk_modo    = "lista"
-                    st.session_state.tk_detalhe = None
-                    st.rerun()
-
-                st.markdown(f"""
-                <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid #C9A84C;
-                            border-radius:12px;padding:18px 20px;margin-bottom:16px;">
-                    <h3 style="margin:0 0 6px;color:#2c3e50;">
-                        #{t.get('id_zendesk', tid[:8])} — {t.get('assunto','—')}
-                    </h3>
-                    <div style="margin-bottom:10px;">
-                        {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
-                        <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
-                            {t.get('categoria','—')} · {t.get('criado_em','')[:16]}
-                        </span>
-                    </div>
-                    <p style="color:#2c3e50;font-size:0.9rem;margin:8px 0;">
-                        {t.get('descricao') or t.get('assunto','—')}
-                    </p>
-                    <div class="tk-sla-bar" style="margin-top:12px;">
-                        <div class="tk-sla-fill"
-                             style="width:{spct:.0f}%;background:{sla_cor};height:6px;border-radius:4px;"></div>
-                    </div>
-                    <span style="font-size:0.75rem;color:{sla_cor};font-weight:700;">
-                        SLA: {sl}
-                    </span>
-                </div>""", unsafe_allow_html=True)
-
-                # Ações — supervisor/adm
-                if papel in ("supervisor","adm"):
-                    da1, da2, da3 = st.columns(3)
-                    novo_status = da1.selectbox(
-                        "Status", list(STATUS_CFG.keys()),
-                        index=list(STATUS_CFG.keys()).index(t.get("status","aberto")),
-                        key="det_status"
-                    )
-                    nova_prio = da2.selectbox(
-                        "Prioridade", list(PRIO_CFG.keys()),
-                        index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")),
-                        key="det_prio"
-                    )
-                    if da3.button("💾 Salvar", type="primary", use_container_width=True):
-                        atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
-                        st.success("Atualizado!"); time.sleep(.4); st.rerun()
-
-                # Histórico de comentários
-                st.markdown("#### 💬 Histórico")
-                comentarios = t.get("comentarios", [])
-                if not comentarios:
-                    st.caption("Nenhum comentário ainda.")
-                else:
-                    for c in comentarios:
-                        alinha = "right" if c.get("autor") == user.get("nome") else "left"
-                        bg_com = "#EFF6FF" if alinha == "right" else "#f8f9fa"
-                        bord   = "#2563EB" if alinha == "right" else "#C9A84C"
-                        st.markdown(
-                            f'<div style="text-align:{alinha};margin:6px 0;">'
-                            f'<div style="display:inline-block;background:{bg_com};'
-                            f'border-left:3px solid {bord};padding:8px 12px;'
-                            f'border-radius:8px;max-width:80%;text-align:left;">'
-                            f'<b style="font-size:0.8rem;">{c.get("autor","")}</b>'
-                            f'<span style="color:#64778d;font-size:0.72rem;margin-left:6px;">{c.get("data","")[:16]}</span>'
-                            f'<br><span style="font-size:0.88rem;">{c.get("texto","")}</span>'
-                            f'</div></div>', unsafe_allow_html=True)
-
-                # Novo comentário
-                st.markdown("---")
-                with st.form(f"form_com_{tid}", clear_on_submit=True):
-                    novo_com = st.text_area("Escrever resposta / comentário",
-                                            height=80, placeholder="Digite a tratativa...")
-                    cc1, cc2 = st.columns([3,1])
-                    if cc2.form_submit_button("Enviar", type="primary", use_container_width=True):
-                        if novo_com.strip():
-                            adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
-                            st.success("Enviado!"); time.sleep(.3); st.rerun()
-
-                    # Encerrar
-                    if papel in ("supervisor","adm"):
-                        if cc1.form_submit_button("✅ Encerrar Ticket"):
-                            atualizar_ticket(tid, {"status":"resolvido"})
-                            st.success("Ticket encerrado!")
-                            time.sleep(.5)
-                            st.session_state.tk_modo    = "lista"
-                            st.session_state.tk_detalhe = None
-                            st.rerun()
-
-        # ══ MODO NOVO TICKET ════════════════════════════════════
-        elif st.session_state.tk_modo == "novo":
-            st.markdown("### ➕ Abrir Novo Chamado")
-            if st.button("← Voltar"):
+                novo_id = criar_ticket({
+                    "assunto": assunto.strip(), "descricao": descricao.strip(),
+                    "departamento": dep_sel,
+                    "tabulacao": tab_sel or "",
+                    "categoria": dep_sel,             # compat. com telas antigas
+                    "subcategoria": tab_sel or "",
+                    "prioridade": prioridade,
+                    "horas_sla": sla_h,               # Regra 4
+                    "atendentes": dest["atendentes"], # Regra 2
+                    "solicitante_nome": sol_nome, "solicitante_email": sol_email,
+                    "aberto_por": user.get("usuario",""),
+                })
+                st.success(f"✅ Chamado **#{novo_id[:8]}** aberto em **{dep_sel}**! "
+                           f"Roteado para: {atend_prev}.")
+                st.balloons(); time.sleep(1.5)
                 st.session_state.tk_modo = "lista"; st.rerun()
 
-            with st.form("form_novo_ticket", clear_on_submit=True):
-                nc1, nc2 = st.columns([3,1])
-                assunto    = nc1.text_input("Assunto *", placeholder="Descreva o problema")
-                prioridade = nc2.selectbox("Prioridade", ["normal","alta","urgente","baixa"])
 
-                nc3, nc4 = st.columns(2)
-                categoria    = nc3.selectbox("Categoria", list(CATEGORIAS.keys()))
-                subcategoria = nc4.selectbox("Subcategoria", CATEGORIAS.get(categoria,["Outros"]))
+def _render_equipe(user, papel, todos_geral):
+    st.markdown("### 👥 Equipe & Tickets do Departamento")
+    if st.button("← Voltar"):
+        st.session_state.tk_modo = "lista"; st.rerun()
 
-                descricao = st.text_area("Descrição *", height=120)
+    # adm escolhe o depto; supervisor fica fixo no seu
+    if papel == "adm":
+        dep_nomes = [d["nome"] for d in listar_departamentos()]
+        if not dep_nomes:
+            st.info("Nenhum departamento cadastrado."); return
+        dep_alvo = st.selectbox("Departamento", dep_nomes, key="eq_dep")
+    else:
+        dep_alvo = user.get("departamento","") or "—"
+        st.markdown(f"Departamento: **{dep_alvo}**")
 
-                nd1, nd2 = st.columns(2)
-                sol_nome  = nd1.text_input("Solicitante", value=user.get("nome",""))
-                sol_email = nd2.text_input("E-mail", placeholder="email@kingstar.com.br")
-                atrib     = st.text_input("Atribuir para", placeholder="Nome do responsável (opcional)")
+    usuarios_dep = [u for u in listar_usuarios() if u.get("departamento") == dep_alvo]
+    tickets_dep  = [t for t in todos_geral if t.get("departamento") == dep_alvo]
 
-                if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
-                    if not assunto.strip() or not descricao.strip():
-                        st.error("Preencha Assunto e Descrição.")
-                    else:
-                        novo_id = criar_ticket({
-                            "assunto": assunto.strip(), "descricao": descricao.strip(),
-                            "categoria": categoria, "subcategoria": subcategoria,
-                            "prioridade": prioridade,
-                            "solicitante_nome": sol_nome, "solicitante_email": sol_email,
-                            "atribuido_para": atrib, "aberto_por": user.get("usuario",""),
-                        })
-                        st.success(f"✅ Chamado **#{novo_id[:8]}** aberto!")
-                        st.balloons()
-                        time.sleep(1.5)
-                        st.session_state.tk_modo = "lista"; st.rerun()
+    abertos  = sum(1 for t in tickets_dep if t.get("status") in STATUS_ABERTOS)
+    vencidos = sum(1 for t in tickets_dep if ticket_vencido_pendente(t))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Atendentes", len(usuarios_dep))
+    k2.metric("Tickets (total)", len(tickets_dep))
+    k3.metric("Pendentes", abertos)
+    k4.metric("SLA vencido", vencidos)
 
-        # ══ MODO SYNC ZENDESK ═══════════════════════════════════
-        elif st.session_state.tk_modo == "sync":
-            st.markdown("### 🔄 Sincronização Zendesk")
-            if st.button("← Voltar"):
-                st.session_state.tk_modo = "lista"; st.rerun()
+    if vencidos:
+        st.markdown(_html(f'<div class="tk-banner">⚠️ {vencidos} ticket(s) do departamento '
+                          f'com SLA vencido!</div>'), unsafe_allow_html=True)
 
-            st.info(f"API configurada: `{ZENDESK_SUBDOMAIN}` · View TERMOS: `{ZENDESK_VIEW_ID}`")
+    st.markdown("---")
+    if not usuarios_dep:
+        st.info("Nenhum atendente vinculado a este departamento.")
+        return
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Fase 1 — Sync TERMOS**")
-                st.caption("Copia os tickets da view TERMOS para o Firestore")
-                if st.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
-                    with st.spinner("Consultando Zendesk..."):
-                        ok, qtd, msg = sync_zendesk()
-                    if ok: st.success(f"✅ {msg}")
-                    else:  st.error(f"❌ {msg}")
+    for u in usuarios_dep:
+        uname = u.get("usuario","")
+        nome  = u.get("nome", uname)
+        meus = [t for t in tickets_dep
+                if uname in t.get("atendentes", [])
+                or t.get("atribuido_para") in (uname, nome)
+                or t.get("aberto_por") == uname]
+        m_abertos  = sum(1 for t in meus if t.get("status") in STATUS_ABERTOS)
+        m_vencidos = sum(1 for t in meus if ticket_vencido_pendente(t))
+        alerta = '<span class="tk-blink">SLA VENCIDO</span>' if m_vencidos else ""
+        st.markdown(_html(
+            f'<div class="tk-equipe-card">'
+            f'<b style="color:#2c3e50;">{esc(nome)}</b> '
+            f'<span style="color:#64778d;font-size:0.8rem;">({esc(uname)} · {esc(u.get("role","—"))})</span>'
+            f'<span style="float:right;">{alerta}</span><br>'
+            f'<span style="font-size:0.8rem;color:#64778d;">'
+            f'Total: {len(meus)} &nbsp;·&nbsp; Pendentes: {m_abertos} &nbsp;·&nbsp; '
+            f'Vencidos: {m_vencidos}</span>'
+            f'</div>'), unsafe_allow_html=True)
 
-            with c2:
-                st.markdown("**Fase 3 — Importar Histórico**")
-                st.caption("Importa TODOS os tickets antes de desligar a Zendesk")
-                st.warning("Execute uma única vez na migração final.")
-                if st.button("📦 Importar Tudo", use_container_width=True):
-                    import requests as req
-                    url   = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json?per_page=100"
-                    auth  = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
-                    total = 0
-                    prog  = st.progress(0, text="Importando...")
-                    mapa  = {"new":"aberto","open":"em_andamento","pending":"aguardando",
-                             "hold":"aguardando","solved":"resolvido","closed":"resolvido"}
-                    mprio = {"urgent":"urgente","high":"alta","normal":"normal","low":"baixa"}
-                    while url:
-                        r = req.get(url, auth=auth, timeout=30)
-                        if r.status_code != 200: break
-                        data = r.json()
-                        tickets = data.get("tickets",[])
-                        db = get_db(); batch = db.batch()
-                        for t in tickets:
-                            ref = db.collection(COLECAO).document(f"zendesk_{t['id']}")
-                            batch.set(ref, {
-                                "id": f"zendesk_{t['id']}", "id_zendesk": t["id"],
-                                "assunto": t.get("subject",""),
-                                "status":  mapa.get(t.get("status","open"),"aberto"),
-                                "prioridade": mprio.get(t.get("priority","normal"),"normal"),
-                                "categoria": "Zendesk/Historico",
-                                "criado_em": t.get("created_at","")[:19].replace("T"," "),
-                                "atualizado_em": t.get("updated_at","")[:19].replace("T"," "),
-                                "origem": "zendesk_historico", "comentarios": [], "horas_sla": 24,
-                            }, merge=True)
-                        batch.commit(); total += len(tickets)
-                        prog.progress(min(total/500, 1.0), text=f"{total} importados...")
-                        url = data.get("next_page")
-                    prog.empty()
-                    st.success(f"✅ {total} tickets importados para o Firestore!")
+        if meus:
+            with st.expander(f"Ver tickets de {nome} ({len(meus)})"):
+                for t in meus:
+                    _render_card(t)
+                    if st.button("Abrir", key=f"eqopen_{uname}_{t.get('id','')}"):
+                        st.session_state.tk_detalhe = t.get("id")
+                        st.session_state.tk_modo    = "detalhe"
+                        st.rerun()
 
-            st.markdown("---")
-            st.markdown("#### Tickets no Firestore por origem")
-            todos2 = listar_tickets()
-            from collections import Counter
-            df_orig = pd.DataFrame(
-                Counter(t.get("origem","interno") for t in todos2).items(),
-                columns=["Origem","Qtd"]
-            )
-            st.dataframe(df_orig, use_container_width=True, hide_index=True)
+
+def _render_sync():
+    st.markdown("### 🔄 Sincronização Zendesk")
+    if st.button("← Voltar"):
+        st.session_state.tk_modo = "lista"; st.rerun()
+
+    st.info(f"API configurada: `{ZENDESK_SUBDOMAIN}` · View TERMOS: `{ZENDESK_VIEW_ID}`")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Fase 1 — Sync TERMOS**")
+        st.caption("Copia os tickets da view TERMOS para o Firestore")
+        if st.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
+            with st.spinner("Consultando Zendesk..."):
+                ok, qtd, msg = sync_zendesk()
+            (st.success if ok else st.error)((("✅ " if ok else "❌ ") + msg))
+    with c2:
+        st.markdown("**Fase 3 — Importar Histórico**")
+        st.caption("Importa TODOS os tickets antes de desligar a Zendesk")
+        st.warning("Execute uma única vez na migração final.")
+        if st.button("📦 Importar Tudo", use_container_width=True):
+            import requests as req
+            url   = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json?per_page=100"
+            auth  = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
+            total = 0
+            prog  = st.progress(0, text="Importando...")
+            mapa  = {"new":"aberto","open":"em_andamento","pending":"aguardando",
+                     "hold":"aguardando","solved":"resolvido","closed":"resolvido"}
+            mprio = {"urgent":"urgente","high":"alta","normal":"normal","low":"baixa"}
+            while url:
+                r = req.get(url, auth=auth, timeout=30)
+                if r.status_code != 200: break
+                data = r.json(); tickets = data.get("tickets",[])
+                db = get_db(); batch = db.batch()
+                for t in tickets:
+                    ref = db.collection(COLECAO).document(f"zendesk_{t['id']}")
+                    batch.set(ref, {
+                        "id": f"zendesk_{t['id']}", "id_zendesk": t["id"],
+                        "assunto": t.get("subject",""),
+                        "status":  mapa.get(t.get("status","open"),"aberto"),
+                        "prioridade": mprio.get(t.get("priority","normal"),"normal"),
+                        "categoria": "Zendesk/Historico", "departamento":"", "tabulacao":"",
+                        "criado_em": t.get("created_at","")[:19].replace("T"," "),
+                        "atualizado_em": t.get("updated_at","")[:19].replace("T"," "),
+                        "origem": "zendesk_historico", "comentarios": [], "horas_sla": 24,
+                    }, merge=True)
+                batch.commit(); total += len(tickets)
+                prog.progress(min(total/500, 1.0), text=f"{total} importados...")
+                url = data.get("next_page")
+            prog.empty()
+            st.success(f"✅ {total} tickets importados para o Firestore!")
+
+    st.markdown("---")
+    st.markdown("#### Tickets no Firestore por origem")
+    todos2 = listar_tickets()
+    from collections import Counter
+    df_orig = pd.DataFrame(
+        Counter(t.get("origem","interno") for t in todos2).items(),
+        columns=["Origem","Qtd"]
+    )
+    st.dataframe(df_orig, use_container_width=True, hide_index=True)
