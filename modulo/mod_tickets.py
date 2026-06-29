@@ -70,6 +70,41 @@ def esc(v) -> str:
     """Escapa texto livre do usuário antes de injetar no HTML."""
     return _htmlmod.escape(str(v if v is not None else ""))
 
+def texto_busca(t) -> str:
+    """Concatena tudo que é pesquisável de um ticket (busca global)."""
+    partes = [
+        t.get("id",""), t.get("id_zendesk",""), t.get("assunto",""),
+        t.get("descricao",""), t.get("solicitante_nome",""),
+        t.get("cliente_nome",""), t.get("cliente_codigo",""),
+        t.get("tabulacao",""), t.get("departamento",""),
+        t.get("categoria",""), t.get("subcategoria",""),
+        t.get("prioridade",""), t.get("status",""),
+    ]
+    for a in t.get("atendentes", []):
+        partes.append(a)
+    for c in t.get("comentarios", []):
+        partes.append(c.get("texto",""))
+        partes.append(c.get("autor",""))
+    return " ".join(str(p) for p in partes if p).lower()
+
+def transferir_tickets(tids: list, novo_responsavel: str):
+    """Reatribui uma lista de tickets para um novo responsável (atendente)."""
+    db = get_db()
+    batch = db.batch()
+    n = 0
+    for tid in tids:
+        ref = db.collection(COLECAO).document(tid)
+        batch.update(ref, {
+            "atendentes": [novo_responsavel],
+            "atribuido_para": novo_responsavel,
+            "atualizado_em": agora_brt(),
+        })
+        n += 1
+        if n % 450 == 0:
+            batch.commit(); batch = db.batch()
+    batch.commit()
+    return n
+
 def sla_restante(criado_em: str, horas_sla: int = 24) -> tuple:
     """Retorna (texto, pct_usado, vencido)."""
     try:
@@ -332,15 +367,11 @@ def renderizar_tickets(papel: str, user: dict = None):
             elif fila == "zendesk":  filtrados = [t for t in todos if "zendesk" in t.get("origem","")]
             else:                    filtrados = [t for t in todos if t.get("status")==fila]
 
-            busca = st.text_input("", placeholder="Buscar por ID, assunto, solicitante...",
+            busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
                                   label_visibility="collapsed", key="tk_busca")
             if busca:
-                b = busca.lower()
-                filtrados = [t for t in filtrados if
-                    b in str(t.get("assunto","")).lower() or
-                    b in str(t.get("id","")).lower() or
-                    b in str(t.get("id_zendesk","")).lower() or
-                    b in str(t.get("solicitante_nome","")).lower()]
+                b = busca.strip().lower()
+                filtrados = [t for t in filtrados if b in texto_busca(t)]
 
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
@@ -484,17 +515,22 @@ def _detalhe_corpo(t, tid, user, papel):
                  height=140, disabled=True, label_visibility="collapsed",
                  key=f"desc_{tid}")
 
-    # Ações — supervisor/adm
+    # Ações — supervisor/adm (dentro de um FORM para gravar de forma confiável,
+    # inclusive dentro do popup — assim mover de fila funciona)
     if papel in ("supervisor","adm"):
-        da1, da2, da3 = st.columns(3)
-        novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
-            index=list(STATUS_CFG.keys()).index(t.get("status","aberto")), key=f"det_status_{tid}")
-        nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
-            index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")), key=f"det_prio_{tid}")
-        da3.markdown("<br>", unsafe_allow_html=True)
-        if da3.button("💾 Salvar", type="primary", use_container_width=True, key=f"det_save_{tid}"):
-            atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
-            st.success("Atualizado!"); time.sleep(.4); st.rerun()
+        with st.form(f"form_status_{tid}"):
+            da1, da2 = st.columns(2)
+            novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
+                index=list(STATUS_CFG.keys()).index(t.get("status","aberto")),
+                format_func=lambda k: STATUS_CFG[k][0], key=f"det_status_{tid}")
+            nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
+                index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")),
+                format_func=lambda k: PRIO_CFG[k][0], key=f"det_prio_{tid}")
+            if st.form_submit_button("💾 Salvar alterações", type="primary",
+                                     use_container_width=True):
+                atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
+                st.success("Atualizado! O ticket foi movido de fila.")
+                time.sleep(.5); st.rerun()
 
     # Histórico
     st.markdown("#### 💬 Histórico")
@@ -572,10 +608,7 @@ def _render_novo(user):
     st.caption(f"⏱ SLA: **{sla_h}h** · 🎯 Prioridade: **{prio_padrao}** · 👥 Vai para: **{atend_prev}**")
 
     with st.form("form_novo_ticket", clear_on_submit=True):
-        nc1, nc2 = st.columns([3,1])
-        assunto    = nc1.text_input("Assunto *", placeholder="Descreva o problema")
-        prioridade = nc2.selectbox("Prioridade", list(PRIO_CFG.keys()),
-                                   index=list(PRIO_CFG.keys()).index(prio_padrao))
+        assunto = st.text_input("Assunto *", placeholder="Descreva o problema")
 
         # Dados do CLIENTE (Solicitante = usuário logado, automático)
         cl1, cl2 = st.columns([1,2])
@@ -584,7 +617,8 @@ def _render_novo(user):
 
         descricao  = st.text_area("Descrição *", height=120)
 
-        st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**")
+        st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**  ·  "
+                   f"🎯 Prioridade (definida pela tabulação): **{prio_padrao}**")
 
         if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
             if not assunto.strip() or not descricao.strip():
@@ -598,8 +632,8 @@ def _render_novo(user):
                     "tabulacao": tab_sel or "",
                     "categoria": dep_sel,             # compat. com telas antigas
                     "subcategoria": tab_sel or "",
-                    "prioridade": prioridade,
-                    "horas_sla": sla_h,               # Regra 4
+                    "prioridade": prio_padrao,        # vem da tabulação (Regra 4)
+                    "horas_sla": sla_h,
                     "atendentes": dest["atendentes"], # Regra 2
                     "cliente_codigo": cli_codigo.strip(),
                     "cliente_nome": cli_nome.strip(),
@@ -668,7 +702,47 @@ def _render_equipe(user, papel, todos_geral):
             f'</div>'), unsafe_allow_html=True)
 
         if meus:
-            with st.expander(f"Ver tickets de {nome} ({len(meus)})"):
+            with st.expander(f"Ver / Transferir tickets de {nome} ({len(meus)})"):
+                # ── Transferência de responsável (férias/falta) ──
+                dest_opts = {x["usuario"]: x.get("nome", x["usuario"])
+                             for x in usuarios_dep if x.get("usuario") != uname}
+                ids_meus = [t.get("id") for t in meus]
+                labels   = {t.get("id"):
+                            f"#{t.get('id_zendesk', t.get('id','')[:8])} — {str(t.get('assunto',''))[:40]}"
+                            for t in meus}
+
+                st.markdown("**🔁 Transferir responsável**")
+                marcar_todos = st.checkbox("Marcar TODOS os tickets deste atendente",
+                                           value=True, key=f"all_{uname}")
+                if marcar_todos:
+                    selec = ids_meus
+                    st.caption(f"{len(selec)} ticket(s) selecionado(s).")
+                else:
+                    selec = st.multiselect("Selecione os tickets",
+                                           options=ids_meus,
+                                           format_func=lambda x: labels.get(x, x),
+                                           key=f"sel_{uname}")
+
+                if dest_opts:
+                    novo_resp = st.selectbox(
+                        "Novo responsável",
+                        options=list(dest_opts.keys()),
+                        format_func=lambda x: f"{dest_opts[x]} ({x})",
+                        key=f"resp_{uname}")
+                    if st.button(f"Transferir {len(selec)} ticket(s) → {dest_opts.get(novo_resp,'')}",
+                                 key=f"tr_{uname}", type="primary", use_container_width=True):
+                        if selec:
+                            qt = transferir_tickets(selec, novo_resp)
+                            st.success(f"✅ {qt} ticket(s) transferido(s) para "
+                                       f"{dest_opts.get(novo_resp,'')}!")
+                            time.sleep(.8); st.rerun()
+                        else:
+                            st.warning("Nenhum ticket selecionado.")
+                else:
+                    st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
+
+                st.markdown("---")
+                # ── Lista dos tickets ──
                 for t in meus:
                     _render_card(t)
                     if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
