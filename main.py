@@ -17,6 +17,13 @@ from database import (
 from modulo.mod_rastreio import renderizar_rastreio
 
 try:
+    from modulo.mod_home import renderizar_home
+except Exception as _erro_import_home:
+    def renderizar_home(papel, user=None, _erro=_erro_import_home):
+        st.error("⚠️ Falha ao carregar o módulo Meu Dia. Detalhe técnico abaixo:")
+        st.exception(_erro)
+
+try:
     from modulo.mod_tickets import renderizar_tickets
 except ImportError:
     def renderizar_tickets(papel, user=None): st.info("🚧 Módulo de Tickets em desenvolvimento...")
@@ -173,6 +180,12 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Operacional</span>', unsafe_allow_html=True)
 
+    ativo_home = st.session_state.modulo_ativo == "home"
+    if st.button("🏠 Meu Dia", key="nav_home", use_container_width=True,
+                 type="primary" if ativo_home else "secondary"):
+        st.session_state.modulo_ativo = "home"
+        st.rerun()
+
     for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
         if key not in mods: continue
         ativo = st.session_state.modulo_ativo == key
@@ -242,7 +255,10 @@ datas_db     = obter_datas_disponiveis_db()
 modulo_ativo = st.session_state.modulo_ativo
 
 # ── ROTEAMENTO ────────────────────────────────────────────────────
-if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
+if modulo_ativo == "home":
+    renderizar_home(papel, user)
+
+elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
     is_hoje = renderizar_rastreio(
         papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
     )
