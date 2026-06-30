@@ -386,11 +386,12 @@ def listar_lembretes_pessoais(usuario: str) -> list:
     docs = get_db().collection("lembretes_pessoais").where("usuario", "==", usuario).stream()
     return sorted([d.to_dict() for d in docs], key=lambda x: x.get("criado_em",""), reverse=True)
 
-def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str) -> str:
+def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str, vinculo: str = "") -> str:
+    """vinculo: nome do projeto RACI relacionado, ou "" para 'Pontual (fora de projetos)'."""
     ref = get_db().collection("lembretes_pessoais").document()
     ref.set({
         "id": ref.id, "usuario": usuario, "texto": texto,
-        "data_hora": data_hora, "status": "Pendente",
+        "data_hora": data_hora, "status": "Pendente", "vinculo": vinculo,
         "criado_em": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
     })
     return ref.id
