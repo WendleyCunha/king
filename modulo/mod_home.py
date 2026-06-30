@@ -3,11 +3,14 @@ import pandas as pd
 import time
 from datetime import datetime, date, timezone, timedelta
 
+import plotly.express as px
+
 from database import (
     listar_lembretes_pessoais, criar_lembrete_pessoal_db,
     atualizar_lembrete_pessoal_db, deletar_lembrete_pessoal_db,
     listar_raci_projetos, criar_raci_projeto_db,
     atualizar_raci_projeto_db, deletar_raci_projeto_db,
+    salvar_arquivo_raci_db, baixar_arquivo_raci_db, deletar_arquivo_raci_db,
 )
 
 BRT = timezone(timedelta(hours=-3))
@@ -19,6 +22,8 @@ LEGENDA_RACI = (
     "**R**=Responsável (executa) · **A**=Aprovador (decide/autoriza) · "
     "**C**=Consultado (opina antes) · **I**=Informado (avisado depois)"
 )
+TAG_PRIORIDADE = {"Alto": "tr", "Médio": "tg", "Baixo": "tn"}
+TAG_STATUS = {"Não Iniciado": "tb", "Em Andamento": "tg", "Concluído": "tn", "Atrasado": "tr"}
 
 _CSS_HOME = """
 <style>
@@ -28,10 +33,19 @@ _CSS_HOME = """
 .home-item.hoje { border-left-color:#C9A84C; }
 .home-item.futuro { border-left-color:#95a5a6; }
 .home-origem { font-size:0.72rem; color:#64778d; }
+.ponto-regua { width: 30px; height: 30px; border-radius: 50%; background: #e2e8f0;
+    display: flex; align-items: center; justify-content: center; font-weight: bold;
+    color: #64778d; margin: 0 auto; border: 2px solid #cbd5e1; font-size: 12px; }
+.ponto-check { background: #27ae60; color: white; border-color: #27ae60; }
+.ponto-atual { background: #C9A84C; color: white; border-color: #C9A84C;
+    box-shadow: 0 0 8px rgba(201,168,76,0.5); }
+.label-regua { font-size: 9px; text-align: center; font-weight: bold; margin-top: 5px;
+    color: #475569; height: 28px; line-height: 1.1; }
 </style>
 """
 
 
+# ─── Helpers ──────────────────────────────────────────────────────
 def _parse_data(s):
     if not s:
         return None
@@ -43,6 +57,18 @@ def _parse_data(s):
     return None
 
 
+def _salvar(projeto):
+    atualizar_raci_projeto_db(
+        projeto["id"],
+        pessoas=projeto.get("pessoas", []),
+        etapas=projeto.get("etapas", []),
+        lembretes=projeto.get("lembretes", []),
+        pastas_virtuais=projeto.get("pastas_virtuais", {}),
+        etapa_atual=projeto.get("etapa_atual", 0),
+    )
+
+
+# ─── Função principal ─────────────────────────────────────────────
 def renderizar_home(papel: str, user: dict = None):
     if user is None:
         user = {"role": papel, "nome": "Usuário", "usuario": "user"}
@@ -58,311 +84,522 @@ def renderizar_home(papel: str, user: dict = None):
 
     tabs = st.tabs(["📅 Meu Dia", "📊 Meus Projetos (RACI)", "🔔 Todos os Lembretes"])
 
-    # ════════════════════════════════════════════════════════════
-    # ABA 1 — MEU DIA
-    # ════════════════════════════════════════════════════════════
     with tabs[0]:
-        hoje = date.today()
+        _render_meu_dia(uname, lembretes, raci_projetos)
 
-        itens = []
-        for l in lembretes:
-            if l.get("status", "Pendente") != "Pendente":
-                continue
-            itens.append({
-                "origem": "🗒️ Pessoal", "texto": l.get("texto", ""),
-                "quando": l.get("data_hora", ""), "ref": l.get("id"),
-            })
+    with tabs[1]:
+        _render_aba_raci(raci_projetos)
 
-        for rp in raci_projetos:
-            for et in rp.get("etapas", []):
-                for at in et.get("atividades", []):
-                    if at.get("status") == "Concluído":
-                        continue
-                    dp = at.get("data_prevista")
-                    if not dp:
-                        continue
-                    eh_meu = uname and uname in (at.get("papeis", {}) or {}) \
-                        and at["papeis"].get(uname) == "R"
-                    if not eh_meu:
-                        continue  # no "Meu Dia" só entra o que EU sou Responsável (R)
-                    itens.append({
-                        "origem": f"📊 {rp.get('nome','')} / {et.get('nome','')}",
-                        "texto": at.get("atividade", ""), "quando": dp, "ref": None,
-                    })
+    with tabs[2]:
+        _render_todos_lembretes(lembretes)
 
-        atrasados, de_hoje, futuros = [], [], []
-        for it in itens:
-            dt_it = _parse_data(it["quando"])
-            if dt_it is None:
-                futuros.append(it)
-            elif dt_it.date() < hoje:
-                atrasados.append(it)
-            elif dt_it.date() == hoje:
-                de_hoje.append(it)
+
+# ════════════════════════════════════════════════════════════════
+# ABA 1 — MEU DIA
+# ════════════════════════════════════════════════════════════════
+def _render_meu_dia(uname, lembretes, raci_projetos):
+    hoje = date.today()
+
+    itens = []
+    for l in lembretes:
+        if l.get("status", "Pendente") != "Pendente":
+            continue
+        itens.append({
+            "origem": "🗒️ Pessoal", "texto": l.get("texto", ""),
+            "quando": l.get("data_hora", ""), "ref": l.get("id"),
+        })
+
+    for rp in raci_projetos:
+        for et in rp.get("etapas", []):
+            for at in et.get("atividades", []):
+                if at.get("status") == "Concluído":
+                    continue
+                dp = at.get("data_prevista")
+                if not dp:
+                    continue
+                papeis = at.get("papeis", {}) or {}
+                if uname not in papeis or papeis.get(uname) != "R":
+                    continue  # no "Meu Dia" só entra o que EU sou Responsável (R)
+                itens.append({
+                    "origem": f"📊 {rp.get('nome','')} / {et.get('nome','')}",
+                    "texto": at.get("atividade", ""), "quando": dp, "ref": None,
+                })
+
+    atrasados, de_hoje, futuros = [], [], []
+    for it in itens:
+        dt_it = _parse_data(it["quando"])
+        if dt_it is None:
+            futuros.append(it)
+        elif dt_it.date() < hoje:
+            atrasados.append(it)
+        elif dt_it.date() == hoje:
+            de_hoje.append(it)
+        else:
+            futuros.append(it)
+
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f'<div class="kpi-card red"><div class="kpi-label">⚠️ Atrasados</div>'
+                f'<div class="kpi-value">{len(atrasados)}</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📌 Hoje</div>'
+                f'<div class="kpi-value">{len(de_hoje)}</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card gray"><div class="kpi-label">🔜 Próximos</div>'
+                f'<div class="kpi-value">{len(futuros)}</div></div>', unsafe_allow_html=True)
+
+    st.write("")
+    with st.popover("➕ Novo lembrete rápido", use_container_width=True):
+        txt_l = st.text_input("O que precisa lembrar?", key="novo_lembrete_txt")
+        cdl1, cdl2 = st.columns(2)
+        dl = cdl1.date_input("Data", value=date.today(), key="novo_lembrete_data")
+        hl = cdl2.time_input("Hora", value=None, key="novo_lembrete_hora")
+        if st.button("Gravar Lembrete", type="primary", key="btn_novo_lembrete",
+                     use_container_width=True):
+            if txt_l.strip():
+                hora_txt = hl.strftime("%H:%M") if hl else "00:00"
+                criar_lembrete_pessoal_db(
+                    uname, txt_l.strip(), f"{dl.strftime('%d/%m/%Y')} {hora_txt}",
+                )
+                st.success("Lembrete criado!")
+                time.sleep(.4)
+                st.rerun()
             else:
-                futuros.append(it)
+                st.warning("Descreva o lembrete.")
 
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(f'<div class="kpi-card red"><div class="kpi-label">⚠️ Atrasados</div>'
-                    f'<div class="kpi-value">{len(atrasados)}</div></div>', unsafe_allow_html=True)
-        c2.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📌 Hoje</div>'
-                    f'<div class="kpi-value">{len(de_hoje)}</div></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="kpi-card gray"><div class="kpi-label">🔜 Próximos</div>'
-                    f'<div class="kpi-value">{len(futuros)}</div></div>', unsafe_allow_html=True)
+    st.divider()
 
-        st.write("")
-        with st.popover("➕ Novo lembrete rápido", use_container_width=True):
-            txt_l = st.text_input("O que precisa lembrar?", key="novo_lembrete_txt")
-            cdl1, cdl2 = st.columns(2)
-            dl = cdl1.date_input("Data", value=date.today(), key="novo_lembrete_data")
-            hl = cdl2.time_input("Hora", value=None, key="novo_lembrete_hora")
-            if st.button("Gravar Lembrete", type="primary", key="btn_novo_lembrete",
-                         use_container_width=True):
-                if txt_l.strip():
-                    hora_txt = hl.strftime("%H:%M") if hl else "00:00"
-                    criar_lembrete_pessoal_db(
-                        uname, txt_l.strip(),
-                        f"{dl.strftime('%d/%m/%Y')} {hora_txt}",
-                    )
-                    st.success("Lembrete criado!")
+    grupos = [
+        ("⚠️ Atrasados", atrasados, "atrasado"),
+        ("📌 Hoje", de_hoje, "hoje"),
+        ("🔜 Próximos", futuros, "futuro"),
+    ]
+    algum = False
+    for titulo, lista_g, classe in grupos:
+        if not lista_g:
+            continue
+        algum = True
+        st.markdown(f"##### {titulo}")
+        for it in lista_g:
+            cb1, cb2 = st.columns([5, 1])
+            with cb1:
+                st.markdown(
+                    f'<div class="home-item {classe}">'
+                    f'<b>{it["texto"]}</b><br>'
+                    f'<span class="home-origem">{it["origem"]} · {it["quando"]}</span>'
+                    f'</div>', unsafe_allow_html=True)
+            if it["ref"] is not None:
+                with cb2:
+                    if st.button("✅ Concluir", key=f"done_{it['ref']}", use_container_width=True):
+                        atualizar_lembrete_pessoal_db(it["ref"], status="Executado")
+                        st.rerun()
+    if not algum:
+        st.info("🎉 Nenhuma tarefa pendente no momento.")
+
+
+# ════════════════════════════════════════════════════════════════
+# ABA 2 — MEUS PROJETOS (RACI), estilo PQI
+# ════════════════════════════════════════════════════════════════
+def _render_aba_raci(raci_projetos):
+    nomes_proj = [p["nome"] for p in raci_projetos]
+    escolha = st.selectbox("Selecione um projeto:", ["+ CRIAR NOVO PROJETO"] + nomes_proj,
+                           key="home_raci_escolha")
+
+    if escolha == "+ CRIAR NOVO PROJETO":
+        with st.form("form_novo_proj_raci", clear_on_submit=True):
+            nome_np = st.text_input("Nome do Projeto *")
+            pessoas_txt = st.text_area(
+                "Pessoas do projeto (uma por linha — ex: 'Wendley Cunha (Líder de CX)')",
+                height=100,
+            )
+            if st.form_submit_button("🚀 Criar Projeto", type="primary", use_container_width=True):
+                if nome_np.strip():
+                    pessoas = [p.strip() for p in pessoas_txt.splitlines() if p.strip()]
+                    criar_raci_projeto_db(nome_np.strip(), pessoas)
+                    st.success("Projeto criado!")
                     time.sleep(.4)
                     st.rerun()
                 else:
-                    st.warning("Descreva o lembrete.")
+                    st.warning("Informe o nome do projeto.")
+        return  # seguro: só sai desta função, não da renderizar_home
+
+    projeto = next(p for p in raci_projetos if p["nome"] == escolha)
+    projeto.setdefault("etapas", [])
+    projeto.setdefault("lembretes", [])
+    projeto.setdefault("pastas_virtuais", {})
+    projeto.setdefault("etapa_atual", 0)
+
+    with st.expander("⚙️ Configurações do Projeto"):
+        novas_pessoas = st.text_area(
+            "Pessoas do projeto (uma por linha)",
+            value="\n".join(projeto.get("pessoas", [])),
+            key=f"pessoas_{projeto['id']}", height=100,
+        )
+        cse1, cse2 = st.columns(2)
+        if cse1.button("💾 Salvar Pessoas", use_container_width=True, key=f"svp_{projeto['id']}"):
+            projeto["pessoas"] = [p.strip() for p in novas_pessoas.splitlines() if p.strip()]
+            _salvar(projeto)
+            st.success("Atualizado!")
+            time.sleep(.4)
+            st.rerun()
+        if cse2.button("🗑️ Excluir Projeto", use_container_width=True, key=f"delp_{projeto['id']}"):
+            deletar_raci_projeto_db(projeto["id"])
+            st.rerun()
+
+    st.divider()
+    ce1, ce2 = st.columns([3, 1])
+    ce1.markdown("#### 🧭 Etapas do Projeto")
+    with ce2:
+        with st.popover("➕ Nova Etapa", use_container_width=True):
+            nome_etapa = st.text_input("Nome da Etapa", key=f"net_{projeto['id']}")
+            if st.button("Criar Etapa", type="primary", key=f"bnet_{projeto['id']}",
+                         use_container_width=True):
+                if nome_etapa.strip():
+                    projeto["etapas"].append({
+                        "id": datetime.now(BRT).timestamp(),
+                        "nome": nome_etapa.strip(), "atividades": [], "notas": [],
+                    })
+                    _salvar(projeto)
+                    st.rerun()
+                else:
+                    st.warning("Informe o nome da etapa.")
+
+    if not projeto["etapas"]:
+        st.info("Nenhuma etapa criada ainda. Use '➕ Nova Etapa' acima para começar.")
+        return
+
+    # ── Régua visual das etapas (estilo PQI) ──────────────────
+    idx_atual = min(projeto.get("etapa_atual", 0), len(projeto["etapas"]) - 1)
+    cols_r = st.columns(len(projeto["etapas"]))
+    for i, et in enumerate(projeto["etapas"]):
+        cl, txt = "ponto-regua", str(i + 1)
+        if i < idx_atual:
+            cl += " ponto-check"; txt = "✔"
+        elif i == idx_atual:
+            cl += " ponto-atual"
+        cols_r[i].markdown(
+            f'<div class="{cl}">{txt}</div><div class="label-regua">{et["nome"]}</div>',
+            unsafe_allow_html=True)
+
+    etapa = projeto["etapas"][idx_atual]
+    etapa.setdefault("atividades", [])
+    etapa.setdefault("notas", [])
+
+    t_exec, t_dossie, t_analise = st.tabs(["📝 Execução Diária", "📁 Dossiê", "📊 Análise"])
+
+    with t_exec:
+        _render_execucao_etapa(projeto, etapa, idx_atual)
+
+    with t_dossie:
+        _render_dossie_projeto(projeto)
+
+    with t_analise:
+        _render_analise_projeto(projeto)
+
+
+def _render_execucao_etapa(projeto, etapa, idx_atual):
+    col_e1, col_e2 = st.columns([2, 1])
+
+    with col_e1:
+        st.markdown(f"### Etapa {idx_atual + 1}: {etapa['nome']}")
+
+        with st.popover("➕ Adicionar Registro", use_container_width=True):
+            txt_reg = st.text_area("Descrição do registro", key=f"reg_txt_{etapa['id']}")
+            dlr = st.date_input("Lembrete (opcional)", value=None, key=f"reg_d_{etapa['id']}")
+            hlr = st.time_input("Hora", value=None, key=f"reg_h_{etapa['id']}")
+            if st.button("Gravar no Banco", type="primary", key=f"reg_btn_{etapa['id']}",
+                         use_container_width=True):
+                if txt_reg.strip():
+                    etapa["notas"].append({
+                        "texto": txt_reg.strip(),
+                        "data": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+                    })
+                    if dlr and hlr:
+                        projeto["lembretes"].append({
+                            "id": datetime.now(BRT).timestamp(),
+                            "data_hora": f"{dlr.strftime('%d/%m/%Y')} {hlr.strftime('%H:%M')}",
+                            "texto": f"{projeto['nome']} / {etapa['nome']}: {txt_reg.strip()[:60]}",
+                        })
+                    _salvar(projeto)
+                    st.rerun()
+                else:
+                    st.warning("Descreva o registro.")
+
+        notas_recentes = list(reversed(etapa.get("notas", [])))[:5]
+        if notas_recentes:
+            with st.expander(f"📌 Últimos registros ({len(etapa['notas'])} no total)"):
+                for n in notas_recentes:
+                    st.caption(f"🗓️ {n.get('data','')}")
+                    st.write(n.get("texto", ""))
+                    st.markdown("---")
 
         st.divider()
+        st.markdown("#### 📋 Atividades RACI da Etapa")
 
-        grupos = [
-            ("⚠️ Atrasados", atrasados, "atrasado"),
-            ("📌 Hoje", de_hoje, "hoje"),
-            ("🔜 Próximos", futuros, "futuro"),
-        ]
-        algum = False
-        for titulo, lista_g, classe in grupos:
-            if not lista_g:
-                continue
-            algum = True
-            st.markdown(f"##### {titulo}")
-            for it in lista_g:
-                cb1, cb2 = st.columns([5, 1])
-                with cb1:
-                    st.markdown(
-                        f'<div class="home-item {classe}">'
-                        f'<b>{it["texto"]}</b><br>'
-                        f'<span class="home-origem">{it["origem"]} · {it["quando"]}</span>'
-                        f'</div>', unsafe_allow_html=True)
-                if it["ref"] is not None:
-                    with cb2:
-                        if st.button("✅ Concluir", key=f"done_{it['ref']}", use_container_width=True):
-                            atualizar_lembrete_pessoal_db(it["ref"], status="Executado")
-                            st.rerun()
-        if not algum:
-            st.info("🎉 Nenhuma tarefa pendente no momento.")
-
-    # ════════════════════════════════════════════════════════════
-    # ABA 2 — MEUS PROJETOS (RACI)
-    # ════════════════════════════════════════════════════════════
-    with tabs[1]:
-        nomes_proj = [p["nome"] for p in raci_projetos]
-        escolha = st.selectbox("Selecione um projeto:", ["+ CRIAR NOVO PROJETO"] + nomes_proj,
-                               key="home_raci_escolha")
-
-        if escolha == "+ CRIAR NOVO PROJETO":
-            with st.form("form_novo_proj_raci", clear_on_submit=True):
-                nome_np = st.text_input("Nome do Projeto *")
-                pessoas_txt = st.text_area(
-                    "Pessoas do projeto (uma por linha — ex: 'Wendley Cunha (Líder de CX)')",
-                    height=100,
-                )
-                if st.form_submit_button("🚀 Criar Projeto", type="primary", use_container_width=True):
-                    if nome_np.strip():
-                        pessoas = [p.strip() for p in pessoas_txt.splitlines() if p.strip()]
-                        criar_raci_projeto_db(nome_np.strip(), pessoas)
-                        st.success("Projeto criado!")
-                        time.sleep(.4)
-                        st.rerun()
-                    else:
-                        st.warning("Informe o nome do projeto.")
-        else:
-            projeto = next(p for p in raci_projetos if p["nome"] == escolha)
-
-            with st.expander("⚙️ Configurações do Projeto"):
-                novas_pessoas = st.text_area(
-                    "Pessoas do projeto (uma por linha)",
-                    value="\n".join(projeto.get("pessoas", [])),
-                    key=f"pessoas_{projeto['id']}", height=100,
-                )
-                cse1, cse2 = st.columns(2)
-                if cse1.button("💾 Salvar Pessoas", use_container_width=True, key=f"svp_{projeto['id']}"):
-                    pessoas = [p.strip() for p in novas_pessoas.splitlines() if p.strip()]
-                    atualizar_raci_projeto_db(projeto["id"], pessoas=pessoas)
-                    st.success("Atualizado!")
-                    time.sleep(.4)
+        with st.popover("➕ Nova Atividade", use_container_width=True):
+            txt_at = st.text_input("Descrição da Atividade", key=f"at_txt_{etapa['id']}")
+            cprio, cstat = st.columns(2)
+            prio = cprio.selectbox("Prioridade", PRIORIDADES, key=f"at_prio_{etapa['id']}")
+            stt = cstat.selectbox("Status", STATUS_ATIV, key=f"at_stt_{etapa['id']}")
+            dt_prev = st.date_input("Data Prevista", value=None, key=f"at_dtp_{etapa['id']}")
+            if st.button("Adicionar", type="primary", key=f"badd_{etapa['id']}",
+                         use_container_width=True):
+                if txt_at.strip():
+                    nova_ativ = {
+                        "id": datetime.now(BRT).timestamp(),
+                        "atividade": txt_at.strip(), "prioridade": prio, "status": stt,
+                        "data_prevista": dt_prev.strftime("%d/%m/%Y") if dt_prev else None,
+                        "data_entregue": None,
+                        "papeis": {p: "" for p in projeto.get("pessoas", [])},
+                        "prorrogacoes": 0, "historico_prazos": [],
+                    }
+                    etapa["atividades"].append(nova_ativ)
+                    if dt_prev:
+                        projeto["lembretes"].append({
+                            "id": datetime.now(BRT).timestamp(),
+                            "data_hora": f"{dt_prev.strftime('%d/%m/%Y')} 09:00",
+                            "texto": f"Atividade: {txt_at.strip()} ({etapa['nome']})",
+                        })
+                    _salvar(projeto)
                     st.rerun()
-                if cse2.button("🗑️ Excluir Projeto", use_container_width=True, key=f"delp_{projeto['id']}"):
-                    deletar_raci_projeto_db(projeto["id"])
-                    st.rerun()
+                else:
+                    st.warning("Informe a descrição da atividade.")
 
-            st.divider()
-            ce1, ce2 = st.columns([3, 1])
-            ce1.markdown("#### 🧭 Etapas do Projeto")
-            with ce2:
-                with st.popover("➕ Nova Etapa", use_container_width=True):
-                    nome_etapa = st.text_input("Nome da Etapa", key=f"net_{projeto['id']}")
-                    if st.button("Criar Etapa", type="primary", key=f"bnet_{projeto['id']}",
-                                 use_container_width=True):
-                        if nome_etapa.strip():
-                            etapas = projeto.get("etapas", [])
-                            etapas.append({
-                                "id": datetime.now(BRT).timestamp(),
-                                "nome": nome_etapa.strip(), "atividades": [],
-                            })
-                            atualizar_raci_projeto_db(projeto["id"], etapas=etapas)
-                            st.rerun()
+        atividades = etapa["atividades"]
+        if atividades:
+            total_at = len(atividades)
+            concl_at = sum(1 for a in atividades if a.get("status") == "Concluído")
+            st.progress(concl_at / total_at, text=f"{concl_at}/{total_at} atividades concluídas")
+
+            for idx_a, ativ in enumerate(atividades):
+                with st.container(border=True):
+                    col_a, col_b, col_c = st.columns([0.08, 0.52, 0.4])
+                    is_concl = ativ.get("status") == "Concluído"
+
+                    chk = col_a.checkbox("", key=f"chk_{ativ['id']}_{idx_a}", value=is_concl)
+                    if chk and not is_concl:
+                        ativ["status"] = "Concluído"
+                        ativ["data_entregue"] = datetime.now(BRT).strftime("%d/%m/%Y")
+                        _salvar(projeto); st.rerun()
+                    elif not chk and is_concl:
+                        ativ["status"] = "Não Iniciado"
+                        ativ["data_entregue"] = None
+                        _salvar(projeto); st.rerun()
+
+                    risco = "~~" if is_concl else ""
+                    qtd_p = ativ.get("prorrogacoes", 0)
+                    badge_p = f" ⚠️ *({qtd_p}x prorrogada)*" if qtd_p > 0 else ""
+                    tag_prio = TAG_PRIORIDADE.get(ativ.get("prioridade", "Médio"), "tg")
+                    col_b.markdown(
+                        f'{risco}**{ativ["atividade"]}**{risco}{badge_p}<br>'
+                        f'<span class="tag {tag_prio}">{ativ.get("prioridade","—")}</span>',
+                        unsafe_allow_html=True)
+
+                    col_c.caption(f"📅 Previsto: {ativ.get('data_prevista') or '—'}")
+                    if ativ.get("data_entregue"):
+                        col_c.caption(f"✅ Entregue: {ativ['data_entregue']}")
+
+                    with col_c.popover("👥 Papéis (RACI)", use_container_width=True):
+                        pessoas = projeto.get("pessoas", [])
+                        if not pessoas:
+                            st.caption("Cadastre pessoas em Configurações do Projeto.")
                         else:
-                            st.warning("Informe o nome da etapa.")
+                            ativ.setdefault("papeis", {})
+                            mudou = False
+                            for p in pessoas:
+                                atual = ativ["papeis"].get(p, "")
+                                novo = st.selectbox(
+                                    p, PAPEIS_RACI,
+                                    index=PAPEIS_RACI.index(atual) if atual in PAPEIS_RACI else 0,
+                                    key=f"papel_{ativ['id']}_{p}_{idx_a}")
+                                if novo != atual:
+                                    ativ["papeis"][p] = novo
+                                    mudou = True
+                            if mudou and st.button("💾 Salvar Papéis", key=f"svpap_{ativ['id']}_{idx_a}",
+                                                   type="primary", use_container_width=True):
+                                _salvar(projeto); st.rerun()
+                            st.caption(LEGENDA_RACI)
 
-            if not projeto.get("etapas"):
-                st.info("Nenhuma etapa criada ainda. Use '➕ Nova Etapa' acima para começar.")
-            else:
-                nomes_etapas = [e["nome"] for e in projeto["etapas"]]
-                aba_etapas = st.tabs(nomes_etapas)
-                for i_et, etapa in enumerate(projeto["etapas"]):
-                    with aba_etapas[i_et]:
-                        _render_etapa_raci(projeto, etapa)
+                    if not is_concl:
+                        with col_c.popover("⏳ Prorrogar", use_container_width=True):
+                            nova_dt = st.date_input("Nova Data", key=f"ndt_{ativ['id']}_{idx_a}")
+                            motivo_p = st.text_input("Motivo (opcional)", key=f"mot_{ativ['id']}_{idx_a}")
+                            if st.button("Confirmar Nova Data", key=f"cnfp_{ativ['id']}_{idx_a}",
+                                         use_container_width=True):
+                                prazo_antigo = ativ.get("data_prevista") or "—"
+                                ativ.setdefault("historico_prazos", []).append({
+                                    "de": prazo_antigo, "motivo": motivo_p,
+                                    "data_alteracao": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+                                })
+                                ativ["data_prevista"] = nova_dt.strftime("%d/%m/%Y")
+                                ativ["prorrogacoes"] = ativ.get("prorrogacoes", 0) + 1
+                                etapa["notas"].append({
+                                    "texto": f"Atividade '{ativ['atividade']}' adiada de "
+                                             f"{prazo_antigo} para {ativ['data_prevista']}. "
+                                             f"Motivo: {motivo_p or '—'}",
+                                    "data": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+                                })
+                                _salvar(projeto)
+                                st.success("Prazo prorrogado!")
+                                st.rerun()
 
-    # ════════════════════════════════════════════════════════════
-    # ABA 3 — TODOS OS LEMBRETES
-    # ════════════════════════════════════════════════════════════
-    with tabs[2]:
-        st.markdown("##### 🔔 Meus Lembretes")
-        if not lembretes:
-            st.info("Nenhum lembrete cadastrado ainda.")
-        else:
-            filtro = st.multiselect(
-                "Filtrar por status:", ["Pendente", "Executado"],
-                default=["Pendente"], key="filtro_lembretes_home",
-            )
-            for l in lembretes:
-                status_l = l.get("status", "Pendente")
-                if filtro and status_l not in filtro:
-                    continue
-                cols = st.columns([4, 2, 1, 1])
-                icone = "✅" if status_l == "Executado" else "🔵"
-                cols[0].write(f"{icone} {l.get('texto','')}")
-                cols[1].caption(l.get("data_hora", ""))
-                if status_l == "Pendente":
-                    if cols[2].button("✅", key=f"lemb_ok_{l['id']}", use_container_width=True):
-                        atualizar_lembrete_pessoal_db(l["id"], status="Executado")
+                    if col_c.button("🗑️", key=f"delat_{ativ['id']}_{idx_a}", use_container_width=True):
+                        etapa["atividades"].pop(idx_a)
+                        _salvar(projeto)
                         st.rerun()
-                if cols[3].button("🗑️", key=f"lemb_del_{l['id']}", use_container_width=True):
-                    deletar_lembrete_pessoal_db(l["id"])
+        else:
+            st.info("Nenhuma atividade cadastrada para esta etapa.")
+
+    with col_e2:
+        st.markdown("#### ⚙️ Controle")
+
+        pendentes_etapa = [a for a in etapa["atividades"] if a.get("status") != "Concluído"]
+        if pendentes_etapa:
+            st.warning(f"⚠️ {len(pendentes_etapa)} atividade(s) pendente(s) nesta etapa.")
+
+        cav1, cav2 = st.columns(2)
+        if cav1.button("▶️ AVANÇAR", use_container_width=True, type="primary",
+                       key=f"avanca_{projeto['id']}") and idx_atual < len(projeto["etapas"]) - 1:
+            projeto["etapa_atual"] = idx_atual + 1
+            _salvar(projeto)
+            st.rerun()
+        if cav2.button("⏪ RECUAR", use_container_width=True,
+                       key=f"recua_{projeto['id']}") and idx_atual > 0:
+            projeto["etapa_atual"] = idx_atual - 1
+            _salvar(projeto)
+            st.rerun()
+
+        st.markdown("#### ⏰ Lembretes do Projeto")
+        if not projeto["lembretes"]:
+            st.caption("Nenhum lembrete agendado.")
+        for l_idx, l in enumerate(projeto["lembretes"]):
+            with st.container(border=True):
+                st.caption(f"📅 {l['data_hora']}")
+                st.write(l["texto"])
+                if st.button("Concluir", key=f"done_proj_lemb_{l.get('id', l_idx)}"):
+                    projeto["lembretes"].pop(l_idx)
+                    _salvar(projeto)
                     st.rerun()
 
 
-# ─── Matriz RACI de uma etapa ───────────────────────────────────────
-def _render_etapa_raci(projeto, etapa):
-    pessoas = projeto.get("pessoas", [])
-    atividades = etapa.get("atividades", [])
+def _render_dossie_projeto(projeto):
+    sub_dos1, sub_dos2 = st.tabs(["📂 Pastas", "📜 Histórico"])
 
-    def _salvar_etapas(novas_etapas):
-        atualizar_raci_projeto_db(projeto["id"], etapas=novas_etapas)
+    with sub_dos1:
+        with st.popover("➕ Criar Pasta", use_container_width=True):
+            nome_pasta = st.text_input("Nome da Pasta", key=f"np_{projeto['id']}")
+            if st.button("Salvar Pasta", key=f"svnp_{projeto['id']}"):
+                if nome_pasta.strip():
+                    projeto["pastas_virtuais"].setdefault(nome_pasta.strip(), [])
+                    _salvar(projeto)
+                    st.rerun()
+                else:
+                    st.warning("Informe um nome para a pasta.")
 
-    total = len(atividades)
-    if total:
-        concl = sum(1 for a in atividades if a.get("status") == "Concluído")
-        st.progress(concl / total, text=f"{concl}/{total} atividades concluídas")
+        pastas = projeto["pastas_virtuais"]
+        for p_nome in list(pastas.keys()):
+            with st.expander(f"📁 {p_nome}"):
+                col_p1, col_p2 = st.columns([3, 1])
+                if col_p2.button("🗑️ Excluir Pasta", key=f"delpasta_{projeto['id']}_{p_nome}"):
+                    for arq in pastas[p_nome]:
+                        deletar_arquivo_raci_db(arq["file_id"])
+                    del pastas[p_nome]
+                    _salvar(projeto)
+                    st.rerun()
 
-    with st.popover("➕ Adicionar Atividade", use_container_width=True):
-        txt_at = st.text_input("Descrição da Atividade", key=f"at_txt_{etapa['id']}")
-        cprio, cstat = st.columns(2)
-        prio = cprio.selectbox("Prioridade", PRIORIDADES, key=f"at_prio_{etapa['id']}")
-        stt = cstat.selectbox("Status", STATUS_ATIV, key=f"at_stt_{etapa['id']}")
-        cdt1, cdt2 = st.columns(2)
-        dt_prev = cdt1.date_input("Data Prevista", value=None, key=f"at_dtp_{etapa['id']}")
-        dt_ent = cdt2.date_input("Data Entregue", value=None, key=f"at_dte_{etapa['id']}")
-        if st.button("Adicionar", type="primary", key=f"badd_{etapa['id']}", use_container_width=True):
-            if txt_at.strip():
-                etapa.setdefault("atividades", []).append({
-                    "id": datetime.now(BRT).timestamp(),
-                    "atividade": txt_at.strip(), "prioridade": prio, "status": stt,
-                    "data_prevista": dt_prev.strftime("%d/%m/%Y") if dt_prev else None,
-                    "data_entregue": dt_ent.strftime("%d/%m/%Y") if dt_ent else None,
-                    "papeis": {p: "" for p in pessoas},
-                })
-                _salvar_etapas(projeto["etapas"])
-                st.rerun()
-            else:
-                st.warning("Informe a descrição da atividade.")
+                up_files = st.file_uploader("Anexar (Máx 1MB)", accept_multiple_files=True,
+                                            key=f"up_{projeto['id']}_{p_nome}")
+                if st.button("Subir para o Banco", key=f"upbtn_{projeto['id']}_{p_nome}"):
+                    for a in up_files or []:
+                        tamanho_mb = a.size / (1024 * 1024)
+                        if tamanho_mb > 1.0:
+                            st.error(f"Arquivo {a.name} é muito grande ({tamanho_mb:.2f}MB). Limite: 1MB.")
+                            continue
+                        file_id = f"{datetime.now(BRT).timestamp()}_{a.name}"
+                        if salvar_arquivo_raci_db(file_id, a.getvalue()):
+                            pastas[p_nome].append({
+                                "nome": a.name, "file_id": file_id,
+                                "data": datetime.now(BRT).strftime("%d/%m/%Y"),
+                            })
+                    _salvar(projeto)
+                    st.success("Arquivos sincronizados!")
+                    st.rerun()
 
-    if not pessoas:
-        st.warning("⚠️ Cadastre as pessoas do projeto em '⚙️ Configurações do Projeto' "
-                   "para montar a matriz RACI desta etapa.")
+                st.write("---")
+                for idx_f, arq in enumerate(pastas[p_nome]):
+                    c_arq1, c_arq2 = st.columns([4, 1])
+                    c_arq1.write(f"📄 {arq['nome']} ({arq['data']})")
+                    if c_arq2.button("📥 Preparar", key=f"prep_{p_nome}_{idx_f}"):
+                        conteudo = baixar_arquivo_raci_db(arq["file_id"])
+                        if conteudo:
+                            st.download_button(
+                                "Baixar Agora", data=conteudo, file_name=arq["nome"],
+                                mime="application/octet-stream",
+                                key=f"final_dl_{p_nome}_{idx_f}")
+                        else:
+                            st.error("Arquivo não encontrado no banco.")
+
+    with sub_dos2:
+        todas_notas = []
+        for et in projeto["etapas"]:
+            for n in et.get("notas", []):
+                todas_notas.append({"Etapa": et["nome"], "Data": n.get("data", ""),
+                                    "Registro": n.get("texto", "")})
+        if todas_notas:
+            df_hist = pd.DataFrame(todas_notas).sort_values("Data", ascending=False)
+            st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhum registro histórico encontrado.")
+
+
+def _render_analise_projeto(projeto):
+    linhas_at = []
+    for et in projeto["etapas"]:
+        for a in et.get("atividades", []):
+            linhas_at.append({"Etapa": et["nome"], "Status": a.get("status", "—"),
+                              "Prioridade": a.get("prioridade", "—")})
+    if not linhas_at:
+        st.info("Nenhum dado de esforço registrado ainda.")
         return
 
-    if not atividades:
-        st.info("Nenhuma atividade cadastrada nesta etapa ainda.")
+    df_esf = pd.DataFrame(linhas_at)
+    st.markdown(f"### Análise: {projeto['nome']}")
+    cga, cgb = st.columns(2)
+    with cga:
+        st.markdown("##### Atividades por Etapa")
+        fig = px.pie(df_esf, names="Etapa", hole=0.4,
+                    color_discrete_sequence=px.colors.qualitative.Prism)
+        fig.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=300)
+        st.plotly_chart(fig, use_container_width=True)
+    with cgb:
+        st.markdown("##### Atividades por Status")
+        fig2 = px.bar(df_esf["Status"].value_counts().reset_index(),
+                      x="Status", y="count", color_discrete_sequence=["#C9A84C"])
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# ABA 3 — TODOS OS LEMBRETES (pessoais)
+# ════════════════════════════════════════════════════════════════
+def _render_todos_lembretes(lembretes):
+    st.markdown("##### 🔔 Meus Lembretes")
+    if not lembretes:
+        st.info("Nenhum lembrete cadastrado ainda.")
         return
 
-    linhas = []
-    for a in atividades:
-        a.setdefault("papeis", {})
-        linha = {
-            "Prioridade": a.get("prioridade", "Médio"),
-            "Status": a.get("status", "Não Iniciado"),
-            "Atividade": a.get("atividade", ""),
-            "Data Prevista": a.get("data_prevista") or "",
-            "Data Entregue": a.get("data_entregue") or "",
-        }
-        for p in pessoas:
-            linha[p] = a["papeis"].get(p, "")
-        linhas.append(linha)
-    df_matriz = pd.DataFrame(linhas)
-
-    col_config = {
-        "Prioridade": st.column_config.SelectboxColumn(options=PRIORIDADES, required=True),
-        "Status": st.column_config.SelectboxColumn(options=STATUS_ATIV, required=True),
-        "Atividade": st.column_config.TextColumn(width="large"),
-        "Data Prevista": st.column_config.TextColumn(help="dd/mm/aaaa"),
-        "Data Entregue": st.column_config.TextColumn(help="dd/mm/aaaa"),
-    }
-    for p in pessoas:
-        col_config[p] = st.column_config.SelectboxColumn(
-            options=PAPEIS_RACI, help="R=Responsável · A=Aprovador · C=Consultado · I=Informado",
-        )
-
-    editado = st.data_editor(
-        df_matriz, column_config=col_config, use_container_width=True,
-        hide_index=True, num_rows="fixed", key=f"editor_raci_{etapa['id']}",
+    filtro = st.multiselect(
+        "Filtrar por status:", ["Pendente", "Executado"],
+        default=["Pendente"], key="filtro_lembretes_home",
     )
-
-    cs1, _ = st.columns([1, 4])
-    if cs1.button("💾 Salvar Matriz", type="primary", key=f"savemtx_{etapa['id']}",
-                  use_container_width=True):
-        novas = []
-        for i, row in editado.iterrows():
-            original = atividades[i] if i < len(atividades) else {}
-            papeis = {p: row.get(p, "") or "" for p in pessoas}
-            novas.append({
-                "id": original.get("id", datetime.now(BRT).timestamp()),
-                "atividade": row["Atividade"], "prioridade": row["Prioridade"],
-                "status": row["Status"],
-                "data_prevista": row["Data Prevista"] or None,
-                "data_entregue": row["Data Entregue"] or None,
-                "papeis": papeis,
-            })
-        etapa["atividades"] = novas
-        _salvar_etapas(projeto["etapas"])
-        st.success("Matriz salva!")
-        st.rerun()
-
-    st.caption(LEGENDA_RACI)
-
-    with st.expander("🗑️ Excluir uma atividade"):
-        for idx_a, a in enumerate(atividades):
-            cdel1, cdel2 = st.columns([5, 1])
-            cdel1.write(f"{a.get('atividade','')}")
-            if cdel2.button("Excluir", key=f"delat_{etapa['id']}_{idx_a}", use_container_width=True):
-                etapa["atividades"].pop(idx_a)
-                _salvar_etapas(projeto["etapas"])
+    for l in lembretes:
+        status_l = l.get("status", "Pendente")
+        if filtro and status_l not in filtro:
+            continue
+        cols = st.columns([4, 2, 1, 1])
+        icone = "✅" if status_l == "Executado" else "🔵"
+        cols[0].write(f"{icone} {l.get('texto','')}")
+        cols[1].caption(l.get("data_hora", ""))
+        if status_l == "Pendente":
+            if cols[2].button("✅", key=f"lemb_ok_{l['id']}", use_container_width=True):
+                atualizar_lembrete_pessoal_db(l["id"], status="Executado")
                 st.rerun()
+        if cols[3].button("🗑️", key=f"lemb_del_{l['id']}", use_container_width=True):
+            deletar_lembrete_pessoal_db(l["id"])
+            st.rerun()
