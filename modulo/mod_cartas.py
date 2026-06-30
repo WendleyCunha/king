@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import zipfile
 import os
+import time
 from datetime import datetime
 from docx import Document
 from io import BytesIO
@@ -10,7 +11,7 @@ from database import (
     obter_base_colaboradores_db, salvar_novo_colaborador_db, deletar_colaborador_db,
     obter_cartas_db, criar_carta_db, atualizar_carta_db,
     registrar_assinatura_carta_db, deletar_carta_db, reabrir_carta_db,
-    fechar_lote_cartas_db, listar_lotes_cartas_db,
+    fechar_lote_cartas_db, listar_lotes_cartas_db, limpar_anexos_lote_db,
     tem_permissao, pode_exportar, pode_deletar,
 )
 
@@ -60,18 +61,28 @@ def _dados_word(c):
     }
 
 
-# ─── GERAÇÃO DE ZIP (todos os .docx de um lote) ───────────────────────────────
+# ─── GERAÇÃO DE ZIP (arquivos ASSINADOS realmente enviados no upload) ────────
 
 def gerar_zip_lote(cartas_lote):
+    """Recebe uma lista de cartas e retorna (bytes_do_zip, quantidade_incluida)
+    com os ARQUIVOS ASSINADOS de verdade (o que foi enviado no upload de cada
+    carta, guardado em anexo_bin/nome_arquivo) — NÃO regenera o template em
+    branco. Cartas sem arquivo enviado (ainda não assinadas, ou já tiveram o
+    anexo limpo do banco) são ignoradas."""
     zip_buffer = BytesIO()
+    incluidas = 0
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for c in cartas_lote:
-            w_bytes = gerar_word_memoria(_dados_word(c))
-            if w_bytes:
-                nome_arquivo = f"Carta_{c['NOME'].replace(' ', '_')}_{c.get('id','')}.docx"
-                zf.writestr(nome_arquivo, w_bytes)
+            anexo = c.get("anexo_bin")
+            if not anexo:
+                continue  # ainda não tem assinatura enviada (ou já foi limpa)
+            nome_original = c.get("nome_arquivo") or f"{c.get('NOME','arquivo')}.docx"
+            ext = os.path.splitext(nome_original)[1] or ".docx"
+            nome_arquivo = f"Carta_{c.get('NOME','').replace(' ', '_')}_{c.get('id','')}{ext}"
+            zf.writestr(nome_arquivo, anexo)
+            incluidas += 1
     zip_buffer.seek(0)
-    return zip_buffer.getvalue()
+    return zip_buffer.getvalue(), incluidas
 
 
 # ─── GERAÇÃO DE EXCEL ────────────────────────────────────────────────────────
@@ -264,14 +275,17 @@ def renderizar_cartas(papel, user=None):
             if pode_exp:
                 col_zip, col_xls = st.columns(2)
 
-                zip_bytes = gerar_zip_lote(prontas)
+                zip_bytes, n_assinadas = gerar_zip_lote(prontas)
                 col_zip.download_button(
-                    "📥 Baixar ZIP (todos os .docx)",
+                    f"📥 Baixar ZIP (arquivos assinados — {n_assinadas}/{len(prontas)})",
                     data=zip_bytes,
-                    file_name=f"Lote_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    file_name=f"Lote_{datetime.now().strftime('%Y%m%d_%H%M')}_Assinadas.zip",
                     mime="application/zip",
                     use_container_width=True,
+                    disabled=(n_assinadas == 0),
                 )
+                if n_assinadas < len(prontas):
+                    col_zip.caption("⚠️ Algumas cartas ainda não têm o arquivo assinado anexado.")
 
                 excel_bytes = gerar_excel_lote(prontas)
                 col_xls.download_button(
@@ -310,36 +324,77 @@ def renderizar_cartas(papel, user=None):
                     ids_lote = lote.get("ids_cartas", [])
                     cartas_lote = [c for c in cartas if c.get("id") in ids_lote]
 
-                    if cartas_lote:
-                        st.dataframe(
-                            pd.DataFrame(cartas_lote)[["NOME", "VALOR", "LOJA", "COD_CLI", "DATA"]],
+                    if not cartas_lote:
+                        st.caption("Cartas deste lote não encontradas no banco.")
+                        continue
+
+                    st.dataframe(
+                        pd.DataFrame(cartas_lote)[["NOME", "VALOR", "LOJA", "COD_CLI", "DATA"]],
+                        use_container_width=True,
+                    )
+
+                    n_com_anexo = sum(1 for c in cartas_lote if c.get("anexo_bin"))
+                    col_x, col_z, col_del = st.columns(3)
+
+                    # ── Botão 1: Excel completo (sempre disponível) ──
+                    if pode_exp:
+                        xls_hist = gerar_excel_lote(cartas_lote)
+                        col_x.download_button(
+                            "📊 Excel Completo",
+                            data=xls_hist,
+                            file_name=f"Lote_{lote['id']}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"xls_hist_{lote['id']}",
                             use_container_width=True,
                         )
-
-                        if pode_exp:
-                            col_z, col_x = st.columns(2)
-
-                            zip_hist = gerar_zip_lote(cartas_lote)
-                            col_z.download_button(
-                                "📥 ZIP do Lote",
-                                data=zip_hist,
-                                file_name=f"Lote_{lote['id']}.zip",
-                                mime="application/zip",
-                                key=f"zip_hist_{lote['id']}",
-                                use_container_width=True,
-                            )
-
-                            xls_hist = gerar_excel_lote(cartas_lote)
-                            col_x.download_button(
-                                "📊 Excel do Lote",
-                                data=xls_hist,
-                                file_name=f"Lote_{lote['id']}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key=f"xls_hist_{lote['id']}",
-                                use_container_width=True,
-                            )
                     else:
-                        st.caption("Cartas deste lote não encontradas no banco.")
+                        col_x.caption("🔒 Exportação restrita.")
+
+                    # ── Botão 2: ZIP com os arquivos ASSINADOS enviados no upload ──
+                    if pode_exp:
+                        zip_hist, _ = gerar_zip_lote(cartas_lote)
+                        col_z.download_button(
+                            f"📥 ZIP Assinadas ({n_com_anexo}/{len(cartas_lote)})",
+                            data=zip_hist,
+                            file_name=f"Lote_{lote['id']}_Assinadas.zip",
+                            mime="application/zip",
+                            key=f"zip_hist_{lote['id']}",
+                            use_container_width=True,
+                            disabled=(n_com_anexo == 0),
+                        )
+                    else:
+                        col_z.caption("🔒 Exportação restrita.")
+
+                    # ── Botão 3: Excluir os anexos do lote (limpar o banco) ──
+                    with col_del:
+                        if pode_del:
+                            if n_com_anexo == 0:
+                                st.caption("✅ Este lote já não tem arquivos anexados.")
+                            else:
+                                conf_key = f"confdel_{lote['id']}"
+                                confirmar = st.checkbox(
+                                    f"Confirmo excluir os {n_com_anexo} arquivo(s)",
+                                    key=conf_key,
+                                )
+                                if st.button(
+                                    "🗑️ Excluir Arquivos do Lote",
+                                    key=f"delanexos_{lote['id']}",
+                                    use_container_width=True,
+                                    disabled=not confirmar,
+                                ):
+                                    limpar_anexos_lote_db(ids_lote)
+                                    st.success(
+                                        "✅ Arquivos anexados removidos do banco! "
+                                        "O histórico (nomes, valores, status, datas) foi mantido."
+                                    )
+                                    time.sleep(1)
+                                    st.rerun()
+                                st.caption(
+                                    "⚠️ Baixe o ZIP acima antes de excluir — esta ação é "
+                                    "irreversível e só remove o arquivo, não o registro do lote."
+                                )
+                        else:
+                            st.caption("🔒 Exclusão restrita a administradores.")
 
     # ── ABA 4: CONFIG ────────────────────────────────────────────────────────
     with tabs[4]:
@@ -364,6 +419,56 @@ def renderizar_cartas(papel, user=None):
                     else:
                         st.error("Preencha nome e CPF.")
 
+            st.markdown("---")
+            st.markdown("**📤 Importar em lote (Excel ou CSV)**")
+            st.caption("Coluna A = Nome, Coluna B = CPF. Aceita planilha com ou sem cabeçalho.")
+            up_colab = st.file_uploader(
+                "Selecione o arquivo", type=["xlsx", "csv"], key="up_colab_lote"
+            )
+            if up_colab is not None:
+                try:
+                    if up_colab.name.lower().endswith(".csv"):
+                        df_up = pd.read_csv(up_colab, header=None, dtype=str)
+                    else:
+                        df_up = pd.read_excel(up_colab, header=None, dtype=str)
+
+                    if df_up.shape[1] < 2:
+                        st.error("O arquivo precisa ter pelo menos 2 colunas (Nome e CPF).")
+                    else:
+                        df_up = df_up.iloc[:, :2]
+                        df_up.columns = ["NOME", "CPF"]
+                        df_up = df_up.dropna(how="all")
+
+                        st.markdown(f"**Prévia ({len(df_up)} linha(s) encontradas):**")
+                        st.dataframe(df_up, use_container_width=True, hide_index=True)
+
+                        tem_cabecalho = st.checkbox(
+                            "A primeira linha é um cabeçalho (ex: 'Nome', 'CPF') — ignorar",
+                            value=True, key="up_colab_header",
+                        )
+                        if st.button("✅ Confirmar importação", key="btn_import_colab",
+                                     type="primary", use_container_width=True):
+                            linhas = df_up.iloc[1:] if tem_cabecalho else df_up
+                            importados, ignorados = 0, 0
+                            for _, row in linhas.iterrows():
+                                nome_imp = str(row["NOME"]).strip() if pd.notna(row["NOME"]) else ""
+                                cpf_imp  = str(row["CPF"]).strip() if pd.notna(row["CPF"]) else ""
+                                if nome_imp and nome_imp.lower() != "nan" \
+                                        and cpf_imp and cpf_imp.lower() != "nan":
+                                    salvar_novo_colaborador_db(nome_imp, cpf_imp)
+                                    importados += 1
+                                else:
+                                    ignorados += 1
+                            msg = f"✅ {importados} colaborador(es) importado(s)!"
+                            if ignorados:
+                                msg += f" ({ignorados} linha(s) ignorada(s) por falta de nome/CPF)"
+                            st.success(msg)
+                            time.sleep(1.2)
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Erro ao ler o arquivo: {e}")
+
+            st.markdown("---")
             if dict_colab:
                 st.write("**Colaboradores cadastrados:**")
                 for nome_c, cpf_c in sorted(dict_colab.items()):
