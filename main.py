@@ -23,8 +23,10 @@ except ImportError:
 
 try:
     from modulo.mod_cartas import renderizar_cartas
-except ImportError:
-    def renderizar_cartas(papel, user=None): st.info("🚧 Módulo de Cartas em desenvolvimento...")
+except Exception as _erro_import_cartas:
+    def renderizar_cartas(papel, user=None, _erro=_erro_import_cartas):
+        st.error("⚠️ Falha ao carregar o módulo de Cartas. Detalhe técnico abaixo:")
+        st.exception(_erro)
 
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
