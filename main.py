@@ -216,9 +216,9 @@ with hc1:
     <div class="ks-header">
         {logo_html}
         <div style="flex:1;">
-            <div class="ks-title">Painel de Entregas · KingStar</div>
+            <div class="ks-title">Painel KingStar</div>
             <div class="ks-sub">
-                KingStar Colchoes &nbsp;·&nbsp; Eco 360° &nbsp;·&nbsp; SimpliRoute &nbsp;·&nbsp;
+                KingStar Colchoes &nbsp;·&nbsp; by Wendley &nbsp;·&nbsp;
                 <span style="color:#C9A84C;font-weight:700;">Tempo Real</span>
                 &nbsp;·&nbsp; {agora_brt()}
             </div>
