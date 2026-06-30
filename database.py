@@ -371,3 +371,53 @@ def limpar_anexos_lote_db(ids_cartas: list):
         ref = db.collection("cartas_rh").document(id_c)
         batch.update(ref, {"anexo_bin": None})
     batch.commit()
+
+# ══════════════════════════════════════════════════════════════════
+# HOME — Lembretes pessoais e Projetos RACI
+# Coleções:
+#   /lembretes_pessoais/{id} → { id, usuario, texto, data_hora, status, criado_em }
+#   /raci_projetos/{id}      → { id, nome, data_criacao, pessoas[], etapas[] }
+#       etapas: [{ id, nome, atividades: [{ id, atividade, prioridade,
+#                   status, data_prevista, data_entregue, papeis:{pessoa:R/A/C/I} }] }]
+# ══════════════════════════════════════════════════════════════════
+
+def listar_lembretes_pessoais(usuario: str) -> list:
+    """Lembretes do usuário logado (não aparecem para outros usuários)."""
+    docs = get_db().collection("lembretes_pessoais").where("usuario", "==", usuario).stream()
+    return sorted([d.to_dict() for d in docs], key=lambda x: x.get("criado_em",""), reverse=True)
+
+def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str) -> str:
+    ref = get_db().collection("lembretes_pessoais").document()
+    ref.set({
+        "id": ref.id, "usuario": usuario, "texto": texto,
+        "data_hora": data_hora, "status": "Pendente",
+        "criado_em": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+    })
+    return ref.id
+
+def atualizar_lembrete_pessoal_db(id_lembrete: str, **campos):
+    if campos:
+        get_db().collection("lembretes_pessoais").document(id_lembrete).update(campos)
+
+def deletar_lembrete_pessoal_db(id_lembrete: str):
+    get_db().collection("lembretes_pessoais").document(id_lembrete).delete()
+
+def listar_raci_projetos() -> list:
+    """Projetos RACI — compartilhados entre todos os usuários com acesso ao Home."""
+    docs = get_db().collection("raci_projetos").stream()
+    return sorted([d.to_dict() for d in docs], key=lambda x: x.get("nome",""))
+
+def criar_raci_projeto_db(nome: str, pessoas: list) -> str:
+    ref = get_db().collection("raci_projetos").document()
+    ref.set({
+        "id": ref.id, "nome": nome, "pessoas": pessoas, "etapas": [],
+        "data_criacao": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+    })
+    return ref.id
+
+def atualizar_raci_projeto_db(id_projeto: str, **campos):
+    if campos:
+        get_db().collection("raci_projetos").document(id_projeto).update(campos)
+
+def deletar_raci_projeto_db(id_projeto: str):
+    get_db().collection("raci_projetos").document(id_projeto).delete()
