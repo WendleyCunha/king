@@ -593,6 +593,47 @@ def renderizar_tickets(papel: str, user: dict = None):
 
 
 # ───────────────────────────────────────────────────────────────────
+# PAGINAÇÃO (9 tickets por página, em qualquer grid de cards)
+# ───────────────────────────────────────────────────────────────────
+PAGE_SIZE_CARDS = 9
+
+def _paginar(lista, chave_estado):
+    """Recorta a lista na página atual (guardada em session_state) e
+    retorna os itens da página + info de navegação."""
+    total = len(lista)
+    total_paginas = max(1, (total + PAGE_SIZE_CARDS - 1) // PAGE_SIZE_CARDS)
+    pag_key = f"tk_pag_{chave_estado}"
+    if pag_key not in st.session_state:
+        st.session_state[pag_key] = 1
+    pag_atual = min(st.session_state[pag_key], total_paginas)
+    inicio = (pag_atual - 1) * PAGE_SIZE_CARDS
+    fim    = inicio + PAGE_SIZE_CARDS
+    return lista[inicio:fim], pag_atual, total_paginas, pag_key, total
+
+def _nav_paginas(pag_atual, total_paginas, pag_key, total):
+    """Botões Anterior/Próxima + indicador 'Página X de Y'."""
+    if total_paginas <= 1:
+        return
+    st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
+    cnav1, cnav2, cnav3 = st.columns([1, 2, 1])
+    with cnav1:
+        if st.button("← Anterior", key=f"{pag_key}_prev",
+                     disabled=(pag_atual <= 1), use_container_width=True):
+            st.session_state[pag_key] = pag_atual - 1
+            st.rerun()
+    with cnav2:
+        st.markdown(
+            f'<div style="text-align:center;color:#64778d;font-size:0.85rem;'
+            f'padding-top:6px;">Página {pag_atual} de {total_paginas} · {total} ticket(s)</div>',
+            unsafe_allow_html=True)
+    with cnav3:
+        if st.button("Próxima →", key=f"{pag_key}_next",
+                     disabled=(pag_atual >= total_paginas), use_container_width=True):
+            st.session_state[pag_key] = pag_atual + 1
+            st.rerun()
+
+
+# ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
 def _render_lista_em_grid(filtrados, user, papel, fila):
@@ -637,11 +678,15 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
                 f'{icone} {esc(chave)} <span style="color:#64778d;font-weight:500;">— '
                 f'{len(lst)} ticket(s)</span>{extra}</div>'), unsafe_allow_html=True)
 
-        for i in range(0, len(lst), n_cols):
+        pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
+            lst, f"lista_{fila}_{chave}"
+        )
+        for i in range(0, len(pagina_itens), n_cols):
             cols_grid = st.columns(n_cols)
-            for j, t in enumerate(lst[i:i + n_cols]):
+            for j, t in enumerate(pagina_itens[i:i + n_cols]):
                 with cols_grid[j]:
                     _render_card_clicavel(t, user, papel)
+        _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
 def _render_card_clicavel(t, user, papel):
@@ -1152,12 +1197,23 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
                         st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
 
                 st.markdown("---")
-                # ── Lista dos tickets ──
-                for t in meus:
-                    _render_card(t)
-                    if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
-                                 key=f"eqopen_{uname}_{t.get('id','')}", use_container_width=True):
-                        abrir_ticket_popup(t.get("id"), user, papel)
+                # ── Lista dos tickets (grid + paginação, igual à fila do atendente) ──
+                n_cols_eq = st.selectbox(
+                    "🔳 Cards por linha", [3, 4], index=0, key=f"eq_ncols_{uname}"
+                )
+                pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
+                    meus, f"eq_{uname}"
+                )
+                for i in range(0, len(pagina_itens), n_cols_eq):
+                    cols_grid = st.columns(n_cols_eq)
+                    for j, t in enumerate(pagina_itens[i:i + n_cols_eq]):
+                        with cols_grid[j]:
+                            _render_card(t)
+                            if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
+                                         key=f"eqopen_{uname}_{t.get('id','')}",
+                                         use_container_width=True):
+                                abrir_ticket_popup(t.get("id"), user, papel)
+                _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
 def _render_sync():
