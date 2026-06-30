@@ -1160,7 +1160,7 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
 
     # ── Filtros globais — valem para todas as abas abaixo ─────────
     st.markdown("---")
-    fc1, fc2 = st.columns(2)
+    fc1, fc2, fc3 = st.columns([1, 1, 1.2])
     with fc1:
         op_sel = st.multiselect(
             "👤 Filtrar por atendente",
@@ -1175,6 +1175,31 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             key="vg_filtro_motivo",
         )
 
+    hoje = datetime.now(BRT).date()
+    primeiro_dia_mes = hoje.replace(day=1)
+    with fc3:
+        periodo = st.date_input(
+            "📅 Período (Criado em) — para fechamento mensal",
+            value=(primeiro_dia_mes, hoje),
+            format="DD/MM/YYYY",
+            key="vg_filtro_periodo",
+        )
+    # st.date_input em modo intervalo só fecha o tuple (ini, fim) quando o
+    # usuário escolhe as DUAS datas; enquanto isso, mantém só uma — nesse
+    # caso ainda não filtramos por data.
+    if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
+        data_ini, data_fim = periodo
+    else:
+        data_ini, data_fim = None, None
+
+    def _data_ticket(t):
+        try:
+            return datetime.fromisoformat(
+                str(t.get("criado_em", "")).replace(" ", "T")
+            ).date()
+        except Exception:
+            return None
+
     def _passa_filtro(t):
         if mot_sel and (t.get("tabulacao") or "Sem tabulação") not in mot_sel:
             return False
@@ -1183,11 +1208,19 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             nomes_at = [nomes_users.get(a, a) for a in ats]
             if not any(n in op_sel for n in nomes_at):
                 return False
+        if data_ini and data_fim:
+            d = _data_ticket(t)
+            if d is None or not (data_ini <= d <= data_fim):
+                return False
         return True
 
     tickets_filtrados = [t for t in tickets_dep if _passa_filtro(t)]
-    if op_sel or mot_sel:
-        st.caption(f"🔎 Filtro ativo — exibindo {len(tickets_filtrados)} de {len(tickets_dep)} ticket(s).")
+    filtros_ativos = op_sel or mot_sel or (data_ini and data_fim)
+    if filtros_ativos:
+        periodo_txt = f" · período {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}" \
+                      if (data_ini and data_fim) else ""
+        st.caption(f"🔎 Filtro ativo{periodo_txt} — exibindo {len(tickets_filtrados)} "
+                   f"de {len(tickets_dep)} ticket(s).")
 
     aba_dash, aba_atend, aba_motivo, aba_sla, aba_export = st.tabs(
         ["📊 Dashboard", "👥 Por Atendente", "📋 Por Motivo", "⏳ SLA Perdido", "📥 Exportar"]
@@ -1206,7 +1239,7 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
         _aba_sla_perdido(tickets_filtrados, nomes_users, user, papel)
 
     with aba_export:
-        _aba_exportar(tickets_filtrados, nomes_users, dep_alvo)
+        _aba_exportar(tickets_filtrados, nomes_users, dep_alvo, data_ini, data_fim)
 
 
 # ── ABA: 📊 Dashboard ───────────────────────────────────────────────
@@ -1466,24 +1499,29 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
 
 
 # ── ABA: 📥 Exportar (relatório completo em Excel) ──────────────────
-def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str):
+def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str, data_ini=None, data_fim=None):
     st.markdown("##### 📥 Relatório Completo")
     st.caption(
         "Gera uma planilha .xlsx com 3 abas: **Por Atendente** (produtividade e SLA perdido), "
         "**Por Motivo** (volume por tabulação) e **Detalhe Completo** (todos os tickets do "
         "recorte filtrado acima, ticket a ticket)."
     )
-    st.markdown(f"Departamento: **{dep_alvo}** &nbsp;·&nbsp; Tickets no relatório: **{len(tickets)}**")
+    periodo_txt = (f"{data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}"
+                   if (data_ini and data_fim) else "todo o histórico")
+    st.markdown(f"Departamento: **{dep_alvo}** &nbsp;·&nbsp; Período: **{periodo_txt}** "
+                f"&nbsp;·&nbsp; Tickets no relatório: **{len(tickets)}**")
 
     if not tickets:
         st.info("Nenhum ticket para exportar com os filtros atuais.")
         return
 
+    sufixo_periodo = (f"{data_ini.strftime('%Y%m%d')}_a_{data_fim.strftime('%Y%m%d')}"
+                       if (data_ini and data_fim) else datetime.now(BRT).strftime('%Y%m%d_%H%M'))
     xls_bytes = _gerar_excel_relatorio(tickets, nomes_users)
     st.download_button(
         "📊 Baixar Relatório Completo (.xlsx)",
         data=xls_bytes,
-        file_name=f"Relatorio_Tickets_{dep_alvo}_{datetime.now(BRT).strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"Relatorio_Tickets_{dep_alvo}_{sufixo_periodo}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=True,
