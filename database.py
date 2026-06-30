@@ -421,3 +421,18 @@ def atualizar_raci_projeto_db(id_projeto: str, **campos):
 
 def deletar_raci_projeto_db(id_projeto: str):
     get_db().collection("raci_projetos").document(id_projeto).delete()
+
+def salvar_arquivo_raci_db(file_id: str, conteudo: bytes) -> bool:
+    """Salva um arquivo do Dossiê (Pastas) de um projeto RACI."""
+    try:
+        get_db().collection("raci_arquivos").document(file_id).set({"bin": conteudo})
+        return True
+    except Exception:
+        return False
+
+def baixar_arquivo_raci_db(file_id: str):
+    doc = get_db().collection("raci_arquivos").document(file_id).get()
+    return doc.to_dict().get("bin") if doc.exists else None
+
+def deletar_arquivo_raci_db(file_id: str):
+    get_db().collection("raci_arquivos").document(file_id).delete()
