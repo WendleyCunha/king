@@ -528,7 +528,8 @@ def renderizar_tickets(papel: str, user: dict = None):
             st.session_state.tk_modo = "novo"; st.rerun()
 
         if papel in ("supervisor", "adm"):
-            if st.button("👥 Equipe", use_container_width=True):
+            if st.button("📊 Visão Geral da Operação", use_container_width=True,
+                         type="primary" if st.session_state.tk_modo == "equipe" else "secondary"):
                 st.session_state.tk_modo = "equipe"; st.rerun()
 
         if papel == "adm":
@@ -567,26 +568,8 @@ def renderizar_tickets(papel: str, user: dict = None):
 
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
-            elif fila == "meus":
-                # Meus tickets: agrupado por DEPARTAMENTO (pra quem eu abri),
-                # mostrando status e se estourou ou não o prazo.
-                from collections import defaultdict
-                grupos = defaultdict(list)
-                for t in filtrados:
-                    grupos[t.get("departamento") or t.get("categoria") or "—"].append(t)
-                for dep in sorted(grupos):
-                    lst    = grupos[dep]
-                    n_venc = sum(1 for t in lst if ticket_vencido_pendente(t))
-                    extra  = f' · <span style="color:#8A6D1F;font-weight:700;">⏳ {n_venc} com prazo estourado</span>' if n_venc else ""
-                    st.markdown(_html(
-                        f'<div style="margin:14px 0 6px;font-weight:700;color:#2c3e50;">'
-                        f'🏢 {esc(dep)} <span style="color:#64778d;font-weight:500;">— '
-                        f'{len(lst)} ticket(s)</span>{extra}</div>'), unsafe_allow_html=True)
-                    for t in lst:
-                        _render_card_clicavel(t, user, papel)
             else:
-                for t in filtrados:
-                    _render_card_clicavel(t, user, papel)
+                _render_lista_em_grid(filtrados, user, papel, fila)
 
         # ══ DETALHE ══════════════════════════════════════════════
         elif modo == "detalhe":
@@ -596,9 +579,13 @@ def renderizar_tickets(papel: str, user: dict = None):
         elif modo == "novo":
             _render_novo(user)
 
-        # ══ EQUIPE (Regra 5) ═════════════════════════════════════
+        # ══ VISÃO GERAL DA OPERAÇÃO (só supervisor/adm) ══════════
         elif modo == "equipe":
-            _render_equipe(user, papel, todos_geral)
+            if papel not in ("supervisor", "adm"):
+                st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
+                st.session_state.tk_modo = "lista"
+            else:
+                _render_visao_geral_operacao(user, papel, todos_geral)
 
         # ══ SYNC ZENDESK ═════════════════════════════════════════
         elif modo == "sync":
@@ -606,8 +593,102 @@ def renderizar_tickets(papel: str, user: dict = None):
 
 
 # ───────────────────────────────────────────────────────────────────
+# PAGINAÇÃO (9 tickets por página, em qualquer grid de cards)
+# ───────────────────────────────────────────────────────────────────
+PAGE_SIZE_CARDS = 9
+
+def _paginar(lista, chave_estado):
+    """Recorta a lista na página atual (guardada em session_state) e
+    retorna os itens da página + info de navegação."""
+    total = len(lista)
+    total_paginas = max(1, (total + PAGE_SIZE_CARDS - 1) // PAGE_SIZE_CARDS)
+    pag_key = f"tk_pag_{chave_estado}"
+    if pag_key not in st.session_state:
+        st.session_state[pag_key] = 1
+    pag_atual = min(st.session_state[pag_key], total_paginas)
+    inicio = (pag_atual - 1) * PAGE_SIZE_CARDS
+    fim    = inicio + PAGE_SIZE_CARDS
+    return lista[inicio:fim], pag_atual, total_paginas, pag_key, total
+
+def _nav_paginas(pag_atual, total_paginas, pag_key, total):
+    """Botões Anterior/Próxima + indicador 'Página X de Y'."""
+    if total_paginas <= 1:
+        return
+    st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
+    cnav1, cnav2, cnav3 = st.columns([1, 2, 1])
+    with cnav1:
+        if st.button("← Anterior", key=f"{pag_key}_prev",
+                     disabled=(pag_atual <= 1), use_container_width=True):
+            st.session_state[pag_key] = pag_atual - 1
+            st.rerun()
+    with cnav2:
+        st.markdown(
+            f'<div style="text-align:center;color:#64778d;font-size:0.85rem;'
+            f'padding-top:6px;">Página {pag_atual} de {total_paginas} · {total} ticket(s)</div>',
+            unsafe_allow_html=True)
+    with cnav3:
+        if st.button("Próxima →", key=f"{pag_key}_next",
+                     disabled=(pag_atual >= total_paginas), use_container_width=True):
+            st.session_state[pag_key] = pag_atual + 1
+            st.rerun()
+
+
+# ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
+def _render_lista_em_grid(filtrados, user, papel, fila):
+    """Mostra os tickets em CARDS lado a lado (grid de 3 ou 4 colunas),
+    com opção de organizar por Motivo (Tabulação), Departamento ou sem
+    agrupamento. Vale para qualquer fila e qualquer papel (atendente ou
+    supervisor) — não substitui nenhuma função existente, só a forma
+    de exibição da lista."""
+    ctrl1, ctrl2 = st.columns([2, 1])
+    with ctrl1:
+        modo_agrupar = st.selectbox(
+            "🗂️ Organizar por",
+            ["Motivo (Tabulação)", "Departamento", "Sem agrupamento"],
+            index=0, key=f"tk_agrupar_{fila}"
+        )
+    with ctrl2:
+        n_cols = st.selectbox(
+            "🔳 Cards por linha", [3, 4], index=0, key=f"tk_ncols_{fila}"
+        )
+
+    from collections import defaultdict
+    grupos = defaultdict(list)
+    if modo_agrupar == "Departamento":
+        for t in filtrados:
+            grupos[t.get("departamento") or t.get("categoria") or "—"].append(t)
+    elif modo_agrupar == "Motivo (Tabulação)":
+        for t in filtrados:
+            grupos[t.get("tabulacao") or "Sem tabulação"].append(t)
+    else:
+        grupos["__todos__"] = filtrados
+
+    for chave in sorted(grupos.keys()):
+        lst = grupos[chave]
+        n_venc = sum(1 for t in lst if ticket_vencido_pendente(t))
+        extra = (f' · <span style="color:#8A6D1F;font-weight:700;">⏳ {n_venc} com prazo '
+                 f'estourado</span>') if n_venc else ""
+
+        if modo_agrupar != "Sem agrupamento":
+            icone = "📋" if modo_agrupar == "Motivo (Tabulação)" else "🏢"
+            st.markdown(_html(
+                f'<div style="margin:14px 0 6px;font-weight:700;color:#2c3e50;">'
+                f'{icone} {esc(chave)} <span style="color:#64778d;font-weight:500;">— '
+                f'{len(lst)} ticket(s)</span>{extra}</div>'), unsafe_allow_html=True)
+
+        pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
+            lst, f"lista_{fila}_{chave}"
+        )
+        for i in range(0, len(pagina_itens), n_cols):
+            cols_grid = st.columns(n_cols)
+            for j, t in enumerate(pagina_itens[i:i + n_cols]):
+                with cols_grid[j]:
+                    _render_card_clicavel(t, user, papel)
+        _nav_paginas(pag_atual, total_paginas, pag_key, total)
+
+
 def _render_card_clicavel(t, user, papel):
     """Card cujo título é um BOTÃO (clica em cima → abre o popup).
     Borda/realce piscam conforme o SLA (suave a 30min, forte se vencido)
@@ -946,17 +1027,24 @@ def _render_novo(user):
                 st.session_state.tk_modo = "lista"; st.rerun()
 
 
-def _render_equipe(user, papel, todos_geral):
-    st.markdown("### 👥 Equipe & Tickets do Departamento")
+# ═══════════════════════════════════════════════════════════════════
+# VISÃO GERAL DA OPERAÇÃO — bloco exclusivo de Supervisor/ADM.
+# Código totalmente separado da experiência do atendente comum.
+# Mostra, dentro do(s) departamento(s) que o supervisor enxerga:
+#   1) Tickets por TABULAÇÃO (quantidade + com quem está)
+#   2) Tickets por ATENDENTE (quantidade + transferência)
+# ═══════════════════════════════════════════════════════════════════
+def _render_visao_geral_operacao(user, papel, todos_geral):
+    st.markdown("### 📊 Visão Geral da Operação")
     if st.button("← Voltar"):
         st.session_state.tk_modo = "lista"; st.rerun()
 
-    # adm escolhe o depto; supervisor fica fixo no seu
+    # adm escolhe o depto; supervisor fica fixo no seu próprio departamento
     if papel == "adm":
         dep_nomes = [d["nome"] for d in listar_departamentos()]
         if not dep_nomes:
             st.info("Nenhum departamento cadastrado."); return
-        dep_alvo = st.selectbox("Departamento", dep_nomes, key="eq_dep")
+        dep_alvo = st.selectbox("Departamento", dep_nomes, key="vg_dep")
     else:
         dep_alvo = user.get("departamento","") or "—"
         st.markdown(f"Departamento: **{dep_alvo}**")
@@ -976,7 +1064,67 @@ def _render_equipe(user, papel, todos_geral):
         st.markdown(_html(f'<div class="tk-banner">⚠️ {vencidos} ticket(s) do departamento '
                           f'com SLA vencido!</div>'), unsafe_allow_html=True)
 
+    # ── BLOCO 1 — Por TABULAÇÃO: quantidade + com quem está ──────
     st.markdown("---")
+    st.markdown("#### 📋 Tickets por Tabulação")
+
+    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep_alvo]
+    nomes_users = {u.get("usuario",""): u.get("nome", u.get("usuario","")) for u in usuarios_dep}
+
+    def _resumo_quem(lista_tickets):
+        """Conta quantos tickets cada atendente tem dentro da lista informada."""
+        from collections import Counter
+        cont = Counter()
+        for t in lista_tickets:
+            ats = t.get("atendentes") or []
+            if not ats and t.get("atribuido_para"):
+                ats = [t.get("atribuido_para")]
+            if not ats:
+                cont["— ninguém atribuído —"] += 1
+            for a in ats:
+                cont[nomes_users.get(a, a)] += 1
+        return cont
+
+    if not tabs_dep:
+        st.caption("Nenhuma tabulação cadastrada para este departamento.")
+    else:
+        for tb in tabs_dep:
+            nome_tab  = tb.get("nome", "—")
+            tks_tab   = [t for t in tickets_dep if t.get("tabulacao") == nome_tab]
+            n_total   = len(tks_tab)
+            n_pend    = sum(1 for t in tks_tab if t.get("status") in STATUS_ABERTOS)
+            n_venc    = sum(1 for t in tks_tab if ticket_vencido_pendente(t))
+            cont_at   = _resumo_quem(tks_tab)
+            quem_str  = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            alerta    = f' <span class="tk-blink">⏳ {n_venc} vencido(s)</span>' if n_venc else ""
+
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#2c3e50;">📋 {esc(nome_tab)}</b>{alerta}<br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">'
+                f'Total: {n_total} &nbsp;·&nbsp; Pendentes: {n_pend} &nbsp;·&nbsp; '
+                f'SLA vencido: {n_venc}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+        # Tickets do departamento sem tabulação definida
+        sem_tab = [t for t in tickets_dep if not t.get("tabulacao")]
+        if sem_tab:
+            cont_at  = _resumo_quem(sem_tab)
+            quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#64778d;">📋 Sem tabulação</b><br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_tab)}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+    # ── BLOCO 2 — Por ATENDENTE: quantidade + transferência ───────
+    st.markdown("---")
+    st.markdown("#### 👥 Tickets por Atendente")
+
     if not usuarios_dep:
         st.info("Nenhum atendente vinculado a este departamento.")
         return
@@ -1002,52 +1150,70 @@ def _render_equipe(user, papel, todos_geral):
             f'</div>'), unsafe_allow_html=True)
 
         if meus:
+            meus_transferiveis = [t for t in meus if t.get("status") in STATUS_ABERTOS]
             with st.expander(f"Ver / Transferir tickets de {nome} ({len(meus)})"):
                 # ── Transferência de responsável (férias/falta) ──
+                # Só tickets ainda ABERTOS entram na transferência.
+                # Tickets finalizados/cancelados são histórico e não são tratativa.
                 dest_opts = {x["usuario"]: x.get("nome", x["usuario"])
                              for x in usuarios_dep if x.get("usuario") != uname}
-                ids_meus = [t.get("id") for t in meus]
+                ids_meus = [t.get("id") for t in meus_transferiveis]
                 labels   = {t.get("id"):
                             f"#{t.get('id_zendesk', t.get('id','')[:8])} — {str(t.get('assunto',''))[:40]}"
-                            for t in meus}
+                            for t in meus_transferiveis}
 
                 st.markdown("**🔁 Transferir responsável**")
-                marcar_todos = st.checkbox("Marcar TODOS os tickets deste atendente",
-                                           value=True, key=f"all_{uname}")
-                if marcar_todos:
-                    selec = ids_meus
-                    st.caption(f"{len(selec)} ticket(s) selecionado(s).")
+                if not meus_transferiveis:
+                    st.caption("✅ Nenhum ticket em aberto deste atendente — nada para transferir "
+                               "(os finalizados/cancelados não entram na transferência).")
                 else:
-                    selec = st.multiselect("Selecione os tickets",
-                                           options=ids_meus,
-                                           format_func=lambda x: labels.get(x, x),
-                                           key=f"sel_{uname}")
+                    marcar_todos = st.checkbox("Marcar TODOS os tickets em aberto deste atendente",
+                                               value=True, key=f"all_{uname}")
+                    if marcar_todos:
+                        selec = ids_meus
+                        st.caption(f"{len(selec)} ticket(s) em aberto selecionado(s).")
+                    else:
+                        selec = st.multiselect("Selecione os tickets",
+                                               options=ids_meus,
+                                               format_func=lambda x: labels.get(x, x),
+                                               key=f"sel_{uname}")
 
-                if dest_opts:
-                    novo_resp = st.selectbox(
-                        "Novo responsável",
-                        options=list(dest_opts.keys()),
-                        format_func=lambda x: f"{dest_opts[x]} ({x})",
-                        key=f"resp_{uname}")
-                    if st.button(f"Transferir {len(selec)} ticket(s) → {dest_opts.get(novo_resp,'')}",
-                                 key=f"tr_{uname}", type="primary", use_container_width=True):
-                        if selec:
-                            qt = transferir_tickets(selec, novo_resp)
-                            st.success(f"✅ {qt} ticket(s) transferido(s) para "
-                                       f"{dest_opts.get(novo_resp,'')}!")
-                            time.sleep(.8); st.rerun()
-                        else:
-                            st.warning("Nenhum ticket selecionado.")
-                else:
-                    st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
+                    if dest_opts:
+                        novo_resp = st.selectbox(
+                            "Novo responsável",
+                            options=list(dest_opts.keys()),
+                            format_func=lambda x: f"{dest_opts[x]} ({x})",
+                            key=f"resp_{uname}")
+                        if st.button(f"Transferir {len(selec)} ticket(s) → {dest_opts.get(novo_resp,'')}",
+                                     key=f"tr_{uname}", type="primary", use_container_width=True):
+                            if selec:
+                                qt = transferir_tickets(selec, novo_resp)
+                                st.success(f"✅ {qt} ticket(s) transferido(s) para "
+                                           f"{dest_opts.get(novo_resp,'')}!")
+                                time.sleep(.8); st.rerun()
+                            else:
+                                st.warning("Nenhum ticket selecionado.")
+                    else:
+                        st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
 
                 st.markdown("---")
-                # ── Lista dos tickets ──
-                for t in meus:
-                    _render_card(t)
-                    if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
-                                 key=f"eqopen_{uname}_{t.get('id','')}", use_container_width=True):
-                        abrir_ticket_popup(t.get("id"), user, papel)
+                # ── Lista dos tickets (grid + paginação, igual à fila do atendente) ──
+                n_cols_eq = st.selectbox(
+                    "🔳 Cards por linha", [3, 4], index=0, key=f"eq_ncols_{uname}"
+                )
+                pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
+                    meus, f"eq_{uname}"
+                )
+                for i in range(0, len(pagina_itens), n_cols_eq):
+                    cols_grid = st.columns(n_cols_eq)
+                    for j, t in enumerate(pagina_itens[i:i + n_cols_eq]):
+                        with cols_grid[j]:
+                            _render_card(t)
+                            if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
+                                         key=f"eqopen_{uname}_{t.get('id','')}",
+                                         use_container_width=True):
+                                abrir_ticket_popup(t.get("id"), user, papel)
+                _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
 def _render_sync():
