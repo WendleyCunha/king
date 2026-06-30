@@ -19,8 +19,8 @@ def hash_senha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 MODULOS_PADRAO = {
-    "adm":         ["rastreio","tickets","exportar"],
-    "supervisor":  ["rastreio","tickets","exportar"],
+    "adm":         ["rastreio","tickets","cartas","exportar"],
+    "supervisor":  ["rastreio","tickets","cartas","exportar"],
     "operacional": ["rastreio"],
 }
 
@@ -43,7 +43,7 @@ def pode_deletar(user: dict) -> bool:
 def verificar_login(usuario: str, senha: str):
     if usuario == "admin" and senha == "admin123":
         return {"nome":"Administrador Master","usuario":"admin",
-                "role":"adm","modulos":["rastreio","tickets","exportar"],
+                "role":"adm","modulos":["rastreio","tickets","cartas","exportar"],
                 "departamento":"Todos"}
     doc = get_db().collection("usuarios").document(usuario).get()
     if doc.exists:
@@ -271,3 +271,90 @@ def deletar_rota_db(rota: str, data: str):
     batch = db.batch()
     for d in docs: batch.delete(d.reference)
     batch.commit()
+
+# ══════════════════════════════════════════════════════════════════
+# CARTAS DE DÉBITO (RH)
+# Coleções:
+#   /colaboradores_base/{NOME}      → { cpf }
+#   /cartas_rh/{id}                 → { id, NOME, CPF, COD_CLI, VALOR, LOJA,
+#                                        DATA, MOTIVO, status, anexo_bin,
+#                                        nome_arquivo, id_lote, data_criacao }
+#   /lotes_rh/{id_lote}             → { id, data, total, valor_total, ids_cartas }
+# ══════════════════════════════════════════════════════════════════
+
+def obter_base_colaboradores_db() -> dict:
+    """Retorna {NOME: cpf} de todos os colaboradores cadastrados."""
+    docs = get_db().collection("colaboradores_base").stream()
+    return {doc.id: doc.to_dict().get("cpf") for doc in docs}
+
+def salvar_novo_colaborador_db(nome: str, cpf: str):
+    nome = (nome or "").upper().strip()
+    get_db().collection("colaboradores_base").document(nome).set(
+        {"cpf": str(cpf).strip()}
+    )
+
+def deletar_colaborador_db(nome: str):
+    get_db().collection("colaboradores_base").document(nome).delete()
+
+def obter_cartas_db() -> list:
+    """Retorna todas as cartas de débito cadastradas."""
+    docs = get_db().collection("cartas_rh").stream()
+    return [d.to_dict() for d in docs]
+
+def criar_carta_db(nome, cpf, cod_cli, valor, loja, data_str, motivo) -> str:
+    """Cria uma nova carta de débito e retorna o id gerado."""
+    id_carta = datetime.now(BRT).strftime("%Y%m%d%H%M%S")
+    get_db().collection("cartas_rh").document(id_carta).set({
+        "id": id_carta,
+        "NOME": nome, "CPF": cpf, "COD_CLI": cod_cli,
+        "VALOR": valor, "LOJA": loja, "DATA": data_str, "MOTIVO": motivo,
+        "status": "Aguardando Assinatura",
+        "anexo_bin": None, "nome_arquivo": None, "id_lote": "",
+        "data_criacao": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+    })
+    return id_carta
+
+def atualizar_carta_db(id_carta: str, **campos):
+    if campos:
+        get_db().collection("cartas_rh").document(id_carta).update(campos)
+
+def registrar_assinatura_carta_db(id_carta: str, arquivo_bytes: bytes, nome_arquivo: str):
+    atualizar_carta_db(
+        id_carta,
+        status="CARTA RECEBIDA",
+        anexo_bin=arquivo_bytes,
+        nome_arquivo=nome_arquivo,
+    )
+
+def deletar_carta_db(id_carta: str):
+    get_db().collection("cartas_rh").document(id_carta).delete()
+
+def reabrir_carta_db(id_carta: str):
+    atualizar_carta_db(id_carta, status="Aguardando Assinatura", id_lote="")
+
+def fechar_lote_cartas_db(cartas_prontas: list) -> str:
+    """Cria o documento do lote e atualiza o status de cada carta para LOTE_FECHADO."""
+    db         = get_db()
+    id_lote    = datetime.now(BRT).strftime("%Y%m%d_%H%M")
+    ids_cartas = [c["id"] for c in cartas_prontas]
+    total_valor = sum(c.get("VALOR", 0) for c in cartas_prontas)
+
+    db.collection("lotes_rh").document(id_lote).set({
+        "id": id_lote,
+        "data": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+        "total": len(cartas_prontas),
+        "valor_total": total_valor,
+        "ids_cartas": ids_cartas,
+    })
+
+    batch = db.batch()
+    for id_c in ids_cartas:
+        ref = db.collection("cartas_rh").document(id_c)
+        batch.update(ref, {"status": "LOTE_FECHADO", "id_lote": id_lote})
+    batch.commit()
+    return id_lote
+
+def listar_lotes_cartas_db() -> list:
+    docs = get_db().collection("lotes_rh").stream()
+    lotes = [d.to_dict() for d in docs]
+    return sorted(lotes, key=lambda x: x.get("id",""), reverse=True)
