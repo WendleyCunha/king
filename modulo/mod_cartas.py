@@ -50,15 +50,98 @@ def gerar_word_memoria(dados):
 
 def _dados_word(c):
     return {
-        "NOME_COLAB":    c["GERENTE"],
-        "CPF":           c["CPF"],
+        "GERENTE":        c["NOME"],
+        "CPF":            c["CPF"],
         "CODIGO_CLIENTE": c.get("COD_CLI", ""),
-        "VALOR_DEBITO":  f"R$ {c['VALOR']:,.2f}",
-        "LOJA_ORIGEM":   c.get("LOJA", ""),
-        "DATA_COMPRA":   c.get("DATA", ""),
-        "DESC_DEBITO":   c.get("MOTIVO", ""),
-        "DATA_LOCAL":    f"São Paulo, {datetime.now().strftime('%d/%m/%Y')}",
+        "VALOR_DEBITO":   f"R$ {c['VALOR']:,.2f}",
+        "LOJA_ORIGEM":    c.get("LOJA", ""),
+        "DATA_COMPRA":    c.get("DATA", ""),
+        "DESC_DEBITO":    c.get("MOTIVO", ""),
+        "DATA_LOCAL":     f"São Paulo, {datetime.now().strftime('%d/%m/%Y')}",
     }
+
+
+# ─── EDIÇÃO DE CARTA ──────────────────────────────────────────────────────────
+
+def _renderizar_form_edicao(c, dict_colab):
+    """Renderiza o formulário inline de edição de uma carta.
+    Salva via atualizar_carta_db e fecha o painel ao confirmar."""
+    carta_id = c["id"]
+
+    with st.form(key=f"form_edit_{carta_id}", clear_on_submit=False):
+        st.markdown("**✏️ Editar Carta**")
+
+        lista_nomes = sorted(dict_colab.keys())
+        opcoes = ["+ CADASTRAR NOVO"] + lista_nomes
+        idx_atual = opcoes.index(c["NOME"]) if c["NOME"] in opcoes else 0
+        escolha = st.selectbox("Colaborador", opcoes, index=idx_atual,
+                               key=f"ed_nome_sel_{carta_id}")
+
+        e1, e2, e3 = st.columns(3)
+
+        if escolha == "+ CADASTRAR NOVO":
+            novo_nome = e1.text_input("Nome *", key=f"ed_nome_{carta_id}").upper().strip()
+            novo_cpf  = e2.text_input("CPF *",  key=f"ed_cpf_{carta_id}",
+                                      value=c.get("CPF", ""))
+        else:
+            novo_nome = escolha
+            novo_cpf  = e2.text_input("CPF", key=f"ed_cpf_{carta_id}",
+                                      value=dict_colab.get(escolha, c.get("CPF", "")))
+
+        novo_cod = e3.text_input("Código do Cliente", key=f"ed_cod_{carta_id}",
+                                 value=c.get("COD_CLI", ""))
+
+        f1, f2, f3 = st.columns(3)
+        novo_valor = f1.number_input("Valor R$", min_value=0.0, step=0.01,
+                                     value=float(c.get("VALOR", 0)),
+                                     key=f"ed_valor_{carta_id}")
+        nova_loja  = f2.text_input("Loja Origem", key=f"ed_loja_{carta_id}",
+                                   value=c.get("LOJA", "")).upper()
+
+        # Converte data string "dd/mm/yyyy" → objeto date para o widget
+        data_str = c.get("DATA", "")
+        try:
+            data_default = datetime.strptime(data_str, "%d/%m/%Y").date()
+        except Exception:
+            data_default = datetime.today().date()
+        nova_data = f3.date_input("Data da Ocorrência", value=data_default,
+                                  key=f"ed_data_{carta_id}")
+
+        novo_motivo = st.text_area("Motivo Detalhado", key=f"ed_motivo_{carta_id}",
+                                   value=c.get("MOTIVO", "")).upper()
+
+        col_salvar, col_cancelar = st.columns(2)
+        salvar    = col_salvar.form_submit_button("💾 Salvar Alterações",
+                                                  type="primary",
+                                                  use_container_width=True)
+        cancelar  = col_cancelar.form_submit_button("✖ Cancelar",
+                                                    use_container_width=True)
+
+        if salvar:
+            nome_final = novo_nome if escolha == "+ CADASTRAR NOVO" else escolha
+            if not nome_final or not novo_cpf or not novo_cod:
+                st.error("Preencha Nome, CPF e Código do Cliente.")
+            else:
+                if escolha == "+ CADASTRAR NOVO":
+                    salvar_novo_colaborador_db(nome_final, novo_cpf)
+
+                atualizar_carta_db(
+                    carta_id,
+                    nome=nome_final,
+                    cpf=novo_cpf,
+                    cod_cli=novo_cod,
+                    valor=novo_valor,
+                    loja=nova_loja,
+                    data_str=nova_data.strftime("%d/%m/%Y"),
+                    motivo=novo_motivo,
+                )
+                st.session_state.pop(f"editando_{carta_id}", None)
+                st.success("✅ Carta atualizada!")
+                st.rerun()
+
+        if cancelar:
+            st.session_state.pop(f"editando_{carta_id}", None)
+            st.rerun()
 
 
 # ─── GERAÇÃO DE ZIP (arquivos ASSINADOS realmente enviados no upload) ────────
@@ -119,6 +202,10 @@ _CSS_CARTAS = """
 .cartas-label { color:#64778d; font-size:0.78rem; font-weight:700;
     text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; }
 .cartas-info  { font-weight:700; color:#2c3e50; margin-bottom:8px; }
+.cartas-edit-box {
+    background:#f8f9fa; border:1px solid #C9A84C; border-radius:10px;
+    padding:16px; margin-top:6px; margin-bottom:10px;
+}
 </style>
 """
 
@@ -210,13 +297,20 @@ def renderizar_cartas(papel, user=None):
                 )
                 cols = st.columns(3)
                 for idx, (_, c) in enumerate(group.iterrows()):
+                    carta_id   = c["id"]
+                    editando   = st.session_state.get(f"editando_{carta_id}", False)
+
                     with cols[idx % 3]:
+                        # ── Card visual ──────────────────────────────────────
                         st.markdown(
                             f'<div class="cartas-card">'
-                            f'<div class="cartas-label">Colaborador</div><div class="cartas-info">{c["NOME"]}</div>'
-                            f'<div class="cartas-label">Cód. Cliente</div><div class="cartas-info">{c.get("COD_CLI","—")}</div>'
+                            f'<div class="cartas-label">Colaborador</div>'
+                            f'<div class="cartas-info">{c["NOME"]}</div>'
+                            f'<div class="cartas-label">Cód. Cliente</div>'
+                            f'<div class="cartas-info">{c.get("COD_CLI","—")}</div>'
                             f'<div class="cartas-label">Valor</div>'
-                            f'<div style="font-size:1.2rem;font-weight:800;color:#C9A84C;margin-bottom:6px;">R$ {c["VALOR"]:,.2f}</div>'
+                            f'<div style="font-size:1.2rem;font-weight:800;color:#C9A84C;margin-bottom:6px;">'
+                            f'R$ {c["VALOR"]:,.2f}</div>'
                             f'<div class="cartas-label">Data: {c["DATA"]}</div>'
                             f'<div class="cartas-label" style="margin-top:8px;">Motivo</div>'
                             f'<div style="font-size:0.85rem;color:#495057;">{c.get("MOTIVO","—")}</div>'
@@ -224,28 +318,51 @@ def renderizar_cartas(papel, user=None):
                             unsafe_allow_html=True,
                         )
 
+                        # ── Botões de ação (Baixar | Editar | Deletar) ───────
                         w_bytes = gerar_word_memoria(_dados_word(c))
-                        btn_c1, btn_c2 = st.columns(2)
+
+                        if pode_del:
+                            btn_baixar, btn_editar, btn_del = st.columns(3)
+                        else:
+                            btn_baixar, btn_editar = st.columns(2)
+                            btn_del = None
 
                         if w_bytes:
-                            btn_c1.download_button(
+                            btn_baixar.download_button(
                                 "📂 Baixar",
                                 w_bytes,
                                 file_name=f"Carta_{c['NOME']}.docx",
-                                key=f"w_{c['id']}",
+                                key=f"w_{carta_id}",
                                 use_container_width=True,
                             )
 
-                        if pode_del:
-                            if btn_c2.button("🗑️", key=f"del_{c['id']}", use_container_width=True):
-                                deletar_carta_db(c["id"])
-                                st.rerun()
+                        # Botão Editar: alterna visibilidade do formulário
+                        label_edit = "✖ Fechar" if editando else "✏️ Editar"
+                        if btn_editar.button(label_edit, key=f"btn_edit_{carta_id}",
+                                             use_container_width=True):
+                            st.session_state[f"editando_{carta_id}"] = not editando
+                            st.rerun()
 
+                        if btn_del and btn_del.button("🗑️", key=f"del_{carta_id}",
+                                                      use_container_width=True):
+                            deletar_carta_db(carta_id)
+                            st.rerun()
+
+                        # ── Formulário de edição inline ──────────────────────
+                        if st.session_state.get(f"editando_{carta_id}", False):
+                            with st.container():
+                                st.markdown('<div class="cartas-edit-box">',
+                                            unsafe_allow_html=True)
+                                _renderizar_form_edicao(c, dict_colab)
+                                st.markdown("</div>", unsafe_allow_html=True)
+
+                        # ── Upload da carta assinada ─────────────────────────
                         up = st.file_uploader(
-                            "Upload Assinada", key=f"up_{c['id']}", label_visibility="collapsed"
+                            "Upload Assinada", key=f"up_{carta_id}",
+                            label_visibility="collapsed"
                         )
                         if up:
-                            registrar_assinatura_carta_db(c["id"], up.getvalue(), up.name)
+                            registrar_assinatura_carta_db(carta_id, up.getvalue(), up.name)
                             st.success("✅ Recebida!")
                             st.rerun()
         else:
@@ -336,7 +453,7 @@ def renderizar_cartas(papel, user=None):
                     n_com_anexo = sum(1 for c in cartas_lote if c.get("anexo_bin"))
                     col_x, col_z, col_del = st.columns(3)
 
-                    # ── Botão 1: Excel completo (sempre disponível) ──
+                    # ── Botão 1: Excel completo ──
                     if pode_exp:
                         xls_hist = gerar_excel_lote(cartas_lote)
                         col_x.download_button(
@@ -350,7 +467,7 @@ def renderizar_cartas(papel, user=None):
                     else:
                         col_x.caption("🔒 Exportação restrita.")
 
-                    # ── Botão 2: ZIP com os arquivos ASSINADOS enviados no upload ──
+                    # ── Botão 2: ZIP com os arquivos ASSINADOS ──
                     if pode_exp:
                         zip_hist, _ = gerar_zip_lote(cartas_lote)
                         col_z.download_button(
@@ -365,7 +482,7 @@ def renderizar_cartas(papel, user=None):
                     else:
                         col_z.caption("🔒 Exportação restrita.")
 
-                    # ── Botão 3: Excluir os anexos do lote (limpar o banco) ──
+                    # ── Botão 3: Excluir os anexos do lote ──
                     with col_del:
                         if pode_del:
                             if n_com_anexo == 0:
