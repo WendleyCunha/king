@@ -1030,10 +1030,111 @@ def _render_novo(user):
 # ═══════════════════════════════════════════════════════════════════
 # VISÃO GERAL DA OPERAÇÃO — bloco exclusivo de Supervisor/ADM.
 # Código totalmente separado da experiência do atendente comum.
-# Mostra, dentro do(s) departamento(s) que o supervisor enxerga:
-#   1) Tickets por TABULAÇÃO (quantidade + com quem está)
-#   2) Tickets por ATENDENTE (quantidade + transferência)
+# Estrutura em ABAS:
+#   📊 Dashboard       → KPIs gerais, top atendente, motivo mais acionado
+#   👥 Por Atendente   → produtividade individual + transferência de tickets
+#   📋 Por Motivo      → volume por tabulação + quem está com cada uma
+#   ⏳ SLA Perdido     → ranking de quem mais perdeu SLA e detalhe dos casos
+#   📥 Exportar        → relatório completo em Excel (.xlsx, 3 abas)
+# Filtros de Atendente e Motivo no topo valem para TODAS as abas.
 # ═══════════════════════════════════════════════════════════════════
+
+def sla_foi_perdido(t) -> bool:
+    """Define se o SLA deste ticket foi (ou está) estourado, mesmo que o
+    ticket já tenha sido resolvido/finalizado/cancelado:
+      - Pendente  → usa o relógio atual (ticket_vencido_pendente).
+      - Encerrado → compara o tempo entre abertura e a última atualização
+        registrada (proxy de quando foi tratado) contra o SLA da tabulação.
+    Isso permite contabilizar perdas de SLA HISTÓRICAS no relatório, não só
+    as que ainda estão pendentes agora."""
+    if t.get("status") in STATUS_ABERTOS:
+        return ticket_vencido_pendente(t)
+    try:
+        criado = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        atualz = datetime.fromisoformat(str(t.get("atualizado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        horas_decorridas = (atualz - criado).total_seconds() / 3600.0
+        return horas_decorridas > t.get("horas_sla", 24)
+    except Exception:
+        return False
+
+
+def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
+    """Gera o relatório completo em Excel com 3 abas: Por Atendente,
+    Por Motivo e Detalhe Completo."""
+    import pandas as pd
+    from io import BytesIO
+    from collections import defaultdict
+
+    # ── Detalhe completo ──
+    linhas = []
+    for t in tickets:
+        ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+        atend_nomes = ", ".join(nomes_users.get(a, a) for a in ats) if ats else "— ninguém —"
+        linhas.append({
+            "ID":                  t.get("id_zendesk", str(t.get("id",""))[:8]),
+            "Assunto":             t.get("assunto",""),
+            "Departamento":        t.get("departamento",""),
+            "Motivo (Tabulação)":  t.get("tabulacao") or "Sem tabulação",
+            "Status":              STATUS_CFG.get(t.get("status",""), (t.get("status",""),))[0],
+            "Prioridade":          PRIO_CFG.get(t.get("prioridade",""), (t.get("prioridade",""),))[0],
+            "Atendente(s)":        atend_nomes,
+            "Aberto por":          t.get("aberto_por",""),
+            "Cliente":             t.get("cliente_nome",""),
+            "Criado em":           t.get("criado_em",""),
+            "Atualizado em":       t.get("atualizado_em",""),
+            "SLA (h)":             t.get("horas_sla",24),
+            "SLA Perdido":         "Sim" if sla_foi_perdido(t) else "Não",
+        })
+    df_detalhe = pd.DataFrame(linhas)
+
+    # ── Resumo por atendente ──
+    resumo_at = defaultdict(lambda: {"total":0, "pendentes":0, "sla_perdido":0})
+    for t in tickets:
+        ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+        if not ats:
+            ats = ["— ninguém —"]
+        for a in ats:
+            nome = nomes_users.get(a, a)
+            resumo_at[nome]["total"] += 1
+            if t.get("status") in STATUS_ABERTOS:
+                resumo_at[nome]["pendentes"] += 1
+            if sla_foi_perdido(t):
+                resumo_at[nome]["sla_perdido"] += 1
+    df_atend = pd.DataFrame([
+        {"Atendente": k, "Total de Tickets": v["total"], "Pendentes": v["pendentes"],
+         "SLA Perdido": v["sla_perdido"]}
+        for k, v in sorted(resumo_at.items(), key=lambda x: -x[1]["total"])
+    ])
+
+    # ── Resumo por motivo ──
+    resumo_mot = defaultdict(lambda: {"total":0, "pendentes":0, "sla_perdido":0})
+    for t in tickets:
+        mot = t.get("tabulacao") or "Sem tabulação"
+        resumo_mot[mot]["total"] += 1
+        if t.get("status") in STATUS_ABERTOS:
+            resumo_mot[mot]["pendentes"] += 1
+        if sla_foi_perdido(t):
+            resumo_mot[mot]["sla_perdido"] += 1
+    df_motivo = pd.DataFrame([
+        {"Motivo": k, "Total de Tickets": v["total"], "Pendentes": v["pendentes"],
+         "SLA Perdido": v["sla_perdido"]}
+        for k, v in sorted(resumo_mot.items(), key=lambda x: -x[1]["total"])
+    ])
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        for nome_aba, df in [("Por Atendente", df_atend), ("Por Motivo", df_motivo),
+                              ("Detalhe Completo", df_detalhe)]:
+            df.to_excel(writer, index=False, sheet_name=nome_aba)
+            ws = writer.sheets[nome_aba]
+            for i, col in enumerate(df.columns):
+                tam = df[col].astype(str).map(len).max() if len(df) else 0
+                largura = max(tam, len(col)) + 2
+                ws.set_column(i, i, largura)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def _render_visao_geral_operacao(user, papel, todos_geral):
     st.markdown("### 📊 Visão Geral da Operação")
     if st.button("← Voltar"):
@@ -1051,94 +1152,134 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
 
     usuarios_dep = [u for u in listar_usuarios() if u.get("departamento") == dep_alvo]
     tickets_dep  = [t for t in todos_geral if t.get("departamento") == dep_alvo]
-
-    abertos  = sum(1 for t in tickets_dep if t.get("status") in STATUS_ABERTOS)
-    vencidos = sum(1 for t in tickets_dep if ticket_vencido_pendente(t))
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Atendentes", len(usuarios_dep))
-    k2.metric("Tickets (total)", len(tickets_dep))
-    k3.metric("Pendentes", abertos)
-    k4.metric("SLA vencido", vencidos)
-
-    if vencidos:
-        st.markdown(_html(f'<div class="tk-banner">⚠️ {vencidos} ticket(s) do departamento '
-                          f'com SLA vencido!</div>'), unsafe_allow_html=True)
-
-    # ── BLOCO 1 — Por TABULAÇÃO: quantidade + com quem está ──────
-    st.markdown("---")
-    st.markdown("#### 📋 Tickets por Tabulação")
-
-    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep_alvo]
-    nomes_users = {u.get("usuario",""): u.get("nome", u.get("usuario","")) for u in usuarios_dep}
-
-    def _resumo_quem(lista_tickets):
-        """Conta quantos tickets cada atendente tem dentro da lista informada."""
-        from collections import Counter
-        cont = Counter()
-        for t in lista_tickets:
-            ats = t.get("atendentes") or []
-            if not ats and t.get("atribuido_para"):
-                ats = [t.get("atribuido_para")]
-            if not ats:
-                cont["— ninguém atribuído —"] += 1
-            for a in ats:
-                cont[nomes_users.get(a, a)] += 1
-        return cont
-
-    if not tabs_dep:
-        st.caption("Nenhuma tabulação cadastrada para este departamento.")
-    else:
-        for tb in tabs_dep:
-            nome_tab  = tb.get("nome", "—")
-            tks_tab   = [t for t in tickets_dep if t.get("tabulacao") == nome_tab]
-            n_total   = len(tks_tab)
-            n_pend    = sum(1 for t in tks_tab if t.get("status") in STATUS_ABERTOS)
-            n_venc    = sum(1 for t in tks_tab if ticket_vencido_pendente(t))
-            cont_at   = _resumo_quem(tks_tab)
-            quem_str  = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
-            alerta    = f' <span class="tk-blink">⏳ {n_venc} vencido(s)</span>' if n_venc else ""
-
-            st.markdown(_html(
-                f'<div class="tk-equipe-card">'
-                f'<b style="color:#2c3e50;">📋 {esc(nome_tab)}</b>{alerta}<br>'
-                f'<span style="font-size:0.8rem;color:#64778d;">'
-                f'Total: {n_total} &nbsp;·&nbsp; Pendentes: {n_pend} &nbsp;·&nbsp; '
-                f'SLA vencido: {n_venc}</span><br>'
-                f'<span style="font-size:0.78rem;color:#64778d;">'
-                f'👥 Com quem está: {esc(quem_str)}</span>'
-                f'</div>'), unsafe_allow_html=True)
-
-        # Tickets do departamento sem tabulação definida
-        sem_tab = [t for t in tickets_dep if not t.get("tabulacao")]
-        if sem_tab:
-            cont_at  = _resumo_quem(sem_tab)
-            quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
-            st.markdown(_html(
-                f'<div class="tk-equipe-card">'
-                f'<b style="color:#64778d;">📋 Sem tabulação</b><br>'
-                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_tab)}</span><br>'
-                f'<span style="font-size:0.78rem;color:#64778d;">'
-                f'👥 Com quem está: {esc(quem_str)}</span>'
-                f'</div>'), unsafe_allow_html=True)
-
-    # ── BLOCO 2 — Por ATENDENTE: quantidade + transferência ───────
-    st.markdown("---")
-    st.markdown("#### 👥 Tickets por Atendente")
+    nomes_users  = {u.get("usuario",""): u.get("nome", u.get("usuario","")) for u in usuarios_dep}
 
     if not usuarios_dep:
         st.info("Nenhum atendente vinculado a este departamento.")
         return
 
+    # ── Filtros globais — valem para todas as abas abaixo ─────────
+    st.markdown("---")
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        op_sel = st.multiselect(
+            "👤 Filtrar por atendente",
+            options=sorted(nomes_users.values()),
+            key="vg_filtro_operador",
+        )
+    motivos_disponiveis = sorted({(t.get("tabulacao") or "Sem tabulação") for t in tickets_dep})
+    with fc2:
+        mot_sel = st.multiselect(
+            "📋 Filtrar por motivo (tabulação)",
+            options=motivos_disponiveis,
+            key="vg_filtro_motivo",
+        )
+
+    def _passa_filtro(t):
+        if mot_sel and (t.get("tabulacao") or "Sem tabulação") not in mot_sel:
+            return False
+        if op_sel:
+            ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+            nomes_at = [nomes_users.get(a, a) for a in ats]
+            if not any(n in op_sel for n in nomes_at):
+                return False
+        return True
+
+    tickets_filtrados = [t for t in tickets_dep if _passa_filtro(t)]
+    if op_sel or mot_sel:
+        st.caption(f"🔎 Filtro ativo — exibindo {len(tickets_filtrados)} de {len(tickets_dep)} ticket(s).")
+
+    aba_dash, aba_atend, aba_motivo, aba_sla, aba_export = st.tabs(
+        ["📊 Dashboard", "👥 Por Atendente", "📋 Por Motivo", "⏳ SLA Perdido", "📥 Exportar"]
+    )
+
+    with aba_dash:
+        _aba_dashboard(tickets_filtrados, usuarios_dep, nomes_users)
+
+    with aba_atend:
+        _aba_por_atendente(tickets_filtrados, usuarios_dep, user, papel)
+
+    with aba_motivo:
+        _aba_por_motivo(tickets_filtrados, dep_alvo, nomes_users)
+
+    with aba_sla:
+        _aba_sla_perdido(tickets_filtrados, nomes_users, user, papel)
+
+    with aba_export:
+        _aba_exportar(tickets_filtrados, nomes_users, dep_alvo)
+
+
+# ── ABA: 📊 Dashboard ───────────────────────────────────────────────
+def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
+    from collections import Counter
+
+    total      = len(tickets)
+    pendentes  = sum(1 for t in tickets if t.get("status") in STATUS_ABERTOS)
+    sla_perd   = sum(1 for t in tickets if sla_foi_perdido(t))
+    pct_cumprido = ((total - sla_perd) / total * 100) if total else 100.0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Total de Tickets</div>'
+                f'<div class="kpi-value">{total}</div></div>', unsafe_allow_html=True)
+    k2.markdown(f'<div class="kpi-card blue"><div class="kpi-label">Pendentes</div>'
+                f'<div class="kpi-value">{pendentes}</div></div>', unsafe_allow_html=True)
+    k3.markdown(f'<div class="kpi-card red"><div class="kpi-label">SLA Perdido</div>'
+                f'<div class="kpi-value">{sla_perd}</div></div>', unsafe_allow_html=True)
+    k4.markdown(f'<div class="kpi-card green"><div class="kpi-label">SLA Cumprido</div>'
+                f'<div class="kpi-value">{pct_cumprido:.0f}%</div></div>', unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Contagem por atendente (produtividade)
+    cont_at = Counter()
+    for t in tickets:
+        ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+        if not ats: ats = ["— ninguém —"]
+        for a in ats:
+            cont_at[nomes_users.get(a, a)] += 1
+
+    # Contagem por motivo
+    cont_mot = Counter(t.get("tabulacao") or "Sem tabulação" for t in tickets)
+
+    cmc1, cmc2 = st.columns(2)
+    with cmc1:
+        st.markdown("##### 🏆 Quem mais atendeu")
+        if cont_at:
+            top_nome, top_qtd = cont_at.most_common(1)[0]
+            st.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Top Atendente</div>'
+                        f'<div class="kpi-value" style="font-size:1.3rem;">{esc(top_nome)}</div>'
+                        f'<div class="kpi-sub">{top_qtd} ticket(s)</div></div>', unsafe_allow_html=True)
+            st.markdown("")
+            df_at = pd.DataFrame(cont_at.most_common(), columns=["Atendente", "Tickets"])
+            st.dataframe(df_at, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Sem dados.")
+    with cmc2:
+        st.markdown("##### 📋 Motivo mais acionado")
+        if cont_mot:
+            top_mot, top_qtd_mot = cont_mot.most_common(1)[0]
+            st.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Top Motivo</div>'
+                        f'<div class="kpi-value" style="font-size:1.3rem;">{esc(top_mot)}</div>'
+                        f'<div class="kpi-sub">{top_qtd_mot} ticket(s)</div></div>', unsafe_allow_html=True)
+            st.markdown("")
+            df_mot = pd.DataFrame(cont_mot.most_common(), columns=["Motivo", "Tickets"])
+            st.dataframe(df_mot, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Sem dados.")
+
+
+# ── ABA: 👥 Por Atendente (produtividade + transferência) ───────────
+def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
     for u in usuarios_dep:
         uname = u.get("usuario","")
         nome  = u.get("nome", uname)
-        meus = [t for t in tickets_dep
+        meus = [t for t in tickets
                 if uname in t.get("atendentes", [])
                 or t.get("atribuido_para") in (uname, nome)
                 or t.get("aberto_por") == uname]
-        m_abertos  = sum(1 for t in meus if t.get("status") in STATUS_ABERTOS)
-        m_vencidos = sum(1 for t in meus if ticket_vencido_pendente(t))
-        alerta = '<span class="tk-blink">SLA VENCIDO</span>' if m_vencidos else ""
+        m_abertos    = sum(1 for t in meus if t.get("status") in STATUS_ABERTOS)
+        m_sla_perd   = sum(1 for t in meus if sla_foi_perdido(t))
+        alerta = f'<span class="tk-blink">⏳ {m_sla_perd} SLA perdido</span>' if m_sla_perd else ""
         st.markdown(_html(
             f'<div class="tk-equipe-card">'
             f'<b style="color:#2c3e50;">{esc(nome)}</b> '
@@ -1146,7 +1287,7 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             f'<span style="float:right;">{alerta}</span><br>'
             f'<span style="font-size:0.8rem;color:#64778d;">'
             f'Total: {len(meus)} &nbsp;·&nbsp; Pendentes: {m_abertos} &nbsp;·&nbsp; '
-            f'Vencidos: {m_vencidos}</span>'
+            f'SLA perdido: {m_sla_perd}</span>'
             f'</div>'), unsafe_allow_html=True)
 
         if meus:
@@ -1216,7 +1357,141 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
                 _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
+# ── ABA: 📋 Por Motivo (Tabulação) ───────────────────────────────────
+def _aba_por_motivo(tickets: list, dep_alvo: str, nomes_users: dict):
+    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep_alvo]
+
+    def _resumo_quem(lista_tickets):
+        from collections import Counter
+        cont = Counter()
+        for t in lista_tickets:
+            ats = t.get("atendentes") or []
+            if not ats and t.get("atribuido_para"):
+                ats = [t.get("atribuido_para")]
+            if not ats:
+                cont["— ninguém atribuído —"] += 1
+            for a in ats:
+                cont[nomes_users.get(a, a)] += 1
+        return cont
+
+    if not tabs_dep:
+        st.caption("Nenhuma tabulação cadastrada para este departamento.")
+    else:
+        for tb in tabs_dep:
+            nome_tab = tb.get("nome", "—")
+            tks_tab  = [t for t in tickets if t.get("tabulacao") == nome_tab]
+            n_total  = len(tks_tab)
+            n_pend   = sum(1 for t in tks_tab if t.get("status") in STATUS_ABERTOS)
+            n_perd   = sum(1 for t in tks_tab if sla_foi_perdido(t))
+            cont_at  = _resumo_quem(tks_tab)
+            quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            alerta   = f' <span class="tk-blink">⏳ {n_perd} c/ SLA perdido</span>' if n_perd else ""
+
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#2c3e50;">📋 {esc(nome_tab)}</b>{alerta}<br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">'
+                f'Total: {n_total} &nbsp;·&nbsp; Pendentes: {n_pend} &nbsp;·&nbsp; '
+                f'SLA perdido: {n_perd}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+        sem_tab = [t for t in tickets if not t.get("tabulacao")]
+        if sem_tab:
+            cont_at  = _resumo_quem(sem_tab)
+            quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#64778d;">📋 Sem tabulação</b><br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_tab)}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+
+# ── ABA: ⏳ SLA Perdido (ranking + detalhe dos responsáveis) ─────────
+def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
+    from collections import Counter
+
+    perdidos = [t for t in tickets if sla_foi_perdido(t)]
+    if not perdidos:
+        st.success("✅ Nenhum ticket com SLA perdido neste recorte.")
+        return
+
+    st.markdown(f"##### ⏳ {len(perdidos)} ticket(s) com SLA perdido")
+    st.caption("Inclui tickets pendentes vencidos agora e tickets já encerrados que "
+               "ultrapassaram o SLA antes de serem tratados.")
+
+    cont_resp = Counter()
+    for t in perdidos:
+        ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+        if not ats: ats = ["— ninguém —"]
+        for a in ats:
+            cont_resp[nomes_users.get(a, a)] += 1
+
+    st.markdown("**Ranking de responsáveis por SLA perdido**")
+    df_resp = pd.DataFrame(cont_resp.most_common(), columns=["Atendente", "SLA Perdido"])
+    st.dataframe(df_resp, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("**Detalhe dos tickets com SLA perdido**")
+    linhas = []
+    for t in perdidos:
+        ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
+        atend_nomes = ", ".join(nomes_users.get(a, a) for a in ats) if ats else "— ninguém —"
+        linhas.append({
+            "ID": t.get("id_zendesk", str(t.get("id",""))[:8]),
+            "Assunto": str(t.get("assunto",""))[:50],
+            "Motivo": t.get("tabulacao") or "Sem tabulação",
+            "Status": STATUS_CFG.get(t.get("status",""), (t.get("status",""),))[0],
+            "Atendente(s)": atend_nomes,
+            "Criado em": t.get("criado_em",""),
+            "SLA (h)": t.get("horas_sla",24),
+        })
+    df_det = pd.DataFrame(linhas)
+    st.dataframe(df_det, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.caption("Clique para abrir um ticket específico:")
+    n_cols_sla = 3
+    for i in range(0, len(perdidos), n_cols_sla):
+        cols_grid = st.columns(n_cols_sla)
+        for j, t in enumerate(perdidos[i:i + n_cols_sla]):
+            with cols_grid[j]:
+                _render_card(t)
+                if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
+                             key=f"slaopen_{t.get('id','')}", use_container_width=True):
+                    abrir_ticket_popup(t.get("id"), user, papel)
+
+
+# ── ABA: 📥 Exportar (relatório completo em Excel) ──────────────────
+def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str):
+    st.markdown("##### 📥 Relatório Completo")
+    st.caption(
+        "Gera uma planilha .xlsx com 3 abas: **Por Atendente** (produtividade e SLA perdido), "
+        "**Por Motivo** (volume por tabulação) e **Detalhe Completo** (todos os tickets do "
+        "recorte filtrado acima, ticket a ticket)."
+    )
+    st.markdown(f"Departamento: **{dep_alvo}** &nbsp;·&nbsp; Tickets no relatório: **{len(tickets)}**")
+
+    if not tickets:
+        st.info("Nenhum ticket para exportar com os filtros atuais.")
+        return
+
+    xls_bytes = _gerar_excel_relatorio(tickets, nomes_users)
+    st.download_button(
+        "📊 Baixar Relatório Completo (.xlsx)",
+        data=xls_bytes,
+        file_name=f"Relatorio_Tickets_{dep_alvo}_{datetime.now(BRT).strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+    )
+
+
 def _render_sync():
+
     st.markdown("### 🔄 Sincronização Zendesk")
     if st.button("← Voltar"):
         st.session_state.tk_modo = "lista"; st.rerun()
