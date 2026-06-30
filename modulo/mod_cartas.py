@@ -50,7 +50,7 @@ def gerar_word_memoria(dados):
 
 def _dados_word(c):
     return {
-        "NOME_COLAB":    c["NOME"],
+        "NOME_COLAB":    c["GERENTE"],
         "CPF":           c["CPF"],
         "CODIGO_CLIENTE": c.get("COD_CLI", ""),
         "VALOR_DEBITO":  f"R$ {c['VALOR']:,.2f}",
