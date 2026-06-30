@@ -1,4 +1,5 @@
 import sys, os, io, time
+import html as _h
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import streamlit as st
@@ -9,6 +10,18 @@ from database import (obter_vinculo_db, salvar_vinculo_db, deletar_rota_db,
 
 BRT           = timezone(timedelta(hours=-3))
 TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/tracking/"
+
+# st.dialog disponível? (popup nativo). Senão, cai no st.popover.
+_HAS_DIALOG = bool(getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None))
+
+
+# ── Helpers ────────────────────────────────────────────────────────
+def _html(s: str) -> str:
+    """Remove indentação de cada linha (evita o Markdown tratar como bloco de código)."""
+    return "\n".join(linha.lstrip() for linha in s.splitlines())
+
+def esc(v) -> str:
+    return _h.escape(str(v if v is not None else ""))
 
 def get_series(df, col, default=""):
     if col in df.columns: return df[col]
@@ -59,15 +72,194 @@ def aplicar_busca(df, termo):
     nome_mask = get_series(df,"route").apply(nome_motorista).str.lower().str.contains(t,na=False)
     return df[mask | nome_mask]
 
+
+# ── CSS dos cards clicáveis (estilo igual ao de tickets) ───────────
+def _injetar_css():
+    st.markdown(_html("""
+    <style>
+    div[class*="st-key-mtcard_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-bottom:none !important; border-left:4px solid #C9A84C !important;
+        border-radius:10px 10px 0 0 !important; color:#2c3e50 !important;
+        font-weight:700 !important; font-size:0.92rem !important;
+        padding:12px 14px 8px !important; margin-bottom:0 !important;
+        transition:background .15s, box-shadow .15s; }
+    div[class*="st-key-mtcard_"] button:hover {
+        background:#eef4ff !important; border-color:#C9A84C !important; }
+    .mt-cardbody { background:#fff; border:1px solid #e2e8f0; border-top:none;
+        border-left:4px solid #C9A84C; border-radius:0 0 10px 10px;
+        padding:4px 14px 12px; margin:-10px 0 12px; }
+    .mt-rota { font-size:0.71rem; color:#7f8c8d; margin-bottom:6px; }
+    .mt-bar { background:#e8ecf0; border-radius:4px; height:6px; margin:6px 0 3px; }
+    .mt-bar > div { background:#2980b9; height:6px; border-radius:4px; }
+    .mt-prog { font-size:0.7rem; color:#64778d; margin-bottom:7px; }
+    </style>
+    """), unsafe_allow_html=True)
+
+
+def _stats_rota(df, rota):
+    dr   = df[df["route"] == rota]
+    tot  = len(dr)
+    ok   = int((dr["_status_visual"] == "✅ Sucesso").sum())
+    fail = int((dr["_status_visual"] == "❌ Falhou").sum())
+    nt   = int(dr["_notificado"].sum())
+    pct_n = round(nt/tot*100, 1) if tot else 0
+    pct_o = round(ok/tot*100) if tot else 0
+    return dr, tot, ok, fail, nt, pct_n, pct_o
+
+
+def _body_html(rota, tot, ok, fail, nt, pct_n, pct_o):
+    return _html(f"""
+    <div class="mt-cardbody">
+        <div class="mt-rota">{esc(rota)}</div>
+        <div class="mt-bar"><div style="width:{pct_o}%;"></div></div>
+        <div class="mt-prog">{ok}/{tot} ({pct_o}%)</div>
+        <div>
+            <span class="tag tn">📱 {nt} ({pct_n}%)</span>
+            <span class="tag tg">📦 {tot}</span>
+            <span class="tag tb">✅ {ok}</span>
+            <span class="tag tr">❌ {fail}</span>
+        </div>
+    </div>""")
+
+
+# ── Conteúdo do POPUP de um motorista ──────────────────────────────
+def _conteudo_motorista(rota, df, data_consulta, user):
+    dr, tot, ok, fail, nt, pct_n, pct_o = _stats_rota(df, rota)
+    nome = nome_motorista(rota)
+    ch   = extrair_chave(rota)
+
+    st.markdown(_html(f"""
+    <div style="background:#fff;border-left:6px solid #C9A84C;border-radius:10px;
+                padding:14px;margin-bottom:12px;border:1px solid #e2e8f0;">
+        <h3 style="margin:0;color:#2c3e50;">{esc(nome)}</h3>
+        <p style="color:#64778d;font-size:0.8rem;margin:3px 0 10px;">{esc(rota)}</p>
+        <span class="tag tg">📦 {tot}</span>
+        <span class="tag tn">📱 {nt}</span>
+        <span class="tag tb">✅ {ok}</span>
+        <span class="tag tr">❌ {fail}</span>
+        <div style="background:#e8ecf0;border-radius:4px;height:6px;margin:10px 0 3px;">
+            <div style="background:#2980b9;height:6px;border-radius:4px;width:{pct_o}%;"></div>
+        </div>
+        <span style="font-size:0.73rem;color:#64778d;">{ok}/{tot} concluídas ({pct_o}%)</span>
+    </div>"""), unsafe_allow_html=True)
+
+    # Edição do nome do condutor
+    if pode_editar(user):
+        nn = st.text_input("Nome do condutor:", value=nome, key=f"nm_{ch}")
+        if st.button("💾 Salvar nome", key=f"svnm_{ch}", type="primary"):
+            salvar_vinculo_db(ch, nn.strip())
+            st.success("Salvo!"); time.sleep(.4); st.rerun()
+    else:
+        st.caption("🔒 Edição restrita.")
+
+    # Exclusão da rota
+    if pode_deletar(user):
+        if st.checkbox("Liberar exclusão desta rota", key=f"chk_{ch}"):
+            if st.button("🗑️ Excluir Rota", key=f"delr_{ch}"):
+                deletar_rota_db(rota, data_consulta)
+                st.success("Excluído!"); time.sleep(.7); st.rerun()
+
+    abas = st.tabs(["📋 Fila de Clientes", "⚠️ Ocorrências", "📱 Notificados"])
+
+    with abas[0]:
+        st.dataframe(pd.DataFrame({
+            "Ordem":    get_series(dr,"order"),
+            "Cliente":  get_series(dr,"title"),
+            "Endereço": get_series(dr,"address"),
+            "Status":   dr["_status_visual"],
+            "Notif.":   dr["_notificado"].apply(lambda x:"Sim" if x else "Não"),
+            "Notif. em":get_series(dr,"on_its_way").apply(formatar_data),
+            "Check-in": get_series(dr,"checkin_time").apply(formatar_data),
+            "Check-out":get_series(dr,"checkout_time").apply(formatar_data),
+            "ETA":      get_series(dr,"estimated_time_arrival"),
+            "Telefone": get_series(dr,"contact_phone"),
+            "Obs":      get_series(dr,"checkout_observation"),
+            "Tracking": get_series(dr,"tracking_id"),
+        }), use_container_width=True, hide_index=True)
+
+    with abas[1]:
+        df_err = dr[dr["_status_visual"] == "❌ Falhou"]
+        if df_err.empty:
+            st.success("Nenhuma ocorrência.")
+        else:
+            st.dataframe(pd.DataFrame({
+                "Ordem":  get_series(df_err,"order"),
+                "Cliente":get_series(df_err,"title"),
+                "Motivo": get_series(df_err,"checkout_observation"),
+                "Detalhe":get_series(df_err,"checkout_comment","—"),
+                "Horário":get_series(df_err,"checkout_time").apply(formatar_data),
+            }), use_container_width=True, hide_index=True)
+
+    with abas[2]:
+        df_n = dr[dr["_notificado"] == True]
+        if df_n.empty:
+            st.info("Nenhum notificado ainda.")
+        else:
+            for _, row in df_n.iterrows():
+                tid = str(row.get("tracking_id","") or "").strip()
+                url = f"{TRACKING_BASE}{tid}" if tid not in ("","—","nan","None") else ""
+                st.markdown(
+                    f"**#{esc(row.get('order','—'))} · {esc(row.get('title','—'))}**  \n"
+                    f"<span style='font-size:0.8rem;color:#64778d;'>📍 {esc(row.get('address','—'))}</span>  \n"
+                    f"<span style='font-size:0.8rem;color:#64778d;'>Notif.: {formatar_data(row.get('on_its_way'))} · {esc(row.get('_status_visual',''))}</span>",
+                    unsafe_allow_html=True)
+                if url:
+                    st.markdown(
+                        f'<a href="{url}" target="_blank" '
+                        f'style="font-size:0.8rem;color:#2980b9;word-break:break-all;">{esc(url)}</a>',
+                        unsafe_allow_html=True)
+                else:
+                    st.caption("⚠️ Sem tracking ID")
+                st.markdown("<hr style='margin:6px 0;border:none;border-top:1px solid #eee;'>",
+                            unsafe_allow_html=True)
+
+
+def _abrir_popup_motorista(rota, df, data_consulta, user):
+    deco = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if deco is None:
+        return
+    titulo = f"🧑 {nome_motorista(rota)}"
+    try:
+        @deco(titulo, width="large")
+        def _p(): _conteudo_motorista(rota, df, data_consulta, user)
+        _p()
+    except TypeError:
+        @deco(titulo)
+        def _p2(): _conteudo_motorista(rota, df, data_consulta, user)
+        _p2()
+
+
+def _card_motorista(rota, df, idx, ctx, data_consulta, user):
+    dr, tot, ok, fail, nt, pct_n, pct_o = _stats_rota(df, rota)
+    nome = nome_motorista(rota)
+    body = _body_html(rota, tot, ok, fail, nt, pct_n, pct_o)
+
+    if _HAS_DIALOG:
+        # título clicável → abre POPUP
+        if st.button(f"🧑 {nome}", key=f"mtcard_{ctx}_{idx}", use_container_width=True):
+            _abrir_popup_motorista(rota, df, data_consulta, user)
+        st.markdown(body, unsafe_allow_html=True)
+    else:
+        # fallback sem st.dialog: popover com o conteúdo
+        st.markdown(_html(f'<div style="font-weight:700;color:#2c3e50;'
+                          f'padding:4px 0 2px;">🧑 {esc(nome)}</div>'), unsafe_allow_html=True)
+        st.markdown(body, unsafe_allow_html=True)
+        with st.popover(f"🔍 Abrir {nome}", use_container_width=True):
+            _conteudo_motorista(rota, df, data_consulta, user)
+
+
 # ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
-# Assinatura nova: data_consulta resolvida AQUI dentro
 def renderizar_rastreio(papel: str, user: dict = None,
                         datas_db: list = None, pode_exp: bool = False):
     if user is None: user = {"role": papel}
     if datas_db is None: datas_db = []
 
+    _injetar_css()
+
     hoje  = datetime.now(BRT).date().isoformat()
-    ontem = (datetime.now(BRT).date() - __import__('datetime').timedelta(days=1)).isoformat()
+    ontem = (datetime.now(BRT).date() - timedelta(days=1)).isoformat()
     datas_disp = [d["data"] for d in datas_db]
 
     # ── Seletor de data + busca numa linha ───────────────────────
@@ -107,8 +299,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
 
     if df.empty:
         st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
-        if is_hoje: time.sleep(20); st.rerun()
-        return
+        return is_hoje
 
     df = garantir_colunas(df.copy())
 
@@ -118,7 +309,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
     if f_nt == "Sim":    df_f = df_f[df_f["_notificado"] == True]
     elif f_nt == "Não":  df_f = df_f[df_f["_notificado"] == False]
     if termo and df_f.empty:
-        st.warning(f"Nenhum resultado para **{termo}**."); return
+        st.warning(f"Nenhum resultado para **{termo}**."); return is_hoje
 
     # ── Abas ──────────────────────────────────────────────────────
     abas_nomes = ["🏠 Dashboard", "🧑 Visão por Motorista"]
@@ -150,53 +341,11 @@ def renderizar_rastreio(papel: str, user: dict = None,
                  if r and "não identificada" not in str(r).lower()] if "route" in df_f.columns else []
         if rotas:
             st.markdown("### 🧑 Motoristas em Operação")
+            st.caption("Clique no nome do motorista para abrir os detalhes.")
             cols = st.columns(min(len(rotas), 4))
             for idx, rota in enumerate(rotas):
-                dr   = df_f[df_f["route"]==rota]
-                nome = nome_motorista(rota)
-                tot  = len(dr); ok = int((dr["_status_visual"]=="✅ Sucesso").sum())
-                fail = int((dr["_status_visual"]=="❌ Falhou").sum())
-                nt   = int(dr["_notificado"].sum())
-                pct_n= round(nt/tot*100,1) if tot else 0
-                pct_o= round(ok/tot*100) if tot else 0
-                with cols[idx%4]:
-                    st.markdown(f"""
-                    <div class="driver-card">
-                        <div style="font-size:0.92rem;font-weight:700;color:#2c3e50;">{nome}</div>
-                        <div style="font-size:0.71rem;color:#7f8c8d;margin-bottom:8px;">{rota}</div>
-                        <div style="background:#e8ecf0;border-radius:4px;height:5px;margin-bottom:3px;">
-                          <div style="background:#2980b9;height:5px;border-radius:4px;width:{pct_o}%;"></div>
-                        </div>
-                        <div style="font-size:0.7rem;color:#64778d;margin-bottom:7px;">{ok}/{tot} ({pct_o}%)</div>
-                        <div>
-                            <span class="tag tn">📱 {nt} ({pct_n}%)</span>
-                            <span class="tag tg">📦 {tot}</span>
-                            <span class="tag tb">✅ {ok}</span>
-                            <span class="tag tr">❌ {fail}</span>
-                        </div>
-                    </div>""", unsafe_allow_html=True)
-
-                    with st.popover(f"📋 {nt} notificado(s)", use_container_width=True):
-                        df_n = dr[dr["_notificado"]==True]
-                        if df_n.empty: st.info("Nenhum notificado ainda.")
-                        else:
-                            for _, row in df_n.iterrows():
-                                tid = str(row.get("tracking_id","") or "").strip()
-                                url = f"{TRACKING_BASE}{tid}" if tid not in ("","—","nan","None") else ""
-                                st.markdown(
-                                    f"**#{row.get('order','—')} · {row.get('title','—')}**  \n"
-                                    f"<span style='font-size:0.8rem;color:#64778d;'>📍 {row.get('address','—')}</span>  \n"
-                                    f"<span style='font-size:0.8rem;color:#64778d;'>Notif.: {formatar_data(row.get('on_its_way'))} · {row.get('_status_visual','')}</span>",
-                                    unsafe_allow_html=True)
-                                if url:
-                                    cl,cc = st.columns([3,1])
-                                    with cl: st.markdown(f'<a href="{url}" target="_blank" style="font-size:0.8rem;color:#2980b9;word-break:break-all;">{url}</a>', unsafe_allow_html=True)
-                                    with cc:
-                                        if st.button("📋", key=f"cp_{rota}_{tid}"):
-                                            st.components.v1.html(f"<script>navigator.clipboard.writeText('{url}');</script>", height=0)
-                                            st.toast("Copiado!", icon="✅")
-                                else: st.caption("⚠️ Sem tracking ID")
-                                st.markdown("<hr style='margin:5px 0;border:none;border-top:1px solid #eee;'>", unsafe_allow_html=True)
+                with cols[idx % 4]:
+                    _card_motorista(rota, df_f, idx, "dash", data_consulta, user)
 
         st.markdown("---")
         st.markdown(f"**{len(df_f)} entregas**")
@@ -213,90 +362,18 @@ def renderizar_rastreio(papel: str, user: dict = None,
             "Tracking": get_series(df_f,"tracking_id"),
         }), use_container_width=True, hide_index=True)
 
-    # ══ VISÃO POR MOTORISTA ═══════════════════════════════════════
+    # ══ VISÃO POR MOTORISTA (grade de cards clicáveis) ════════════
     with abas[1]:
         rotas = [r for r in sorted(df["route"].unique())
                  if r and "não identificada" not in str(r).lower()] if "route" in df.columns else []
-        if not rotas: st.info("Nenhuma rota registrada."); return
-
-        opcoes_m, mapa = [], {}
-        for r in rotas:
-            n   = int(df[df["route"]==r]["_notificado"].sum())
-            lbl = f"{nome_motorista(r)} (📱 {n})"
-            opcoes_m.append(lbl); mapa[lbl] = r
-
-        col_m, col_d = st.columns([1.5, 3])
-        with col_m:
-            sel       = st.radio("", opcoes_m, label_visibility="collapsed")
-            mot_ativo = mapa[sel]
-
-            if pode_editar(user):
-                st.markdown("---")
-                nn = st.text_input("Nome do condutor:", value=nome_motorista(mot_ativo), key=f"nm_{mot_ativo}")
-                if st.button("Salvar nome", key=f"sv_{mot_ativo}", type="primary", use_container_width=True):
-                    salvar_vinculo_db(extrair_chave(mot_ativo), nn.strip())
-                    st.success("Salvo!"); time.sleep(.5); st.rerun()
-            else:
-                st.markdown("---")
-                st.caption(f"Condutor: **{nome_motorista(mot_ativo)}**")
-                st.caption("🔒 Edição restrita.")
-
-            if pode_deletar(user):
-                st.markdown("---"); st.error("Zona de Perigo")
-                if st.checkbox("Liberar exclusão", key=f"chk_{mot_ativo}"):
-                    if st.button("Excluir Rota", key=f"del_{mot_ativo}", use_container_width=True):
-                        deletar_rota_db(mot_ativo, data_consulta)
-                        st.success("Excluído!"); time.sleep(1); st.rerun()
-
-        with col_d:
-            dr   = df[df["route"]==mot_ativo].copy()
-            tot  = len(dr); nt = int(dr["_notificado"].sum())
-            ok   = int((dr["_status_visual"]=="✅ Sucesso").sum())
-            fail = int((dr["_status_visual"]=="❌ Falhou").sum())
-            pct  = round(ok/tot*100) if tot else 0
-
-            st.markdown(f"""
-            <div style="background:#fff;border-left:6px solid #C9A84C;border-radius:10px;
-                        padding:14px;margin-bottom:12px;border:1px solid #e2e8f0;">
-                <h3 style="margin:0;color:#2c3e50;">{nome_motorista(mot_ativo)}</h3>
-                <p style="color:#64778d;font-size:0.8rem;margin:3px 0 10px;">{mot_ativo}</p>
-                <span class="tag tg">📦 {tot}</span>
-                <span class="tag tn">📱 {nt}</span>
-                <span class="tag tb">✅ {ok}</span>
-                <span class="tag tr">❌ {fail}</span>
-                <div style="background:#e8ecf0;border-radius:4px;height:6px;margin:10px 0 3px;">
-                  <div style="background:#2980b9;height:6px;border-radius:4px;width:{pct}%;"></div>
-                </div>
-                <span style="font-size:0.73rem;color:#64778d;">{ok}/{tot} concluídas ({pct}%)</span>
-            </div>""", unsafe_allow_html=True)
-
-            tf, tfl = st.tabs(["📋 Fila de Clientes","⚠️ Ocorrências"])
-            with tf:
-                st.dataframe(pd.DataFrame({
-                    "Ordem":    get_series(dr,"order"),
-                    "Cliente":  get_series(dr,"title"),
-                    "Endereço": get_series(dr,"address"),
-                    "Status":   dr["_status_visual"],
-                    "Notif.":   dr["_notificado"].apply(lambda x:"Sim" if x else "Não"),
-                    "Notif. em":get_series(dr,"on_its_way").apply(formatar_data),
-                    "Check-in": get_series(dr,"checkin_time").apply(formatar_data),
-                    "Check-out":get_series(dr,"checkout_time").apply(formatar_data),
-                    "ETA":      get_series(dr,"estimated_time_arrival"),
-                    "Telefone": get_series(dr,"contact_phone"),
-                    "Obs":      get_series(dr,"checkout_observation"),
-                    "Tracking": get_series(dr,"tracking_id"),
-                }), use_container_width=True, hide_index=True)
-            with tfl:
-                df_err = dr[dr["_status_visual"]=="❌ Falhou"]
-                if df_err.empty: st.success("Nenhuma ocorrência.")
-                else:
-                    st.dataframe(pd.DataFrame({
-                        "Ordem":  get_series(df_err,"order"),
-                        "Cliente":get_series(df_err,"title"),
-                        "Motivo": get_series(df_err,"checkout_observation"),
-                        "Detalhe":get_series(df_err,"checkout_comment","—"),
-                        "Horário":get_series(df_err,"checkout_time").apply(formatar_data),
-                    }), use_container_width=True, hide_index=True)
+        if not rotas:
+            st.info("Nenhuma rota registrada.")
+        else:
+            st.caption("Clique em um motorista para abrir a visão completa (fila, ocorrências, notificados e edição).")
+            cols = st.columns(3)
+            for idx, rota in enumerate(rotas):
+                with cols[idx % 3]:
+                    _card_motorista(rota, df, idx, "visao", data_consulta, user)
 
     # ══ EXPORTAR ══════════════════════════════════════════════════
     if pode_exp:
