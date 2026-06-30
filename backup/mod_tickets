@@ -528,7 +528,8 @@ def renderizar_tickets(papel: str, user: dict = None):
             st.session_state.tk_modo = "novo"; st.rerun()
 
         if papel in ("supervisor", "adm"):
-            if st.button("👥 Equipe", use_container_width=True):
+            if st.button("📊 Visão Geral da Operação", use_container_width=True,
+                         type="primary" if st.session_state.tk_modo == "equipe" else "secondary"):
                 st.session_state.tk_modo = "equipe"; st.rerun()
 
         if papel == "adm":
@@ -596,9 +597,13 @@ def renderizar_tickets(papel: str, user: dict = None):
         elif modo == "novo":
             _render_novo(user)
 
-        # ══ EQUIPE (Regra 5) ═════════════════════════════════════
+        # ══ VISÃO GERAL DA OPERAÇÃO (só supervisor/adm) ══════════
         elif modo == "equipe":
-            _render_equipe(user, papel, todos_geral)
+            if papel not in ("supervisor", "adm"):
+                st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
+                st.session_state.tk_modo = "lista"
+            else:
+                _render_visao_geral_operacao(user, papel, todos_geral)
 
         # ══ SYNC ZENDESK ═════════════════════════════════════════
         elif modo == "sync":
@@ -946,17 +951,24 @@ def _render_novo(user):
                 st.session_state.tk_modo = "lista"; st.rerun()
 
 
-def _render_equipe(user, papel, todos_geral):
-    st.markdown("### 👥 Equipe & Tickets do Departamento")
+# ═══════════════════════════════════════════════════════════════════
+# VISÃO GERAL DA OPERAÇÃO — bloco exclusivo de Supervisor/ADM.
+# Código totalmente separado da experiência do atendente comum.
+# Mostra, dentro do(s) departamento(s) que o supervisor enxerga:
+#   1) Tickets por TABULAÇÃO (quantidade + com quem está)
+#   2) Tickets por ATENDENTE (quantidade + transferência)
+# ═══════════════════════════════════════════════════════════════════
+def _render_visao_geral_operacao(user, papel, todos_geral):
+    st.markdown("### 📊 Visão Geral da Operação")
     if st.button("← Voltar"):
         st.session_state.tk_modo = "lista"; st.rerun()
 
-    # adm escolhe o depto; supervisor fica fixo no seu
+    # adm escolhe o depto; supervisor fica fixo no seu próprio departamento
     if papel == "adm":
         dep_nomes = [d["nome"] for d in listar_departamentos()]
         if not dep_nomes:
             st.info("Nenhum departamento cadastrado."); return
-        dep_alvo = st.selectbox("Departamento", dep_nomes, key="eq_dep")
+        dep_alvo = st.selectbox("Departamento", dep_nomes, key="vg_dep")
     else:
         dep_alvo = user.get("departamento","") or "—"
         st.markdown(f"Departamento: **{dep_alvo}**")
@@ -976,7 +988,67 @@ def _render_equipe(user, papel, todos_geral):
         st.markdown(_html(f'<div class="tk-banner">⚠️ {vencidos} ticket(s) do departamento '
                           f'com SLA vencido!</div>'), unsafe_allow_html=True)
 
+    # ── BLOCO 1 — Por TABULAÇÃO: quantidade + com quem está ──────
     st.markdown("---")
+    st.markdown("#### 📋 Tickets por Tabulação")
+
+    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep_alvo]
+    nomes_users = {u.get("usuario",""): u.get("nome", u.get("usuario","")) for u in usuarios_dep}
+
+    def _resumo_quem(lista_tickets):
+        """Conta quantos tickets cada atendente tem dentro da lista informada."""
+        from collections import Counter
+        cont = Counter()
+        for t in lista_tickets:
+            ats = t.get("atendentes") or []
+            if not ats and t.get("atribuido_para"):
+                ats = [t.get("atribuido_para")]
+            if not ats:
+                cont["— ninguém atribuído —"] += 1
+            for a in ats:
+                cont[nomes_users.get(a, a)] += 1
+        return cont
+
+    if not tabs_dep:
+        st.caption("Nenhuma tabulação cadastrada para este departamento.")
+    else:
+        for tb in tabs_dep:
+            nome_tab  = tb.get("nome", "—")
+            tks_tab   = [t for t in tickets_dep if t.get("tabulacao") == nome_tab]
+            n_total   = len(tks_tab)
+            n_pend    = sum(1 for t in tks_tab if t.get("status") in STATUS_ABERTOS)
+            n_venc    = sum(1 for t in tks_tab if ticket_vencido_pendente(t))
+            cont_at   = _resumo_quem(tks_tab)
+            quem_str  = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            alerta    = f' <span class="tk-blink">⏳ {n_venc} vencido(s)</span>' if n_venc else ""
+
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#2c3e50;">📋 {esc(nome_tab)}</b>{alerta}<br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">'
+                f'Total: {n_total} &nbsp;·&nbsp; Pendentes: {n_pend} &nbsp;·&nbsp; '
+                f'SLA vencido: {n_venc}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+        # Tickets do departamento sem tabulação definida
+        sem_tab = [t for t in tickets_dep if not t.get("tabulacao")]
+        if sem_tab:
+            cont_at  = _resumo_quem(sem_tab)
+            quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
+            st.markdown(_html(
+                f'<div class="tk-equipe-card">'
+                f'<b style="color:#64778d;">📋 Sem tabulação</b><br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_tab)}</span><br>'
+                f'<span style="font-size:0.78rem;color:#64778d;">'
+                f'👥 Com quem está: {esc(quem_str)}</span>'
+                f'</div>'), unsafe_allow_html=True)
+
+    # ── BLOCO 2 — Por ATENDENTE: quantidade + transferência ───────
+    st.markdown("---")
+    st.markdown("#### 👥 Tickets por Atendente")
+
     if not usuarios_dep:
         st.info("Nenhum atendente vinculado a este departamento.")
         return
