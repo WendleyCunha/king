@@ -358,3 +358,16 @@ def listar_lotes_cartas_db() -> list:
     docs = get_db().collection("lotes_rh").stream()
     lotes = [d.to_dict() for d in docs]
     return sorted(lotes, key=lambda x: x.get("id",""), reverse=True)
+
+def limpar_anexos_lote_db(ids_cartas: list):
+    """Remove só o arquivo binário (anexo_bin) das cartas de um lote já
+    fechado, mantendo todo o resto do histórico (nome, valor, status, datas
+    etc.) intacto. Usado para manter o banco de dados leve, já que os
+    arquivos assinados (docx/pdf/imagem) podem ser pesados e o ZIP do lote
+    já foi baixado pelo usuário antes de excluir."""
+    db = get_db()
+    batch = db.batch()
+    for id_c in ids_cartas:
+        ref = db.collection("cartas_rh").document(id_c)
+        batch.update(ref, {"anexo_bin": None})
+    batch.commit()
