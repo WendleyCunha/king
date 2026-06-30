@@ -21,6 +21,11 @@ try:
 except ImportError:
     def renderizar_tickets(papel, user=None): st.info("🚧 Módulo de Tickets em desenvolvimento...")
 
+try:
+    from modulo.mod_cartas import renderizar_cartas
+except ImportError:
+    def renderizar_cartas(papel, user=None): st.info("🚧 Módulo de Cartas em desenvolvimento...")
+
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
     layout="wide", page_icon="🚚",
@@ -166,7 +171,7 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Operacional</span>', unsafe_allow_html=True)
 
-    for key, label in [("rastreio","Rastreio"), ("tickets","Tickets")]:
+    for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
         if key not in mods: continue
         ativo = st.session_state.modulo_ativo == key
         if st.button(label, key=f"nav_{key}", use_container_width=True,
@@ -199,9 +204,10 @@ with st.sidebar:
 lb        = get_logo()
 logo_html = (f'<img src="data:image/png;base64,{lb}" style="height:50px;margin-right:18px;">'
              if lb else "")
+_NOMES_MODULOS = {"rastreio": "Rastreio", "tickets": "Tickets", "cartas": "Cartas"}
 pills = "".join(
-    f'<span class="ks-pill">{"Rastreio" if m=="rastreio" else "Tickets"}</span>'
-    for m in mods if m in ("rastreio","tickets")
+    f'<span class="ks-pill">{_NOMES_MODULOS[m]}</span>'
+    for m in mods if m in _NOMES_MODULOS
 )
 
 hc1, hc2 = st.columns([9, 1])
@@ -250,6 +256,9 @@ if modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
     renderizar_tickets(papel, user)
+
+elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
+    renderizar_cartas(papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
@@ -323,11 +332,12 @@ elif modulo_ativo == "config" and papel == "adm":
         uname = u.get("usuario", f"u{idx}")
         umods = u.get("modulos", MODULOS_PADRAO.get(u.get("role","operacional"), []))
         with st.expander(f"**{u.get('nome','—')}** · `{uname}`"):
-            ma, mb = st.columns(2)
+            ma, mb, mc = st.columns(3)
             nr = ma.checkbox("Rastreio", value="rastreio" in umods, key=f"r_{ctx}_{uname}_{idx}")
             nt = mb.checkbox("Tickets",  value="tickets"  in umods, key=f"t_{ctx}_{uname}_{idx}")
+            nca = mc.checkbox("Cartas",  value="cartas"   in umods, key=f"c_{ctx}_{uname}_{idx}")
             if st.button("💾 Salvar", key=f"svperm_{ctx}_{uname}_{idx}", type="primary"):
-                ns = [m for m,v in [("rastreio",nr),("tickets",nt),("exportar",nr)] if v]
+                ns = [m for m,v in [("rastreio",nr),("tickets",nt),("cartas",nca),("exportar",nr)] if v]
                 atualizar_modulos_usuario(uname, ns)
                 st.success("Salvo!"); time.sleep(.5); st.rerun()
 
@@ -385,16 +395,17 @@ elif modulo_ativo == "config" and papel == "adm":
                 n_dep   = st.selectbox("Departamento",
                                        options=(["— Selecione —"] + dep_nomes),
                                        help="Tickets do departamento caem automaticamente para este usuário.")
-                ma, mb  = st.columns(2)
+                ma, mb, mc = st.columns(3)
                 m_r     = ma.checkbox("Rastreio", value=True)
                 m_t     = mb.checkbox("Tickets", value=n_nivel in ("supervisor","adm"))
+                m_c     = mc.checkbox("Cartas", value=n_nivel in ("supervisor","adm"))
                 if st.form_submit_button("Criar"):
                     if not (n_nome and n_user and n_senha):
                         st.warning("Preencha todos os campos.")
                     elif n_dep == "— Selecione —":
                         st.warning("Selecione um departamento.")
                     else:
-                        ms = [m for m,v in [("rastreio",m_r),("tickets",m_t),("exportar",m_r)] if v]
+                        ms = [m for m,v in [("rastreio",m_r),("tickets",m_t),("cartas",m_c),("exportar",m_r)] if v]
                         criar_usuario(n_nome, n_user, n_senha, n_nivel, ms, departamento=n_dep)
                         st.success(f"Usuário **{n_user}** criado no depto **{n_dep}**!")
                         time.sleep(1); st.rerun()
