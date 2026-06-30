@@ -91,7 +91,7 @@ def renderizar_home(papel: str, user: dict = None):
         _render_aba_raci(raci_projetos)
 
     with tabs[2]:
-        _render_todos_lembretes(lembretes)
+        _render_todos_lembretes(lembretes, raci_projetos)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -151,12 +151,19 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
         cdl1, cdl2 = st.columns(2)
         dl = cdl1.date_input("Data", value=date.today(), key="novo_lembrete_data")
         hl = cdl2.time_input("Hora", value=None, key="novo_lembrete_hora")
+        nomes_proj_v = [p["nome"] for p in raci_projetos]
+        vinc_sel = st.selectbox(
+            "Vincular a:", ["Pontual (fora de projetos)"] + nomes_proj_v,
+            key="novo_lembrete_vinculo",
+        )
         if st.button("Gravar Lembrete", type="primary", key="btn_novo_lembrete",
                      use_container_width=True):
             if txt_l.strip():
                 hora_txt = hl.strftime("%H:%M") if hl else "00:00"
+                vinculo_final = "" if vinc_sel == "Pontual (fora de projetos)" else vinc_sel
                 criar_lembrete_pessoal_db(
                     uname, txt_l.strip(), f"{dl.strftime('%d/%m/%Y')} {hora_txt}",
+                    vinculo=vinculo_final,
                 )
                 st.success("Lembrete criado!")
                 time.sleep(.4)
@@ -576,10 +583,103 @@ def _render_analise_projeto(projeto):
 
 
 # ════════════════════════════════════════════════════════════════
-# ABA 3 — TODOS OS LEMBRETES (pessoais)
+# ABA 3 — TODOS OS LEMBRETES (dashboard de período + vínculo a projeto)
 # ════════════════════════════════════════════════════════════════
-def _render_todos_lembretes(lembretes):
-    st.markdown("##### 🔔 Meus Lembretes")
+def _periodo_por_preset(preset):
+    hoje = date.today()
+    if preset == "Esta Semana":
+        ini = hoje - timedelta(days=hoje.weekday())  # segunda-feira desta semana
+        return ini, hoje
+    if preset == "Este Mês":
+        return hoje.replace(day=1), hoje
+    return None, None  # Personalizado: tratado fora
+
+
+def _render_todos_lembretes(lembretes, raci_projetos):
+    st.markdown("##### 📊 Dossiê de Atividades")
+    st.caption("Filtre por período para apresentar o que foi executado — útil para repasse a gestores.")
+
+    nomes_proj_v = [p["nome"] for p in raci_projetos]
+
+    fc1, fc2 = st.columns([1.2, 2])
+    with fc1:
+        preset = st.selectbox("Período", ["Esta Semana", "Este Mês", "Personalizado"],
+                              key="dossie_periodo_preset")
+    if preset == "Personalizado":
+        with fc2:
+            periodo = st.date_input(
+                "Intervalo", value=(date.today() - timedelta(days=7), date.today()),
+                format="DD/MM/YYYY", key="dossie_periodo_custom",
+            )
+        if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
+            data_ini, data_fim = periodo
+        else:
+            data_ini, data_fim = None, None
+    else:
+        data_ini, data_fim = _periodo_por_preset(preset)
+
+    if not data_ini or not data_fim:
+        st.info("Selecione um período completo (data inicial e final) para gerar o dossiê.")
+    else:
+        executados_periodo = []
+        for l in lembretes:
+            if l.get("status") != "Executado":
+                continue
+            dt_l = _parse_data(l.get("data_hora", ""))
+            if dt_l is None or not (data_ini <= dt_l.date() <= data_fim):
+                continue
+            executados_periodo.append(l)
+
+        total = len(executados_periodo)
+        vinculados = [l for l in executados_periodo if l.get("vinculo")]
+        pontuais = [l for l in executados_periodo if not l.get("vinculo")]
+
+        st.caption(f"Período: **{data_ini.strftime('%d/%m/%Y')}** a **{data_fim.strftime('%d/%m/%Y')}**")
+        k1, k2, k3 = st.columns(3)
+        k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Total Executado</div>'
+                    f'<div class="kpi-value">{total}</div></div>', unsafe_allow_html=True)
+        k2.markdown(f'<div class="kpi-card blue"><div class="kpi-label">Vinculado a Projeto</div>'
+                    f'<div class="kpi-value">{len(vinculados)}</div></div>', unsafe_allow_html=True)
+        k3.markdown(f'<div class="kpi-card gray"><div class="kpi-label">Pontual</div>'
+                    f'<div class="kpi-value">{len(pontuais)}</div></div>', unsafe_allow_html=True)
+
+        if total:
+            st.markdown("")
+            from collections import Counter
+            cont_proj = Counter(l.get("vinculo") or "Pontual (fora de projetos)" for l in executados_periodo)
+            df_resumo = pd.DataFrame(cont_proj.most_common(), columns=["Vínculo", "Qtd."])
+            st.dataframe(df_resumo, use_container_width=True, hide_index=True)
+
+            st.markdown("**Detalhamento do período:**")
+            df_det = pd.DataFrame([{
+                "Data": l.get("data_hora", ""),
+                "Atividade": l.get("texto", ""),
+                "Vínculo": l.get("vinculo") or "Pontual (fora de projetos)",
+            } for l in sorted(executados_periodo, key=lambda x: x.get("data_hora", ""))])
+            st.dataframe(df_det, use_container_width=True, hide_index=True)
+
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                df_det.to_excel(writer, index=False, sheet_name="Detalhamento")
+                df_resumo.to_excel(writer, index=False, sheet_name="Resumo")
+                for nome_aba, df in [("Detalhamento", df_det), ("Resumo", df_resumo)]:
+                    ws = writer.sheets[nome_aba]
+                    for i, col in enumerate(df.columns):
+                        largura = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                        ws.set_column(i, i, largura)
+            buf.seek(0)
+            st.download_button(
+                "📥 Baixar Dossiê do Período (.xlsx)", data=buf.getvalue(),
+                file_name=f"Dossie_Atividades_{data_ini.strftime('%Y%m%d')}_a_{data_fim.strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary", use_container_width=True,
+            )
+        else:
+            st.info("Nenhuma atividade executada nesse período ainda.")
+
+    st.divider()
+    st.markdown("##### 🔔 Gerenciar Meus Lembretes")
     if not lembretes:
         st.info("Nenhum lembrete cadastrado ainda.")
         return
@@ -588,18 +688,32 @@ def _render_todos_lembretes(lembretes):
         "Filtrar por status:", ["Pendente", "Executado"],
         default=["Pendente"], key="filtro_lembretes_home",
     )
+    opcoes_vinculo = ["Pontual (fora de projetos)"] + nomes_proj_v
     for l in lembretes:
         status_l = l.get("status", "Pendente")
         if filtro and status_l not in filtro:
             continue
-        cols = st.columns([4, 2, 1, 1])
-        icone = "✅" if status_l == "Executado" else "🔵"
-        cols[0].write(f"{icone} {l.get('texto','')}")
-        cols[1].caption(l.get("data_hora", ""))
-        if status_l == "Pendente":
-            if cols[2].button("✅", key=f"lemb_ok_{l['id']}", use_container_width=True):
-                atualizar_lembrete_pessoal_db(l["id"], status="Executado")
+        with st.container(border=True):
+            cols = st.columns([3, 1.4, 1.6, 1, 1])
+            icone = "✅" if status_l == "Executado" else "🔵"
+            cols[0].write(f"{icone} {l.get('texto','')}")
+            cols[1].caption(l.get("data_hora", ""))
+
+            vinc_atual = l.get("vinculo") or "Pontual (fora de projetos)"
+            idx_vinc = opcoes_vinculo.index(vinc_atual) if vinc_atual in opcoes_vinculo else 0
+            novo_vinc = cols[2].selectbox(
+                "Vínculo", opcoes_vinculo, index=idx_vinc,
+                key=f"vinc_{l['id']}", label_visibility="collapsed",
+            )
+            if novo_vinc != vinc_atual:
+                novo_vinculo_db = "" if novo_vinc == "Pontual (fora de projetos)" else novo_vinc
+                atualizar_lembrete_pessoal_db(l["id"], vinculo=novo_vinculo_db)
                 st.rerun()
-        if cols[3].button("🗑️", key=f"lemb_del_{l['id']}", use_container_width=True):
-            deletar_lembrete_pessoal_db(l["id"])
-            st.rerun()
+
+            if status_l == "Pendente":
+                if cols[3].button("✅", key=f"lemb_ok_{l['id']}", use_container_width=True):
+                    atualizar_lembrete_pessoal_db(l["id"], status="Executado")
+                    st.rerun()
+            if cols[4].button("🗑️", key=f"lemb_del_{l['id']}", use_container_width=True):
+                deletar_lembrete_pessoal_db(l["id"])
+                st.rerun()
