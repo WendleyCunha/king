@@ -124,24 +124,20 @@ def _renderizar_form_edicao(c, dict_colab):
             else:
                 if escolha == "+ CADASTRAR NOVO":
                     salvar_novo_colaborador_db(nome_final, novo_cpf)
-
-                atualizar_carta_db(
+        
+                atualizar_carta_db(          # ← campos em MAIÚSCULAS = nomes reais no Firestore
                     carta_id,
-                    nome=nome_final,
-                    cpf=novo_cpf,
-                    cod_cli=novo_cod,
-                    valor=novo_valor,
-                    loja=nova_loja,
-                    data_str=nova_data.strftime("%d/%m/%Y"),
-                    motivo=novo_motivo,
+                    NOME=nome_final,
+                    CPF=novo_cpf,
+                    COD_CLI=novo_cod,
+                    VALOR=novo_valor,
+                    LOJA=nova_loja,
+                    DATA=nova_data.strftime("%d/%m/%Y"),
+                    MOTIVO=novo_motivo,
                 )
                 st.session_state.pop(f"editando_{carta_id}", None)
                 st.success("✅ Carta atualizada!")
                 st.rerun()
-
-        if cancelar:
-            st.session_state.pop(f"editando_{carta_id}", None)
-            st.rerun()
 
 
 # ─── GERAÇÃO DE ZIP (arquivos ASSINADOS realmente enviados no upload) ────────
