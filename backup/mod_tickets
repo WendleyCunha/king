@@ -13,6 +13,7 @@ Correções / novidades nesta versão:
         - operacional → só os próprios tickets
         - supervisor  → todos os tickets + aba "Equipe" do seu departamento
         - adm         → tudo de todos
+  [6] ADM pode excluir TODOS os tickets pelo painel Sync Zendesk.
 """
 import streamlit as st
 import pandas as pd
@@ -46,17 +47,24 @@ STATUS_CFG = {
     "em_andamento": ("Em Andamento", "#EFF6FF","#1D5FAE","#2563EB"),
     "aguardando":   ("Aguardando",   "#FFF7ED","#9A3412","#EA580C"),
     "resolvido":    ("Resolvido",    "#DCFCE7","#15803D","#16A34A"),
+    "finalizado":   ("Finalizado",   "#F3ECD9","#6B5A2A","#A98C3D"),
     "cancelado":    ("Cancelado",    "#F1F5F9","#475569","#64748B"),
 }
 
 PRIO_CFG = {
-    "urgente": ("Urgente","#FEE2E2","#991B1B"),
+    "urgente": ("Urgente","#EFD9A0","#6B4E0F"),
     "alta":    ("Alta",   "#FFF7ED","#9A3412"),
     "normal":  ("Normal", "#F0FDF4","#166534"),
     "baixa":   ("Baixa",  "#F1F5F9","#475569"),
 }
 
 STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")  # pendentes p/ SLA
+
+# ── Paleta dourada (sem vermelho) ──────────────────────────────────
+GOLD       = "#C9A84C"   # dourado base
+GOLD_WARN  = "#D4A12C"   # faltando <30min  (ouro médio)
+GOLD_VENC  = "#8A6D1F"   # SLA vencido      (ouro escuro / bronze)
+GREEN_OK   = "#16A34A"   # barra saudável
 
 # ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
@@ -127,12 +135,91 @@ def pill(texto, bg, cor):
     return (f'<span style="background:{bg};color:{cor};padding:2px 10px;'
             f'border-radius:12px;font-size:0.72rem;font-weight:700;">{esc(texto)}</span>')
 
+def sla_estado(t) -> str:
+    """Retorna o estado do SLA: 'ok', 'warn' (faltam <=30min) ou 'venc' (estourou).
+    Só vale para tickets pendentes; resolvidos/cancelados sempre 'ok'."""
+    if t.get("status") not in STATUS_ABERTOS:
+        return "ok"
+    try:
+        dt = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        limite = dt + timedelta(hours=t.get("horas_sla", 24))
+        restante = (limite - datetime.now(BRT)).total_seconds()
+    except Exception:
+        return "ok"
+    if restante <= 0:
+        return "venc"
+    if restante <= 1800:      # 30 minutos
+        return "warn"
+    return "ok"
+
 def ticket_vencido_pendente(t) -> bool:
     """True se o SLA estourou E o ticket ainda está pendente."""
     if t.get("status") not in STATUS_ABERTOS:
         return False
     _, _, venc = sla_restante(t.get("criado_em",""), t.get("horas_sla", 24))
     return venc
+
+# ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
+def _atribuido_a(t, user) -> bool:
+    """O ticket caiu para o usuário logado atender (atendente/atribuído)?"""
+    uname = user.get("usuario","")
+    nome  = user.get("nome","")
+    return (uname in t.get("atendentes", [])
+            or t.get("atribuido_para") in (uname, nome))
+
+JANELA_VALIDACAO_H = 24   # horas que o autor tem para validar um ticket resolvido
+
+def _horas_desde_atualizacao(t) -> float:
+    try:
+        dt = datetime.fromisoformat(str(t.get("atualizado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        return (datetime.now(BRT) - dt).total_seconds() / 3600.0
+    except Exception:
+        return 0.0
+
+def resolvido_em_validacao(t) -> bool:
+    """Resolvido há menos de 24h, sem nova interação → ainda aguarda validação do autor."""
+    return t.get("status") == "resolvido" and _horas_desde_atualizacao(t) < JANELA_VALIDACAO_H
+
+def classificar_fila(t, user) -> str:
+    """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma).
+    O ticket nunca está em duas caixas — apenas caminha entre elas.
+
+    Precedência:
+      1) meus        → tickets ABERTOS pelo usuário logado.
+                       Se resolvido: fica em 'meus' por até 24h para o autor VALIDAR;
+                       depois disso (ou se finalizado/cancelado) sai de 'meus'.
+      2) (a partir daqui, só tickets que caíram para EU atender)
+      3) vencidos    → pendente e com SLA estourado.
+      4) aberto      → recém-nascido (status 'aberto'), sem interação.
+      5) urgente     → já em interação e prioridade urgente.
+      6) em_andamento→ já em interação, prioridade normal.
+      7) None        → resolvidos/finalizados/cancelados ou que não são meus.
+    """
+    uname = user.get("usuario","")
+    # 1) Tickets que EU abri (acompanhamento / validação)
+    if t.get("aberto_por") == uname:
+        status = t.get("status")
+        if status in ("cancelado", "finalizado"):
+            return None
+        if status == "resolvido":
+            return "meus" if resolvido_em_validacao(t) else None
+        return "meus"
+    # 2) Daqui pra frente, só o que caiu para eu atender
+    if not _atribuido_a(t, user):
+        return None
+    status = t.get("status")
+    if status not in STATUS_ABERTOS:          # resolvido/finalizado/cancelado → fora
+        return None
+    # 3) SLA estourado tem prioridade
+    if ticket_vencido_pendente(t):
+        return "vencidos"
+    # 4) Recém-nascido, sem interação
+    if status == "aberto":
+        return "aberto"
+    # 5/6) Já em interação (em_andamento/aguardando)
+    if t.get("prioridade") == "urgente":
+        return "urgente"
+    return "em_andamento"
 
 # ── Visibilidade por papel (Regra 5) ───────────────────────────────
 def _usuario_atende(t, user) -> bool:
@@ -244,6 +331,22 @@ def sync_zendesk() -> tuple:
     except Exception as e:
         return False, 0, str(e)
 
+# ── Exclusão total (ADM) ───────────────────────────────────────────
+def deletar_todos_tickets() -> int:
+    """Deleta TODOS os documentos da coleção de tickets. Retorna a quantidade."""
+    db = get_db()
+    total = 0
+    while True:
+        docs = list(db.collection(COLECAO).limit(400).stream())
+        if not docs:
+            break
+        batch = db.batch()
+        for doc in docs:
+            batch.delete(doc.reference)
+            total += 1
+        batch.commit()
+    return total
+
 # ═══════════════════════════════════════════════════════════════════
 # RENDERIZAÇÃO
 # ═══════════════════════════════════════════════════════════════════
@@ -272,10 +375,10 @@ def renderizar_tickets(papel: str, user: dict = None):
     <style>
     .tk-badge { background:#e2e8f0; color:#475569; padding:2px 8px;
         border-radius:10px; font-size:0.72rem; font-weight:700; }
-    .tk-badge-red { background:#FEE2E2; color:#991B1B; }
+    .tk-badge-red { background:#FBF3D9; color:#8A6D1F; }
     .tk-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-left:4px solid #C9A84C; }
-    .tk-card.vencido { border-left:4px solid #DC2626; box-shadow:0 0 0 1px #FECACA inset; }
+    .tk-card.vencido { border-left:4px solid #8A6D1F; box-shadow:0 0 0 1px #E8D9A6 inset; }
     .tk-card-header { display:flex; justify-content:space-between;
         align-items:flex-start; margin-bottom:6px; }
     .tk-card-title { font-size:0.92rem; font-weight:700; color:#2c3e50; }
@@ -283,26 +386,105 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-sla-bar { background:#e8ecf0; border-radius:4px; height:5px; margin:8px 0 4px; }
     .tk-sla-fill { height:5px; border-radius:4px; }
     .tk-sla-text { font-size:0.7rem; color:#64778d; }
-    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.20;} }
+    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
     .tk-blink { animation: tkpiscar 1s infinite;
-        background:#DC2626; color:#fff; padding:2px 10px; border-radius:12px;
+        background:#8A6D1F; color:#fff; padding:2px 10px; border-radius:12px;
         font-size:0.72rem; font-weight:800; display:inline-block; }
     .tk-banner { animation: tkpiscar 1.2s infinite;
-        background:#FEE2E2; color:#991B1B; border:2px solid #DC2626;
+        background:#FBF3D9; color:#7A5C12; border:2px solid #8A6D1F;
         border-radius:10px; padding:12px 16px; margin-bottom:14px;
         font-weight:800; font-size:0.95rem; }
     .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-top:4px solid #C9A84C; }
+
+    /* ── Card clicável (o título é um botão) ── */
+    div[class*="st-key-tkcard_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-bottom:none !important; border-left:4px solid #C9A84C !important;
+        border-radius:10px 10px 0 0 !important; color:#2c3e50 !important;
+        font-weight:700 !important; font-size:0.92rem !important;
+        padding:12px 14px 8px !important; margin-bottom:0 !important;
+        transition:background .15s, box-shadow .15s; }
+    div[class*="st-key-tkcard_"] button:hover {
+        background:#FBF6E6 !important; border-color:#C9A84C !important; }
+    div[class*="st-key-tkcard_venc_"] button {
+        border-left-color:#8A6D1F !important; animation:tkbordapiscar 1s infinite; }
+    div[class*="st-key-tkcard_warn_"] button {
+        border-left-color:#D4A12C !important; animation:tkbordapiscarsuave 1.6s infinite; }
+    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);} 50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);} }
+    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(212,161,44,0);} 50%{box-shadow:0 0 0 3px rgba(212,161,44,.30);} }
+    .tk-cardbody { background:#fff; border:1px solid #e2e8f0; border-top:none;
+        border-left:4px solid #C9A84C; border-radius:0 0 10px 10px;
+        padding:4px 14px 12px; margin:-10px 0 12px; }
+    .tk-cardbody.venc { border-left-color:#8A6D1F; }
+    .tk-cardbody.warn { border-left-color:#D4A12C; }
+    .tk-cardmeta { font-size:0.75rem; color:#64778d; margin:2px 0 6px; }
+    /* badges piscantes do SLA (paleta dourada) */
+    .tk-blink-venc { animation:tkpiscar 1s infinite; background:#8A6D1F; color:#fff;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:800; }
+    .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FBF3D9; color:#7A5C12;
+        border:1px solid #D4A12C; padding:1px 8px; border-radius:10px;
+        font-size:0.7rem; font-weight:700; }
+    .tk-badge-val { background:#F3ECD9; color:#6B5A2A; border:1px solid #A98C3D;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
+    /* Botões "primary" e de formulário em dourado (some o vermelho do tema) */
+    button[kind="primary"], button[kind="primaryFormSubmit"],
+    button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
+    [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
+        background-color:#C9A84C !important; border-color:#C9A84C !important;
+        color:#fff !important; }
+    button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover,
+    button[data-testid="baseButton-primary"]:hover, button[data-testid="baseButton-primaryFormSubmit"]:hover,
+    [data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover {
+        background-color:#b8973f !important; border-color:#b8973f !important;
+        color:#fff !important; }
+    /* TODO botão de formulário (Salvar/Enviar/Encerrar) em dourado — robusto p/ qualquer versão */
+    [data-testid="stFormSubmitButton"] button {
+        background-color:#C9A84C !important; border-color:#C9A84C !important; color:#fff !important; }
+    [data-testid="stFormSubmitButton"] button:hover {
+        background-color:#b8973f !important; border-color:#b8973f !important; color:#fff !important; }
+    /* Foco de campos em dourado (remove a borda vermelha do tema) */
+    .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+        border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
+    div[data-baseweb="select"] > div:focus-within,
+    div[data-baseweb="select"] > div[aria-expanded="true"],
+    div[data-baseweb="input"]:focus-within {
+        border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
+    /* cursor/realce do baseweb (caret) que fica vermelho */
+    div[data-baseweb="base-input"] input { caret-color:#C9A84C !important; }
     </style>
     """), unsafe_allow_html=True)
 
     # ── Estado ────────────────────────────────────────────────────
-    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "todos"
+    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "meus"
     if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
     if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
 
+    uname = user.get("usuario","")
+
+    # ── Conjuntos das filas (MUTUAMENTE EXCLUSIVOS) ───────────────
+    # Cada ticket cai em no máximo uma caixa de trabalho (classificar_fila).
+    buckets = {"meus": [], "aberto": [], "em_andamento": [], "urgente": [], "vencidos": []}
+    for t in todos:
+        f = classificar_fila(t, user)
+        if f:
+            buckets[f].append(t)
+    meus      = buckets["meus"]
+    f_abertos = buckets["aberto"]
+    f_andam   = buckets["em_andamento"]
+    f_urg     = buckets["urgente"]
+    f_venc    = buckets["vencidos"]
+    f_global  = todos_geral                                          # GLOBAL: de todos
+
+    # ── Largura ajustável dos painéis ─────────────────────────────
+    with st.expander("↔️ Ajustar largura dos painéis", expanded=False):
+        st.slider("Largura da coluna de filas", 0.6, 2.4,
+                  float(st.session_state.get("tk_larg", 1.0)), 0.1, key="tk_larg")
+    larg = float(st.session_state.get("tk_larg", 1.0))
+
     # ── Layout: filas + barra vertical + conteúdo ─────────────────
-    col_filas, col_sep, col_main = st.columns([1, 0.06, 3.4])
+    col_filas, col_sep, col_main = st.columns([larg, 0.06, 4.0])
 
     with col_sep:
         st.markdown(_html(
@@ -312,17 +494,14 @@ def renderizar_tickets(papel: str, user: dict = None):
 
     with col_filas:
         st.markdown("**Filas de Trabalho**")
-        filas = [
-            ("todos",        "Todos os Tickets", ct["todos"],        False),
-            ("aberto",       "Abertos",          ct["aberto"],       False),
-            ("em_andamento", "Em Andamento",     ct["em_andamento"], False),
-            ("aguardando",   "Aguardando",       ct["aguardando"],   False),
-            ("resolvido",    "Resolvidos",       ct["resolvido"],    False),
-            ("urgente",      "Urgentes",         ct["urgente"],      ct["urgente"]>0),
-            ("vencidos",     "SLA Vencido",      ct["vencidos"],     ct["vencidos"]>0),
-            ("zendesk",      "Zendesk / TERMOS", ct["zendesk"],      False),
+        caixa1 = [
+            ("meus",         "📌 Meus tickets", len(meus)),
+            ("aberto",       "Abertos",         len(f_abertos)),
+            ("em_andamento", "Em andamento",    len(f_andam)),
+            ("urgente",      "Urgentes",        len(f_urg)),
+            ("vencidos",     "SLA vencidos",    len(f_venc)),
         ]
-        for key, label, qtd, _alerta in filas:
+        for key, label, qtd in caixa1:
             if st.button(f"{label}  ({qtd})", key=f"fila_{key}",
                          use_container_width=True,
                          type="primary" if st.session_state.tk_fila == key else "secondary"):
@@ -330,6 +509,18 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.session_state.tk_modo    = "lista"
                 st.session_state.tk_detalhe = None
                 st.rerun()
+
+        # Caixa separada — VISÃO GLOBAL (todos os tickets de todos)
+        st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
+                    unsafe_allow_html=True)
+        st.caption("VISÃO GLOBAL")
+        if st.button(f"🌐 Todos os tickets  ({len(f_global)})", key="fila_global",
+                     use_container_width=True,
+                     type="primary" if st.session_state.tk_fila == "global" else "secondary"):
+            st.session_state.tk_fila    = "global"
+            st.session_state.tk_modo    = "lista"
+            st.session_state.tk_detalhe = None
+            st.rerun()
 
         st.markdown("---")
         st.markdown("**Ações**")
@@ -348,24 +539,21 @@ def renderizar_tickets(papel: str, user: dict = None):
     with col_main:
         modo = st.session_state.tk_modo
 
-        # Banner piscante de SLA vencido (Regra 4) — em qualquer modo
-        meus_vencidos   = [t for t in todos if ticket_vencido_pendente(t) and _usuario_atende(t, user)]
-        escopo_vencidos = [t for t in todos if ticket_vencido_pendente(t)]
-        alerta_lista = meus_vencidos if papel == "operacional" else escopo_vencidos
-        if alerta_lista:
+        # Banner piscante de SLA vencido — em qualquer modo (paleta dourada)
+        if f_venc:
             st.markdown(_html(
-                f'<div class="tk-banner">⚠️ {len(alerta_lista)} ticket(s) com SLA VENCIDO '
-                f'aguardando tratativa! Verifique a fila "SLA Vencido".</div>'
+                f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com SLA ESTOURADO '
+                f'aguardando tratativa! Verifique a fila "SLA vencidos".</div>'
             ), unsafe_allow_html=True)
 
         # ══ LISTA ════════════════════════════════════════════════
         if modo in ("lista", None):
             fila = st.session_state.tk_fila
-            if   fila == "todos":    filtrados = todos
-            elif fila == "urgente":  filtrados = [t for t in todos if t.get("prioridade")=="urgente"]
-            elif fila == "vencidos": filtrados = [t for t in todos if ticket_vencido_pendente(t)]
-            elif fila == "zendesk":  filtrados = [t for t in todos if "zendesk" in t.get("origem","")]
-            else:                    filtrados = [t for t in todos if t.get("status")==fila]
+            mapa_fila = {
+                "meus": meus, "aberto": f_abertos, "em_andamento": f_andam,
+                "urgente": f_urg, "vencidos": f_venc, "global": f_global,
+            }
+            filtrados = mapa_fila.get(fila, todos)
 
             busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
                                   label_visibility="collapsed", key="tk_busca")
@@ -373,17 +561,32 @@ def renderizar_tickets(papel: str, user: dict = None):
                 b = busca.strip().lower()
                 filtrados = [t for t in filtrados if b in texto_busca(t)]
 
+            nomes_fila = {k: l for k, l, _ in caixa1}
+            nomes_fila["global"] = "🌐 Todos os tickets"
+            st.markdown(f"**{nomes_fila.get(fila, fila)} — {len(filtrados)} ticket(s)**")
+
             if not filtrados:
                 st.info("Nenhum ticket nesta fila.")
-            else:
-                st.markdown(f"**{len(filtrados)} ticket(s)**")
+            elif fila == "meus":
+                # Meus tickets: agrupado por DEPARTAMENTO (pra quem eu abri),
+                # mostrando status e se estourou ou não o prazo.
+                from collections import defaultdict
+                grupos = defaultdict(list)
                 for t in filtrados:
-                    _render_card(t)
-                    id_vis = t.get("id_zendesk", t.get("id","")[:8])
-                    # Botão full-width "colado" ao card → abre POPUP
-                    if st.button(f"🔍  Abrir  #{id_vis}", key=f"open_{t.get('id','')}",
-                                 use_container_width=True):
-                        abrir_ticket_popup(t.get("id"), user, papel)
+                    grupos[t.get("departamento") or t.get("categoria") or "—"].append(t)
+                for dep in sorted(grupos):
+                    lst    = grupos[dep]
+                    n_venc = sum(1 for t in lst if ticket_vencido_pendente(t))
+                    extra  = f' · <span style="color:#8A6D1F;font-weight:700;">⏳ {n_venc} com prazo estourado</span>' if n_venc else ""
+                    st.markdown(_html(
+                        f'<div style="margin:14px 0 6px;font-weight:700;color:#2c3e50;">'
+                        f'🏢 {esc(dep)} <span style="color:#64778d;font-weight:500;">— '
+                        f'{len(lst)} ticket(s)</span>{extra}</div>'), unsafe_allow_html=True)
+                    for t in lst:
+                        _render_card_clicavel(t, user, papel)
+            else:
+                for t in filtrados:
+                    _render_card_clicavel(t, user, papel)
 
         # ══ DETALHE ══════════════════════════════════════════════
         elif modo == "detalhe":
@@ -405,13 +608,69 @@ def renderizar_tickets(papel: str, user: dict = None):
 # ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
+def _render_card_clicavel(t, user, papel):
+    """Card cujo título é um BOTÃO (clica em cima → abre o popup).
+    Borda/realce piscam conforme o SLA (suave a 30min, forte se vencido)
+    e a barra de tempo (verde/âmbar/vermelha) é mantida."""
+    tid    = t.get("id","")
+    estado = sla_estado(t)                       # ok | warn | venc
+    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sv = STATUS_CFG.get(t.get("status","aberto"), ("—",))[0]
+    pv = PRIO_CFG.get(t.get("prioridade","normal"), ("—",))[0]
+    icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
+    idv  = t.get("id_zendesk", tid[:8])
+    titulo = str(t.get("assunto","Sem título"))[:60]
+    dep    = t.get("departamento") or t.get("categoria") or "—"
+    cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
+    cli_cod = t.get("cliente_codigo")
+    cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
+    num_com = len(t.get("comentarios", []))
+
+    # Cor da barra de tempo (mantém o verde quando saudável)
+    if   estado == "venc": barra = GOLD_VENC
+    elif estado == "warn": barra = GOLD_WARN
+    elif spct > 70:        barra = "#CA8A04"
+    else:                  barra = "#16A34A"
+
+    # Badge piscante por estado
+    if estado == "venc":
+        badge = '<span class="tk-blink-venc">⛔ SLA VENCIDO</span>'
+    elif estado == "warn":
+        badge = '<span class="tk-blink-warn">⏰ Faltam &lt; 30min</span>'
+    else:
+        badge = ""
+
+    # Aguardando validação do autor (resolvido, dentro da janela de 24h)
+    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario") \
+            and resolvido_em_validacao(t):
+        badge += ' <span class="tk-badge-val">✔ valide este chamado</span>'
+
+    # Título clicável = abre o popup
+    if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
+                 use_container_width=True):
+        abrir_ticket_popup(tid, user, papel)
+
+    meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
+    st.markdown(_html(f"""
+    <div class="tk-cardbody {estado if estado!='ok' else ''}">
+        <div class="tk-cardmeta">
+            🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)} &nbsp;·&nbsp;
+            <b>{esc(sv)}</b> / {esc(pv)}{meta_com} &nbsp; {badge}
+        </div>
+        <div class="tk-sla-bar">
+            <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{barra};"></div>
+        </div>
+        <div class="tk-sla-text">SLA: <b style="color:{barra};">{esc(sl)}</b></div>
+    </div>"""), unsafe_allow_html=True)
+
+
 def _render_card(t):
     tid   = t.get("id","")
     sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
     origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
-    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
     num_com = len(t.get("comentarios",[]))
     pendente_vencido = ticket_vencido_pendente(t)
 
@@ -472,7 +731,7 @@ def _detalhe_corpo(t, tid, user, papel):
     sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-    sla_cor = "#DC2626" if svenc else ("#CA8A04" if spct>70 else "#16A34A")
+    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
     pendente_vencido = ticket_vencido_pendente(t)
 
     if pendente_vencido:
@@ -515,24 +774,62 @@ def _detalhe_corpo(t, tid, user, papel):
                  height=140, disabled=True, label_visibility="collapsed",
                  key=f"desc_{tid}")
 
-    # Ações — supervisor/adm (dentro de um FORM para gravar de forma confiável,
-    # inclusive dentro do popup — assim mover de fila funciona)
-    if papel in ("supervisor","adm"):
-        with st.form(f"form_status_{tid}"):
-            da1, da2 = st.columns(2)
-            novo_status = da1.selectbox("Status", list(STATUS_CFG.keys()),
-                index=list(STATUS_CFG.keys()).index(t.get("status","aberto")),
-                format_func=lambda k: STATUS_CFG[k][0], key=f"det_status_{tid}")
-            nova_prio = da2.selectbox("Prioridade", list(PRIO_CFG.keys()),
-                index=list(PRIO_CFG.keys()).index(t.get("prioridade","normal")),
-                format_func=lambda k: PRIO_CFG[k][0], key=f"det_prio_{tid}")
-            if st.form_submit_button("💾 Salvar alterações", type="primary",
-                                     use_container_width=True):
-                atualizar_ticket(tid, {"status": novo_status, "prioridade": nova_prio})
-                st.success("Atualizado! O ticket foi movido de fila.")
-                time.sleep(.5); st.rerun()
+    status_atual = t.get("status", "aberto")
+    terminal     = status_atual in ("finalizado", "cancelado")
+    pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
+    # Status editável só pelo atendente/supervisor/adm e enquanto não terminal.
+    # A PRIORIDADE nunca é editável aqui (vem do cadastro da tabulação).
+    status_edit  = pode_agir and not terminal
+    # Status que o atendente pode definir (sem 'finalizado' — isso é da validação do autor)
+    STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
 
-    # Histórico
+    # ── Tratativa: Status + Prioridade + resposta + Enviar (tudo junto) ──
+    st.markdown("---")
+    with st.form(f"form_trat_{tid}", clear_on_submit=True):
+        cs1, cs2 = st.columns(2)
+        with cs1:
+            if status_edit:
+                idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
+                novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
+                                           format_func=lambda k: STATUS_CFG[k][0],
+                                           key=f"det_status_{tid}")
+            else:
+                novo_status = status_atual
+                st.markdown("**Status**")
+                st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
+        with cs2:
+            st.markdown("**Prioridade**")
+            st.markdown(
+                pill(pv, pbg, pc) +
+                ' <span style="font-size:0.7rem;color:#94a3b8;">(definida na tabulação)</span>',
+                unsafe_allow_html=True)
+
+        novo_com = st.text_area("Escrever resposta / comentário", height=90,
+                                placeholder="Digite a tratativa...", key=f"com_{tid}")
+        enviar = st.form_submit_button("Enviar", type="primary", use_container_width=True)
+
+        if enviar:
+            updates = {}
+            if status_edit and novo_status != status_atual:
+                updates["status"] = novo_status
+            tem_com = bool(novo_com and novo_com.strip())
+            if tem_com:
+                adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
+            if updates:
+                atualizar_ticket(tid, updates)
+            if tem_com or updates:
+                msg = "Enviado!"
+                if updates.get("status") == "resolvido":
+                    msg = ("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
+                           "permanece em 'Todos os tickets'.")
+                st.success(msg); time.sleep(.5)
+                if updates.get("status") in ("resolvido", "cancelado"):
+                    st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None
+                st.rerun()
+            else:
+                st.warning("Escreva uma resposta ou altere o status antes de enviar.")
+
+    # ── Histórico dos comentários ──
     st.markdown("#### 💬 Histórico")
     comentarios = t.get("comentarios", [])
     if not comentarios:
@@ -552,23 +849,26 @@ def _detalhe_corpo(t, tid, user, papel):
                 f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
                 f'</div></div>'), unsafe_allow_html=True)
 
-    # Novo comentário
-    st.markdown("---")
-    with st.form(f"form_com_{tid}", clear_on_submit=True):
-        novo_com = st.text_area("Escrever resposta / comentário", height=80,
-                                placeholder="Digite a tratativa...")
-        cc1, cc2 = st.columns([3,1])
-        enviar = cc2.form_submit_button("Enviar", type="primary", use_container_width=True)
-        encerrar = False
-        if papel in ("supervisor","adm"):
-            encerrar = cc1.form_submit_button("✅ Encerrar Ticket")
-        if enviar and novo_com.strip():
-            adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
-            st.success("Enviado!"); time.sleep(.3); st.rerun()
-        if encerrar:
-            atualizar_ticket(tid, {"status":"resolvido"})
-            st.success("Ticket encerrado!"); time.sleep(.5)
+    # ── Validação do AUTOR (no FIM do layout) ──
+    # Quando resolvido, quem abriu valida (encerra) ou reabre.
+    if status_atual == "resolvido" and t.get("aberto_por") == user.get("usuario"):
+        st.markdown("---")
+        st.markdown(_html(
+            '<div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;'
+            'padding:12px 14px;margin:6px 0 10px;color:#6B5A2A;font-weight:600;">'
+            '✔ Este chamado foi marcado como <b>Resolvido</b>. Valide para encerrar '
+            'definitivamente, ou reabra se não foi resolvido.<br>'
+            '<span style="font-weight:500;font-size:0.82rem;">Sem ação em 24h, ele é '
+            'encerrado automaticamente.</span></div>'), unsafe_allow_html=True)
+        cva, cvb = st.columns(2)
+        if cva.button("✅ Validar e encerrar", key=f"val_{tid}", type="primary",
+                      use_container_width=True):
+            atualizar_ticket(tid, {"status": "finalizado"})
+            st.success("Chamado encerrado!"); time.sleep(.5)
             st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+        if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
+            atualizar_ticket(tid, {"status": "em_andamento"})
+            st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
 
 
 def _render_novo(user):
@@ -800,6 +1100,7 @@ def _render_sync():
             prog.empty()
             st.success(f"✅ {total} tickets importados para o Firestore!")
 
+    # ── Estatísticas ──────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Tickets no Firestore por origem")
     todos2 = listar_tickets()
@@ -809,3 +1110,48 @@ def _render_sync():
         columns=["Origem","Qtd"]
     )
     st.dataframe(df_orig, use_container_width=True, hide_index=True)
+
+    # ── ⚠️ ZONA DE PERIGO — exclusão total (só ADM) ───────────────
+    st.markdown("---")
+    st.markdown(_html("""
+    <div style="border:2px solid #8A6D1F;border-radius:12px;padding:16px 20px;
+                background:#FBF3D9;margin-top:8px;">
+        <span style="font-size:1rem;font-weight:800;color:#7A5C12;">
+            ⚠️ Zona de Perigo — Exclusão Total de Tickets
+        </span><br>
+        <span style="font-size:0.82rem;color:#7A5C12;">
+            Esta ação remove <b>permanentemente</b> todos os tickets do banco de dados.
+            Não pode ser desfeita.
+        </span>
+    </div>
+    """), unsafe_allow_html=True)
+
+    st.markdown("")
+    total_tickets = len(todos2)
+    st.caption(f"Atualmente há **{total_tickets}** ticket(s) no banco de dados.")
+
+    conf1 = st.checkbox(
+        f"Confirmo que quero excluir TODOS os {total_tickets} ticket(s) do banco de dados.",
+        key="del_conf1"
+    )
+    conf2 = st.checkbox(
+        "Entendo que esta ação é IRREVERSÍVEL e não há como recuperar os dados.",
+        key="del_conf2"
+    )
+
+    botao_ativo = conf1 and conf2
+    if st.button(
+        "🗑️ Excluir TODOS os tickets permanentemente",
+        type="primary",
+        use_container_width=True,
+        disabled=not botao_ativo,
+        key="btn_del_todos"
+    ):
+        with st.spinner(f"Excluindo {total_tickets} ticket(s)..."):
+            qt = deletar_todos_tickets()
+        st.success(f"✅ {qt} ticket(s) excluído(s) com sucesso. O banco de dados está vazio.")
+        for k in ("del_conf1", "del_conf2"):
+            if k in st.session_state:
+                del st.session_state[k]
+        time.sleep(1.5)
+        st.rerun()
