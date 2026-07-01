@@ -8,9 +8,11 @@ import plotly.express as px
 from database import (
     listar_lembretes_pessoais, criar_lembrete_pessoal_db,
     atualizar_lembrete_pessoal_db, deletar_lembrete_pessoal_db,
+    adiar_lembrete_pessoal_db,
     listar_raci_projetos, criar_raci_projeto_db,
     atualizar_raci_projeto_db, deletar_raci_projeto_db,
     salvar_arquivo_raci_db, baixar_arquivo_raci_db, deletar_arquivo_raci_db,
+    criar_registro_diario_db, listar_diario_bordo_db, deletar_registro_diario_db,
 )
 
 BRT = timezone(timedelta(hours=-3))
@@ -33,6 +35,8 @@ _CSS_HOME = """
 .home-item.hoje { border-left-color:#C9A84C; }
 .home-item.futuro { border-left-color:#95a5a6; }
 .home-origem { font-size:0.72rem; color:#64778d; }
+.home-motivo { font-size:0.75rem; color:#a93226; background:rgba(231,76,60,.08);
+    border-radius:6px; padding:4px 8px; margin-top:4px; display:inline-block; }
 .ponto-regua { width: 30px; height: 30px; border-radius: 50%; background: #e2e8f0;
     display: flex; align-items: center; justify-content: center; font-weight: bold;
     color: #64778d; margin: 0 auto; border: 2px solid #cbd5e1; font-size: 12px; }
@@ -82,15 +86,21 @@ def renderizar_home(papel: str, user: dict = None):
     lembretes = listar_lembretes_pessoais(uname)
     raci_projetos = listar_raci_projetos()
 
-    tabs = st.tabs(["📅 Meu Dia", "📊 Meus Projetos (RACI)", "🔔 Todos os Lembretes"])
+    tabs = st.tabs([
+        "📅 Meu Dia", "📔 Diário de Bordo",
+        "📊 Meus Projetos (RACI)", "🔔 Todos os Lembretes",
+    ])
 
     with tabs[0]:
         _render_meu_dia(uname, lembretes, raci_projetos)
 
     with tabs[1]:
-        _render_aba_raci(raci_projetos)
+        _render_diario_bordo(uname)
 
     with tabs[2]:
+        _render_aba_raci(raci_projetos)
+
+    with tabs[3]:
         _render_todos_lembretes(lembretes, raci_projetos)
 
 
@@ -100,6 +110,39 @@ def renderizar_home(papel: str, user: dict = None):
 def _render_meu_dia(uname, lembretes, raci_projetos):
     hoje = date.today()
 
+    # ── Registro rápido no Diário de Bordo (o que estou fazendo agora) ──
+    st.markdown("##### 📝 O que você está fazendo agora?")
+    with st.form("form_diario_rapido", clear_on_submit=True):
+        col_txt, col_btn = st.columns([5, 1])
+        atividade_agora = col_txt.text_input(
+            "Atividade atual", label_visibility="collapsed",
+            placeholder="Ex: Tratando ticket #199791 da loja Campinas...",
+            key="diario_rapido_txt",
+        )
+        registrar = col_btn.form_submit_button(
+            "📌 Registrar", type="primary", use_container_width=True
+        )
+        if registrar:
+            if atividade_agora.strip():
+                try:
+                    criar_registro_diario_db(uname, atividade_agora.strip())
+                    st.success("Atividade registrada no seu diário de bordo!")
+                    time.sleep(.4)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não foi possível gravar. Detalhe técnico: {e}")
+            else:
+                st.warning("Descreva o que você está fazendo antes de registrar.")
+
+    # Mostra os últimos registros de hoje, para conferência imediata de que gravou
+    registros_hoje = listar_diario_bordo_db(usuario=uname, data_ini=hoje, data_fim=hoje)
+    if registros_hoje:
+        with st.expander(f"📔 Registros de hoje ({len(registros_hoje)})", expanded=False):
+            for r in registros_hoje:
+                st.caption(f"⏱ {r.get('hora','')} — {r.get('atividade','')}")
+
+    st.divider()
+
     itens = []
     for l in lembretes:
         if l.get("status", "Pendente") != "Pendente":
@@ -107,6 +150,7 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
         itens.append({
             "origem": "🗒️ Pessoal", "texto": l.get("texto", ""),
             "quando": l.get("data_hora", ""), "ref": l.get("id"),
+            "historico": l.get("historico_adiamentos", []),
         })
 
     for rp in raci_projetos:
@@ -123,6 +167,7 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
                 itens.append({
                     "origem": f"📊 {rp.get('nome','')} / {et.get('nome','')}",
                     "texto": at.get("atividade", ""), "quando": dp, "ref": None,
+                    "historico": [],
                 })
 
     atrasados, de_hoje, futuros = [], [], []
@@ -159,15 +204,18 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
         if st.button("Gravar Lembrete", type="primary", key="btn_novo_lembrete",
                      use_container_width=True):
             if txt_l.strip():
-                hora_txt = hl.strftime("%H:%M") if hl else "00:00"
-                vinculo_final = "" if vinc_sel == "Pontual (fora de projetos)" else vinc_sel
-                criar_lembrete_pessoal_db(
-                    uname, txt_l.strip(), f"{dl.strftime('%d/%m/%Y')} {hora_txt}",
-                    vinculo=vinculo_final,
-                )
-                st.success("Lembrete criado!")
-                time.sleep(.4)
-                st.rerun()
+                try:
+                    hora_txt = hl.strftime("%H:%M") if hl else "00:00"
+                    vinculo_final = "" if vinc_sel == "Pontual (fora de projetos)" else vinc_sel
+                    criar_lembrete_pessoal_db(
+                        uname, txt_l.strip(), f"{dl.strftime('%d/%m/%Y')} {hora_txt}",
+                        vinculo=vinculo_final,
+                    )
+                    st.success("Lembrete criado!")
+                    time.sleep(.4)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não foi possível gravar o lembrete. Detalhe técnico: {e}")
             else:
                 st.warning("Descreva o lembrete.")
 
@@ -185,24 +233,159 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
         algum = True
         st.markdown(f"##### {titulo}")
         for it in lista_g:
-            cb1, cb2 = st.columns([5, 1])
+            cb1, cb2, cb3 = st.columns([4, 1, 1])
             with cb1:
+                ultimo_motivo_html = ""
+                if it["historico"]:
+                    ultimo = it["historico"][-1]
+                    ultimo_motivo_html = (
+                        f'<div class="home-motivo">⏳ Adiado — motivo: '
+                        f'{ultimo.get("motivo","")}</div>'
+                    )
                 st.markdown(
                     f'<div class="home-item {classe}">'
                     f'<b>{it["texto"]}</b><br>'
                     f'<span class="home-origem">{it["origem"]} · {it["quando"]}</span>'
+                    f'{ultimo_motivo_html}'
                     f'</div>', unsafe_allow_html=True)
             if it["ref"] is not None:
                 with cb2:
                     if st.button("✅ Concluir", key=f"done_{it['ref']}", use_container_width=True):
                         atualizar_lembrete_pessoal_db(it["ref"], status="Executado")
                         st.rerun()
+                with cb3:
+                    with st.popover("⏳ Adiar", use_container_width=True):
+                        st.caption("Use quando a tarefa depende de terceiros e ainda não pode ser concluída.")
+                        nova_data = st.date_input(
+                            "Nova data", value=date.today(), key=f"adiar_data_{it['ref']}"
+                        )
+                        nova_hora = st.time_input(
+                            "Nova hora", value=None, key=f"adiar_hora_{it['ref']}"
+                        )
+                        motivo_atraso = st.text_area(
+                            "Motivo do atraso *", key=f"adiar_motivo_{it['ref']}",
+                            placeholder="Ex: Aguardando retorno do setor de Compras sobre liberação de estoque.",
+                        )
+                        if st.button("Confirmar adiamento", key=f"adiar_btn_{it['ref']}",
+                                     type="primary", use_container_width=True):
+                            if not motivo_atraso.strip():
+                                st.warning("Informe o motivo do atraso para registrar.")
+                            else:
+                                hora_txt2 = nova_hora.strftime("%H:%M") if nova_hora else "00:00"
+                                nova_dh = f"{nova_data.strftime('%d/%m/%Y')} {hora_txt2}"
+                                ok, msg = adiar_lembrete_pessoal_db(
+                                    it["ref"], nova_dh, motivo_atraso.strip()
+                                )
+                                (st.success if ok else st.error)(msg)
+                                if ok:
+                                    time.sleep(.4)
+                                    st.rerun()
     if not algum:
         st.info("🎉 Nenhuma tarefa pendente no momento.")
 
 
 # ════════════════════════════════════════════════════════════════
-# ABA 2 — MEUS PROJETOS (RACI), estilo PQI
+# ABA 2 — DIÁRIO DE BORDO (histórico consultável do que foi feito)
+# ════════════════════════════════════════════════════════════════
+def _render_diario_bordo(uname):
+    st.markdown("##### 📔 Diário de Bordo")
+    st.caption(
+        "Registre aqui o que você está trabalhando no momento. Cada registro fica "
+        "gravado com data e hora, formando um histórico que você pode consultar depois."
+    )
+
+    with st.form("form_diario_bordo", clear_on_submit=True):
+        atividade_txt = st.text_area(
+            "O que você está fazendo agora?", height=80,
+            placeholder="Ex: Tratando ticket #199791 da loja Campinas...",
+            key="diario_bordo_txt_area",
+        )
+        se = st.form_submit_button(
+            "📝 Registrar Atividade", type="primary", use_container_width=True
+        )
+        if se:
+            if atividade_txt.strip():
+                try:
+                    criar_registro_diario_db(uname, atividade_txt.strip())
+                    st.success("Atividade registrada!")
+                    time.sleep(.4)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não foi possível gravar. Detalhe técnico: {e}")
+            else:
+                st.warning("Descreva a atividade antes de registrar.")
+
+    st.divider()
+    st.markdown("###### 🔎 Consultar histórico")
+
+    hoje = date.today()
+    fc1, fc2 = st.columns(2)
+    data_ini = fc1.date_input("De", value=hoje - timedelta(days=7), key="diario_ini")
+    data_fim = fc2.date_input("Até", value=hoje, key="diario_fim")
+
+    if data_ini > data_fim:
+        st.warning("A data inicial não pode ser depois da data final.")
+        return
+
+    registros = listar_diario_bordo_db(usuario=uname, data_ini=data_ini, data_fim=data_fim)
+
+    if not registros:
+        st.info("Nenhum registro no período selecionado.")
+        return
+
+    st.caption(f"{len(registros)} registro(s) encontrado(s).")
+
+    from collections import defaultdict
+    por_dia = defaultdict(list)
+    for r in registros:
+        por_dia[r.get("data", "—")].append(r)
+
+    dias_ordenados = sorted(
+        por_dia.keys(),
+        key=lambda d: _parse_data(d) or datetime.min,
+        reverse=True,
+    )
+
+    for dia in dias_ordenados:
+        st.markdown(f"**🗓️ {dia}**")
+        registros_dia = sorted(por_dia[dia], key=lambda x: x.get("hora", ""), reverse=True)
+        for r in registros_dia:
+            c1, c2 = st.columns([6, 1])
+            with c1:
+                st.markdown(
+                    f'<div class="home-item">⏱ <b>{r.get("hora","")}</b> — {r.get("atividade","")}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c2:
+                if st.button("🗑️", key=f"del_diario_{r.get('id')}", use_container_width=True):
+                    deletar_registro_diario_db(r.get("id"))
+                    st.rerun()
+        st.write("")
+
+    df_exp = pd.DataFrame([{
+        "Data": r.get("data", ""), "Hora": r.get("hora", ""),
+        "Atividade": r.get("atividade", ""),
+    } for r in registros])
+
+    from io import BytesIO
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df_exp.to_excel(writer, index=False, sheet_name="Diario")
+        ws = writer.sheets["Diario"]
+        for i, col in enumerate(df_exp.columns):
+            largura = max(df_exp[col].astype(str).map(len).max(), len(col)) + 2
+            ws.set_column(i, i, largura)
+    buf.seek(0)
+    st.download_button(
+        "📥 Baixar Diário do Período (.xlsx)", data=buf.getvalue(),
+        file_name=f"Diario_Bordo_{uname}_{data_ini.strftime('%Y%m%d')}_a_{data_fim.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# ABA 3 — MEUS PROJETOS (RACI), estilo PQI
 # ════════════════════════════════════════════════════════════════
 def _render_aba_raci(raci_projetos):
     nomes_proj = [p["nome"] for p in raci_projetos]
@@ -583,7 +766,7 @@ def _render_analise_projeto(projeto):
 
 
 # ════════════════════════════════════════════════════════════════
-# ABA 3 — TODOS OS LEMBRETES (dashboard de período + vínculo a projeto)
+# ABA 4 — TODOS OS LEMBRETES (dashboard de período + vínculo a projeto)
 # ════════════════════════════════════════════════════════════════
 def _periodo_por_preset(preset):
     hoje = date.today()
@@ -717,3 +900,13 @@ def _render_todos_lembretes(lembretes, raci_projetos):
             if cols[4].button("🗑️", key=f"lemb_del_{l['id']}", use_container_width=True):
                 deletar_lembrete_pessoal_db(l["id"])
                 st.rerun()
+
+            historico_l = l.get("historico_adiamentos", [])
+            if historico_l:
+                with st.expander(f"⏳ Histórico de adiamentos ({len(historico_l)})"):
+                    for h in reversed(historico_l):
+                        st.caption(
+                            f"{h.get('data_alteracao','')} — de **{h.get('de','')}** "
+                            f"para **{h.get('para', l.get('data_hora',''))}**. "
+                            f"Motivo: {h.get('motivo','—')}"
+                        )
