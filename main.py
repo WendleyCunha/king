@@ -131,7 +131,7 @@ div[data-testid="stHorizontalBlock"]:has(.ks-header) {
 
 # ── INIT SESSION STATE ─────────────────────────────────────────────
 if "user"         not in st.session_state: st.session_state.user = None
-if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "rastreio"
+if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "home"
 
 # ── LOGIN — PARE AQUI SE NÃO LOGADO ──────────────────────────────
 if st.session_state.user is None:
@@ -158,6 +158,8 @@ if st.session_state.user is None:
             u = verificar_login(usuario, senha)
             if u:
                 st.session_state.user = u
+                # Regra: após o login, a primeira página sempre é a Home (Meu Dia)
+                st.session_state.modulo_ativo = "home"
                 st.rerun()
             else:
                 st.error("Credenciais inválidas.")
