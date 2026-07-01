@@ -35,6 +35,19 @@ except Exception as _erro_import_cartas:
         st.error("⚠️ Falha ao carregar o módulo de Cartas. Detalhe técnico abaixo:")
         st.exception(_erro)
 
+try:
+    from modulo.mod_chat import renderizar_chat
+except Exception as _erro_import_chat:
+    def renderizar_chat(papel, user=None, _erro=_erro_import_chat):
+        st.error("⚠️ Falha ao carregar o módulo de Chat. Detalhe técnico abaixo:")
+        st.exception(_erro)
+
+try:
+    from database_chat import listar_conversas_com_nao_lidas
+except Exception:
+    def listar_conversas_com_nao_lidas(_lista):
+        return []
+
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
     layout="wide", page_icon="🚚",
@@ -48,6 +61,14 @@ def get_logo():
     if os.path.exists("logo.png"):
         with open("logo.png","rb") as f: return base64.b64encode(f.read()).decode()
     return None
+
+def _total_chat_pendentes():
+    """Soma as mensagens não lidas de motoristas em todas as conversas (visão ADM)."""
+    try:
+        motoristas_ids = [u["usuario"] for u in listar_usuarios() if u.get("role") == "motorista"]
+        return sum(c["nao_lidas"] for c in listar_conversas_com_nao_lidas(motoristas_ids))
+    except Exception:
+        return 0
 
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
@@ -196,6 +217,20 @@ with st.sidebar:
             st.session_state.modulo_ativo = key
             st.rerun()
 
+    # ── Chat: disponível para TODOS os papéis (não passa pelo sistema de "mods"),
+    # com badge de mensagens pendentes de motoristas para ADM/Supervisor ──
+    chat_label = "💬 Chat"
+    if papel in ("adm", "supervisor"):
+        _pend = _total_chat_pendentes()
+        if _pend:
+            chat_label = f"💬 Chat 🔴 {_pend}"
+
+    ativo_chat = st.session_state.modulo_ativo == "chat"
+    if st.button(chat_label, key="nav_chat", use_container_width=True,
+                 type="primary" if ativo_chat else "secondary"):
+        st.session_state.modulo_ativo = "chat"
+        st.rerun()
+
     if papel == "adm":
         ativo = st.session_state.modulo_ativo == "config"
         if st.button("Configuracoes", key="nav_config", use_container_width=True,
@@ -256,6 +291,13 @@ with hc2:
 datas_db     = obter_datas_disponiveis_db()
 modulo_ativo = st.session_state.modulo_ativo
 
+# ── NOTIFICAÇÃO DE CHAT NO PAINEL GERAL (visível em qualquer tela, exceto no próprio chat) ──
+if papel in ("adm", "supervisor") and modulo_ativo != "chat":
+    _pend_geral = _total_chat_pendentes()
+    if _pend_geral:
+        st.info(f"💬 Você tem **{_pend_geral}** mensagem(ns) de motoristas aguardando resposta. "
+                f"Acesse o menu **Chat** na barra lateral para responder.")
+
 # ── ROTEAMENTO ────────────────────────────────────────────────────
 if modulo_ativo == "home":
     renderizar_home(papel, user)
@@ -279,6 +321,9 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
     renderizar_cartas(papel, user)
+
+elif modulo_ativo == "chat":
+    renderizar_chat(papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
