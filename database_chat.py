@@ -1,17 +1,30 @@
-# ─────────────────────────────────────────────────────────────────
-# ADICIONAR ESTE BLOCO AO SEU database.py EXISTENTE
-#
-# Pressuposto: seu database.py já tem um client Firestore chamado `db`
-# (ex: db = firestore.client()). Se o nome for diferente, troque
-# todas as ocorrências de "db." abaixo pelo nome real do seu client.
-#
-# IMPORTANTE (Firestore): as consultas com 2 filtros de igualdade +
-# order_by podem pedir a criação de um índice composto na primeira
-# execução. O próprio erro no terminal traz o link pronto pra criar
-# o índice com 1 clique no console do Firebase — é normal, só clicar.
-# ─────────────────────────────────────────────────────────────────
+"""
+database_chat.py
+Banco exclusivo do módulo de Chat (mensagens motorista <-> ADM + presença de ADMs online).
+
+Este arquivo PRECISA ficar na raiz do projeto, ao lado do database.py e do main.py
+(mesma pasta), porque o mod_chat.py importa com `from database_chat import ...`.
+
+Ele reaproveita o client Firestore que o seu database.py já inicializa, para não
+tentar abrir uma segunda conexão com o Firebase (o que causa erro de "app já
+inicializado").
+"""
 
 from datetime import datetime, timezone
+
+# ── Reaproveita o client Firestore já existente no seu database.py ────────
+# Se o seu database.py tiver o client Firestore com um nome diferente de "db",
+# troque "db" abaixo pelo nome real (ex: from database import firestore_db as db).
+try:
+    from database import db
+except ImportError as e:
+    raise ImportError(
+        "database_chat.py não conseguiu importar o client Firestore `db` de database.py. "
+        "Abra o seu database.py, encontre a linha onde ele guarda o client "
+        "(algo como `db = firestore.client()`) e garanta que essa variável se "
+        "chama `db` — ou ajuste o import no topo do database_chat.py para o "
+        "nome correto."
+    ) from e
 
 
 # ── ENVIO E LEITURA DE MENSAGENS ───────────────────────────────────
@@ -20,9 +33,9 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
     """
     Salva uma mensagem na conversa de um motorista específico.
     remetente_tipo: "motorista" ou "adm"
-    A conversa é sempre indexada pelo login do motorista (1 conversa
-    por motorista, compartilhada entre todos os ADMs — como uma
-    caixa de suporte, e não um chat 1-a-1 fixo).
+    A conversa é sempre indexada pelo login do motorista (1 conversa por
+    motorista, compartilhada entre todos os ADMs — como uma caixa de
+    suporte, e não um chat 1-a-1 fixo).
     """
     if not texto or not texto.strip():
         return
@@ -72,8 +85,8 @@ def marcar_mensagens_lidas(motorista_usuario: str, remetente_tipo_oposto: str):
 
 def listar_conversas_com_nao_lidas(lista_motoristas: list):
     """
-    Para o painel do ADM: retorna, para cada motorista,
-    quantas mensagens não lidas ele mandou e qual foi a última mensagem.
+    Para o painel do ADM: retorna, para cada motorista, quantas mensagens
+    não lidas ele mandou e qual foi a última mensagem.
     """
     resultado = []
     for m in lista_motoristas:
