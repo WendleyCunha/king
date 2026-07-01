@@ -375,10 +375,12 @@ def limpar_anexos_lote_db(ids_cartas: list):
 # ══════════════════════════════════════════════════════════════════
 # HOME — Lembretes pessoais e Projetos RACI
 # Coleções:
-#   /lembretes_pessoais/{id} → { id, usuario, texto, data_hora, status, criado_em }
+#   /lembretes_pessoais/{id} → { id, usuario, texto, data_hora, status, criado_em,
+#                                 historico_adiamentos: [{de, motivo, data_alteracao}] }
 #   /raci_projetos/{id}      → { id, nome, data_criacao, pessoas[], etapas[] }
 #       etapas: [{ id, nome, atividades: [{ id, atividade, prioridade,
 #                   status, data_prevista, data_entregue, papeis:{pessoa:R/A/C/I} }] }]
+#   /diario_bordo/{id}       → { id, usuario, atividade, data, hora, criado_em }
 # ══════════════════════════════════════════════════════════════════
 
 def listar_lembretes_pessoais(usuario: str) -> list:
@@ -392,6 +394,7 @@ def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str, vinculo:
     ref.set({
         "id": ref.id, "usuario": usuario, "texto": texto,
         "data_hora": data_hora, "status": "Pendente", "vinculo": vinculo,
+        "historico_adiamentos": [],
         "criado_em": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
     })
     return ref.id
@@ -399,6 +402,36 @@ def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str, vinculo:
 def atualizar_lembrete_pessoal_db(id_lembrete: str, **campos):
     if campos:
         get_db().collection("lembretes_pessoais").document(id_lembrete).update(campos)
+
+def adiar_lembrete_pessoal_db(id_lembrete: str, nova_data_hora: str, motivo: str):
+    """
+    Adia um lembrete para uma nova data/hora, exigindo o motivo do atraso.
+    Mantém o lembrete como 'Pendente' e registra o histórico de adiamentos
+    (data anterior, motivo e quando foi alterado) para consulta futura.
+    """
+    motivo = (motivo or "").strip()
+    if not motivo:
+        return False, "Informe o motivo do atraso."
+
+    ref = get_db().collection("lembretes_pessoais").document(id_lembrete)
+    doc = ref.get()
+    if not doc.exists:
+        return False, "Lembrete não encontrado."
+
+    d = doc.to_dict()
+    historico = d.get("historico_adiamentos", [])
+    historico.append({
+        "de": d.get("data_hora", ""),
+        "para": nova_data_hora,
+        "motivo": motivo,
+        "data_alteracao": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
+    })
+    ref.update({
+        "data_hora": nova_data_hora,
+        "status": "Pendente",
+        "historico_adiamentos": historico,
+    })
+    return True, "Lembrete adiado e motivo registrado."
 
 def deletar_lembrete_pessoal_db(id_lembrete: str):
     get_db().collection("lembretes_pessoais").document(id_lembrete).delete()
@@ -437,3 +470,64 @@ def baixar_arquivo_raci_db(file_id: str):
 
 def deletar_arquivo_raci_db(file_id: str):
     get_db().collection("raci_arquivos").document(file_id).delete()
+
+# ══════════════════════════════════════════════════════════════════
+# DIÁRIO DE BORDO
+# Coleção: /diario_bordo/{id} → { id, usuario, atividade, data, hora, criado_em }
+# Regra: cada usuário só enxerga (por padrão) os próprios registros;
+# passar usuario=None em listar_diario_bordo_db traz de todos (uso admin/gestão).
+# ══════════════════════════════════════════════════════════════════
+
+def _parse_data_curta(s: str):
+    """Converte 'dd/mm/yyyy' em datetime, ou None se inválido/vazio."""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s).strip(), "%d/%m/%Y")
+    except Exception:
+        return None
+
+def criar_registro_diario_db(usuario: str, atividade: str) -> str:
+    """Registra a atividade que o usuário está executando agora, com data e hora,
+    gerando um histórico consultável posteriormente (diário de bordo)."""
+    ref = get_db().collection("diario_bordo").document()
+    agora = datetime.now(BRT)
+    ref.set({
+        "id": ref.id,
+        "usuario": usuario,
+        "atividade": atividade,
+        "data": agora.strftime("%d/%m/%Y"),
+        "hora": agora.strftime("%H:%M"),
+        "criado_em": agora.strftime("%d/%m/%Y %H:%M:%S"),
+    })
+    return ref.id
+
+def listar_diario_bordo_db(usuario: str = None, data_ini=None, data_fim=None) -> list:
+    """
+    Lista os registros do diário de bordo.
+    - usuario=None  → traz registros de todos os usuários (visão de gestão).
+    - data_ini/data_fim: objetos date (opcional) para filtrar o período.
+    """
+    q = get_db().collection("diario_bordo")
+    if usuario:
+        q = q.where("usuario", "==", usuario)
+    docs = q.stream()
+    out = [d.to_dict() for d in docs]
+
+    if data_ini or data_fim:
+        filtrado = []
+        for r in out:
+            dt = _parse_data_curta(r.get("data", ""))
+            if dt is None:
+                continue
+            if data_ini and dt.date() < data_ini:
+                continue
+            if data_fim and dt.date() > data_fim:
+                continue
+            filtrado.append(r)
+        out = filtrado
+
+    return sorted(out, key=lambda x: x.get("criado_em", ""), reverse=True)
+
+def deletar_registro_diario_db(id_registro: str):
+    get_db().collection("diario_bordo").document(id_registro).delete()
