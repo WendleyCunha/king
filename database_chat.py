@@ -2,29 +2,15 @@
 database_chat.py
 Banco exclusivo do módulo de Chat (mensagens motorista <-> ADM + presença de ADMs online).
 
-Este arquivo PRECISA ficar na raiz do projeto, ao lado do database.py e do main.py
-(mesma pasta), porque o mod_chat.py importa com `from database_chat import ...`.
-
-Ele reaproveita o client Firestore que o seu database.py já inicializa, para não
-tentar abrir uma segunda conexão com o Firebase (o que causa erro de "app já
-inicializado").
+Fica na raiz do projeto, ao lado do database.py e do main.py.
+Reaproveita a MESMA conexão Firestore do resto do sistema, chamando get_db()
+(seu database.py já cuida de abrir a conexão certa, com o banco nomeado "portal",
+e de guardar em st.session_state para não reconectar a cada rerun).
 """
 
 from datetime import datetime, timezone
 
-# ── Reaproveita o client Firestore já existente no seu database.py ────────
-# Se o seu database.py tiver o client Firestore com um nome diferente de "db",
-# troque "db" abaixo pelo nome real (ex: from database import firestore_db as db).
-try:
-    from database import db
-except ImportError as e:
-    raise ImportError(
-        "database_chat.py não conseguiu importar o client Firestore `db` de database.py. "
-        "Abra o seu database.py, encontre a linha onde ele guarda o client "
-        "(algo como `db = firestore.client()`) e garanta que essa variável se "
-        "chama `db` — ou ajuste o import no topo do database_chat.py para o "
-        "nome correto."
-    ) from e
+from database import get_db
 
 
 # ── ENVIO E LEITURA DE MENSAGENS ───────────────────────────────────
@@ -39,7 +25,7 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
     """
     if not texto or not texto.strip():
         return
-    db.collection("mensagens_chat").add({
+    get_db().collection("mensagens_chat").add({
         "conversa_id": motorista_usuario,
         "remetente": remetente,
         "remetente_tipo": remetente_tipo,
@@ -52,7 +38,7 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
 def obter_mensagens_chat(motorista_usuario: str, limite: int = 200):
     """Retorna as mensagens da conversa de um motorista, em ordem cronológica."""
     docs = (
-        db.collection("mensagens_chat")
+        get_db().collection("mensagens_chat")
         .where("conversa_id", "==", motorista_usuario)
         .order_by("timestamp")
         .limit(limite)
@@ -67,6 +53,7 @@ def marcar_mensagens_lidas(motorista_usuario: str, remetente_tipo_oposto: str):
     Chame com remetente_tipo_oposto="motorista" quando um ADM abrir a conversa,
     e com remetente_tipo_oposto="adm" quando o motorista abrir o chat dele.
     """
+    db = get_db()
     docs = (
         db.collection("mensagens_chat")
         .where("conversa_id", "==", motorista_usuario)
@@ -106,7 +93,7 @@ def listar_conversas_com_nao_lidas(lista_motoristas: list):
 
 def marcar_presenca_adm(usuario: str, nome: str):
     """Chamar a cada carregamento/refresh da tela do ADM para 'renovar' o status online."""
-    db.collection("presenca_adm").document(usuario).set({
+    get_db().collection("presenca_adm").document(usuario).set({
         "nome": nome,
         "ultimo_ping": datetime.now(timezone.utc),
     })
@@ -116,7 +103,7 @@ def listar_admins_online(janela_segundos: int = 60):
     """Considera 'online' quem deu um ping nos últimos N segundos."""
     agora = datetime.now(timezone.utc)
     online = []
-    for d in db.collection("presenca_adm").stream():
+    for d in get_db().collection("presenca_adm").stream():
         data = d.to_dict()
         ping = data.get("ultimo_ping")
         if ping and (agora - ping).total_seconds() <= janela_segundos:
