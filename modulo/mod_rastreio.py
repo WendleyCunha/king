@@ -16,8 +16,10 @@ from database import (obter_vinculo_db, salvar_vinculo_db, deletar_rota_db,
 try:
     from database_logistica import salvar_entregas_db
     _LOGISTICA_OK = True
+    _erro_import_logistica_msg = ""
 except Exception as _erro_import_logistica:
     _LOGISTICA_OK = False
+    _erro_import_logistica_msg = f"{type(_erro_import_logistica).__name__}: {_erro_import_logistica}"
     def salvar_entregas_db(*args, **kwargs):
         raise RuntimeError(
             f"database_logistica.py não carregou corretamente: {_erro_import_logistica}"
@@ -271,9 +273,14 @@ def _card_motorista(rota, df, idx, ctx, data_consulta, user):
 def _aba_cadastros(datas_db):
     if not _LOGISTICA_OK:
         st.error(
-            "⚠️ O módulo de importação de planilha está indisponível no momento "
-            "(falha ao carregar database_logistica.py). O Dashboard e a Exportação "
-            "continuam funcionando normalmente. Avise o responsável técnico."
+            "⚠️ O módulo de importação de planilha está indisponível no momento. "
+            "O Dashboard e a Exportação continuam funcionando normalmente."
+        )
+        st.code(str(_erro_import_logistica_msg), language="text")
+        st.caption(
+            "Erro técnico acima ↑ — confira se o arquivo `database_logistica.py` "
+            "existe na RAIZ do repositório (mesmo nível do main.py, fora da pasta modulo/) "
+            "e se o nome está exatamente assim, sem espaços ou maiúsculas."
         )
         return
 
