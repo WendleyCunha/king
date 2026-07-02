@@ -293,11 +293,30 @@ def salvar_vinculo_db(chave: str, nome: str):
     get_db().collection("de_para_motoristas").document(chave).set({"nome_motorista": nome})
 
 def deletar_rota_db(rota: str, data: str):
-    db    = get_db()
-    docs  = db.collection("entregas").where("rota","==",rota).where("data_entrega","==",data).stream()
+    """
+    ATENÇÃO: o campo salvo nas entregas se chama 'route' (inglês), não
+    'rota' — esse era o bug que impedia a exclusão de funcionar. Também
+    trata o caso de entregas salvas com wrapper 'payload' (formato antigo),
+    filtrando por 'payload.route' nesse caso.
+    """
+    db = get_db()
     batch = db.batch()
-    for d in docs: batch.delete(d.reference)
-    batch.commit()
+    encontrou = False
+
+    docs_flat = db.collection("entregas") \
+                  .where("route", "==", rota).where("data_entrega", "==", data).stream()
+    for d in docs_flat:
+        batch.delete(d.reference)
+        encontrou = True
+
+    docs_payload = db.collection("entregas") \
+                     .where("payload.route", "==", rota).where("data_entrega", "==", data).stream()
+    for d in docs_payload:
+        batch.delete(d.reference)
+        encontrou = True
+
+    if encontrou:
+        batch.commit()
 
 # ══════════════════════════════════════════════════════════════════
 # CARTAS DE DÉBITO (RH)
