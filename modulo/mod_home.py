@@ -111,7 +111,15 @@ def _salvar(projeto):
 
 
 # ─── Cronômetro (compartilhado entre "Meu Dia" e "Diário de Bordo") ──
-def _widget_cronometro(uname, key_prefix="", autorefresh=True):
+# Atualização parcial via st.fragment (nativo do Streamlit) em vez de
+# streamlit-autorefresh: esse componente externo tem um bug conhecido de
+# deixar o timer JS "vivo" no navegador mesmo depois de trocar de aba,
+# travando OUTRAS telas do sistema sem relação nenhuma com o cronômetro.
+_FRAGMENT_DECORATOR = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+_TEM_FRAGMENT = _FRAGMENT_DECORATOR is not None
+
+
+def _widget_cronometro_corpo(uname, key_prefix=""):
     """
     Mostra a atividade em andamento com cronômetro ao vivo + botão Finalizar,
     ou o campo para iniciar uma nova, se não houver nenhuma rodando agora.
@@ -164,12 +172,13 @@ def _widget_cronometro(uname, key_prefix="", autorefresh=True):
             time.sleep(.4)
             st.rerun()
 
-        if autorefresh:
-            try:
-                from streamlit_autorefresh import st_autorefresh
-                st_autorefresh(interval=1000, key=f"{key_prefix}cron_autorefresh")
-            except Exception:
-                pass
+        if not _TEM_FRAGMENT:
+            st.caption(
+                "⚠️ Seu Streamlit é muito antigo para o relógio atualizar sozinho. "
+                "Atualize `streamlit>=1.35.0` no requirements.txt, ou clique abaixo."
+            )
+            if st.button("🔄 Atualizar relógio", key=f"{key_prefix}refresh_cron"):
+                st.rerun()
 
     else:
         with st.form(f"{key_prefix}form_iniciar_cron", clear_on_submit=True):
@@ -193,6 +202,25 @@ def _widget_cronometro(uname, key_prefix="", autorefresh=True):
                         st.error(f"Não foi possível iniciar. Detalhe técnico: {e}")
                 else:
                     st.warning("Descreva o que você está fazendo antes de iniciar.")
+
+
+# Duas versões do mesmo cronômetro:
+# - "vivo" (usado no Meu Dia): relógio atualiza sozinho a cada 1s via
+#   st.fragment — sem o bug de "timer fantasma" do streamlit-autorefresh.
+# - "estático" (usado no Diário de Bordo): não fica se auto-atualizando,
+#   evita rodar dois relógios/fragmentos independentes ao mesmo tempo.
+if _TEM_FRAGMENT:
+    _widget_cronometro_vivo = _FRAGMENT_DECORATOR(run_every=1)(_widget_cronometro_corpo)
+else:
+    _widget_cronometro_vivo = _widget_cronometro_corpo
+
+
+def _widget_cronometro(uname, key_prefix="", autorefresh=True):
+    """Mantido com essa assinatura por compatibilidade com o resto do arquivo."""
+    if autorefresh:
+        _widget_cronometro_vivo(uname, key_prefix=key_prefix)
+    else:
+        _widget_cronometro_corpo(uname, key_prefix=key_prefix)
 
 
 def _linhas_produtividade(uname, data_ini, data_fim, lembretes):
