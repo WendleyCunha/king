@@ -56,6 +56,9 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
     A conversa é sempre indexada pelo login do motorista (1 conversa por
     motorista, compartilhada entre todos os ADMs — como uma caixa de
     suporte, e não um chat 1-a-1 fixo).
+    Se quem manda é o motorista, a conversa é automaticamente REABERTA
+    (mesmo que um ADM já tenha finalizado antes) — é assim que o motorista
+    "reaparece" na lista de atendimento ao chamar de novo.
     """
     if not texto or not texto.strip():
         return
@@ -67,6 +70,35 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
         "timestamp": datetime.now(timezone.utc),
         "lida": False,
     })
+    if remetente_tipo == "motorista":
+        reabrir_ou_criar_conversa(motorista_usuario)
+
+
+# ── STATUS DA CONVERSA (aberta / finalizada) ────────────────────────
+
+def obter_status_conversa(motorista_usuario: str) -> str:
+    """Retorna 'aberta', 'finalizada' ou 'sem_conversa' (nunca existiu)."""
+    doc = get_db().collection("conversas_chat").document(motorista_usuario).get()
+    if not doc.exists:
+        return "sem_conversa"
+    return doc.to_dict().get("status", "aberta")
+
+
+def reabrir_ou_criar_conversa(motorista_usuario: str):
+    get_db().collection("conversas_chat").document(motorista_usuario).set({
+        "motorista": motorista_usuario,
+        "status": "aberta",
+        "atualizado_em": datetime.now(timezone.utc),
+    }, merge=True)
+
+
+def finalizar_conversa_chat(motorista_usuario: str, finalizado_por: str):
+    get_db().collection("conversas_chat").document(motorista_usuario).set({
+        "motorista": motorista_usuario,
+        "status": "finalizada",
+        "finalizado_por": finalizado_por,
+        "finalizado_em": datetime.now(timezone.utc),
+    }, merge=True)
 
 
 def obter_mensagens_chat(motorista_usuario: str, limite: int = 200):
