@@ -97,7 +97,7 @@ def garantir_colunas(df):
         "contact_name":"—","contact_phone":"—","contact_email":"—",
         "tracking_id":"—","on_its_way":None,"checkout_time":None,"checkin_time":None,
         "estimated_time_arrival":"—","checkout_observation":"—","checkout_comment":"—",
-        "notes":"—","planned_date":"—","order":"—",
+        "notes":"—","planned_date":"—","order":"—","cliente_codigo":"—",
     }.items():
         if col not in df.columns: df[col] = val
     return df
@@ -337,11 +337,12 @@ def _aba_cadastros(datas_db):
                     colunas = list(df_up.columns)
 
                     st.markdown("**Mapeamento de colunas** — diga qual coluna da planilha é qual campo:")
-                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
                     col_cliente  = mc1.selectbox("Cliente", colunas, key="map_cliente")
                     col_endereco = mc2.selectbox("Endereço", colunas, key="map_endereco")
                     col_telefone = mc3.selectbox("Telefone (opcional)", ["—"] + colunas, key="map_telefone")
                     col_ordem    = mc4.selectbox("Ordem (opcional)", ["—"] + colunas, key="map_ordem")
+                    col_codigo   = mc5.selectbox("Código do cliente (opcional)", ["—"] + colunas, key="map_codigo")
 
                     opcoes_mot = {f"{m['nome']} ({m['usuario']})": m["usuario"] for m in motoristas}
 
@@ -442,6 +443,7 @@ def _aba_cadastros(datas_db):
                                     "address": str(row.get(col_endereco, "—")),
                                     "contact_phone": str(row.get(col_telefone, "—")) if col_telefone != "—" else "—",
                                     "order": row.get(col_ordem, i + 1) if col_ordem != "—" else i + 1,
+                                    "cliente_codigo": str(row.get(col_codigo, "—")) if col_codigo != "—" else "—",
                                     "planned_date": data_str,
                                 })
 
@@ -620,15 +622,14 @@ def _visualizacao_motorista(user):
         </div>
         """), unsafe_allow_html=True)
 
-        # ── Dar baixa (só entregas pendentes, exige foto) ────────────
+        # ── Dar baixa (só entregas pendentes) ─────────────────────────
         if status == "⏳ Pendente":
             if not (_LOGISTICA_OK and doc_id):
                 st.caption("⚠️ Não é possível dar baixa nesta entrega agora.")
             else:
                 with st.popover(f"📸 Dar baixa — #{row.get('order','—')}", use_container_width=True):
-                    st.caption("A foto é **obrigatória** — não é possível confirmar sucesso "
-                               "ou registrar falha sem tirar a foto no ato da entrega.")
-                    foto = st.camera_input("Tire a foto agora", key=f"foto_{doc_id}")
+                    st.caption("A foto é opcional — se quiser, tire uma no ato da entrega.")
+                    foto = st.camera_input("Tirar foto (opcional)", key=f"foto_{doc_id}")
                     resultado = st.radio(
                         "Resultado da entrega", ["✅ Sucesso", "❌ Falha"],
                         key=f"result_{doc_id}", horizontal=True,
@@ -641,13 +642,12 @@ def _visualizacao_motorista(user):
                         )
                     if st.button("Confirmar baixa", key=f"confirmar_{doc_id}",
                                  type="primary", use_container_width=True):
-                        if foto is None:
-                            st.error("📸 Tire a foto antes de confirmar — ela é obrigatória.")
-                        elif resultado == "❌ Falha" and not motivo.strip():
+                        if resultado == "❌ Falha" and not motivo.strip():
                             st.warning("Descreva o motivo da falha antes de confirmar.")
                         else:
                             status_db = "sucesso" if resultado == "✅ Sucesso" else "falha"
-                            ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto.getvalue(), motivo)
+                            foto_bytes = foto.getvalue() if foto is not None else None
+                            ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto_bytes, motivo)
                             (st.success if ok else st.error)(msg)
                             if ok:
                                 time.sleep(1)
