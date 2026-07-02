@@ -147,6 +147,62 @@ div[data-testid="stHorizontalBlock"]:has(.ks-header) {
 .tn { background:rgba(46,204,113,.1);  color:#1e8449; }
 .tb { background:rgba(52,152,219,.1);  color:#2471a3; }
 .tr { background:rgba(231,76,60,.1);   color:#a93226; }
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVO — CELULAR (telas até 768px)
+   Empilha as colunas do Streamlit (KPIs, filtros, cabeçalho, chat)
+   em vez de espremer tudo lado a lado, e ajusta tamanhos de fonte
+   e espaçamento pra caber bem na tela pequena.
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+    .block-container {
+        padding-top: 3rem !important;
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
+    }
+
+    /* Empilha qualquer linha de colunas (KPIs, filtros do Rastreio,
+       cabeçalho, colunas do Chat) em vez de espremer horizontalmente */
+    div[data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+        width: 100% !important;
+        min-width: 100% !important;
+        flex: 1 1 100% !important;
+        margin-bottom: 6px;
+    }
+
+    /* Cabeçalho: título compacto */
+    .ks-header {
+        padding: 12px 14px !important;
+        gap: 10px !important;
+    }
+    .ks-title { font-size: 1.1rem !important; }
+    .ks-sub   { font-size: 0.72rem !important; }
+
+    /* KPIs: menores pra caber 1 por linha sem ficar gigante */
+    .kpi-card { padding: 12px 10px !important; }
+    .kpi-value { font-size: 1.5rem !important; }
+    .kpi-label { font-size: 0.68rem !important; }
+
+    /* Botões e inputs com alvo de toque melhor no dedo */
+    .stButton > button, .stTextInput input, .stSelectbox, .stDateInput input {
+        min-height: 42px !important;
+        font-size: 0.95rem !important;
+    }
+
+    /* Tabelas: permite rolar horizontalmente em vez de cortar colunas */
+    div[data-testid="stDataFrame"] {
+        overflow-x: auto !important;
+    }
+
+    /* Popup/dialog do motorista ocupa a tela quase inteira no celular */
+    div[role="dialog"] {
+        width: 95vw !important;
+        max-width: 95vw !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -179,8 +235,10 @@ if st.session_state.user is None:
             u = verificar_login(usuario, senha)
             if u:
                 st.session_state.user = u
-                # Regra: após o login, a primeira página sempre é a Home (Meu Dia)
-                st.session_state.modulo_ativo = "home"
+                # Regra: após o login, a primeira página é a Home (Meu Dia) —
+                # exceto para motoristas, que não têm acesso a esse módulo e
+                # vão direto para o Rastreio (suas próprias entregas).
+                st.session_state.modulo_ativo = "rastreio" if u.get("role") == "motorista" else "home"
                 st.rerun()
             else:
                 st.error("Credenciais inválidas.")
@@ -203,11 +261,12 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown('<span class="nav-section">Operacional</span>', unsafe_allow_html=True)
 
-    ativo_home = st.session_state.modulo_ativo == "home"
-    if st.button("🏠 Meu Dia", key="nav_home", use_container_width=True,
-                 type="primary" if ativo_home else "secondary"):
-        st.session_state.modulo_ativo = "home"
-        st.rerun()
+    if papel != "motorista":
+        ativo_home = st.session_state.modulo_ativo == "home"
+        if st.button("🏠 Meu Dia", key="nav_home", use_container_width=True,
+                     type="primary" if ativo_home else "secondary"):
+            st.session_state.modulo_ativo = "home"
+            st.rerun()
 
     for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
         if key not in mods: continue
@@ -290,6 +349,13 @@ with hc2:
 # ── DADOS ─────────────────────────────────────────────────────────
 datas_db     = obter_datas_disponiveis_db()
 modulo_ativo = st.session_state.modulo_ativo
+
+# Motorista não tem acesso ao módulo Home — se a sessão dele ainda
+# apontar pra lá (ex: login antigo, antes dessa regra existir), redireciona.
+if papel == "motorista" and modulo_ativo == "home":
+    st.session_state.modulo_ativo = "rastreio"
+    modulo_ativo = "rastreio"
+    st.rerun()
 
 # ── NOTIFICAÇÃO DE CHAT NO PAINEL GERAL (visível em qualquer tela, exceto no próprio chat) ──
 if papel in ("adm", "supervisor") and modulo_ativo != "chat":
