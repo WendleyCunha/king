@@ -6,8 +6,7 @@ import streamlit as st
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database import (obter_vinculo_db, salvar_vinculo_db, deletar_rota_db,
-                      pode_editar, pode_deletar, obter_tickets_db,
-                      criar_usuario, listar_usuarios, salvar_entregas_db)
+                      pode_editar, pode_deletar, obter_tickets_db)
 
 BRT           = timezone(timedelta(hours=-3))
 TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/tracking/"
@@ -251,101 +250,6 @@ def _card_motorista(rota, df, idx, ctx, data_consulta, user):
             _conteudo_motorista(rota, df, data_consulta, user)
 
 
-# ── ABA NOVA: Cadastros & Upload (só ADM/Supervisor) ───────────────
-def _aba_cadastros(datas_db):
-    st.markdown("### 📤 Importar Planilha de Entregas")
-    st.caption("Envie a planilha já roteirizada (uma linha por entrega, com a coluna do motorista).")
-
-    motoristas = [u for u in listar_usuarios() if u.get("role") == "motorista"]
-    if not motoristas:
-        st.warning("⚠️ Cadastre pelo menos um motorista na seção abaixo antes de importar.")
-    else:
-        arquivo = st.file_uploader("Planilha (.xlsx ou .csv)", type=["xlsx", "csv"], key="upl_entregas")
-        data_entrega = st.date_input(
-            "Data das entregas", value=datetime.now(BRT).date() + timedelta(days=1), key="data_upl"
-        )
-
-        if arquivo is not None:
-            try:
-                df_up = (pd.read_csv(arquivo) if arquivo.name.lower().endswith(".csv")
-                          else pd.read_excel(arquivo))
-            except Exception as e:
-                st.error(f"Não consegui ler o arquivo: {e}")
-                df_up = None
-
-            if df_up is not None and not df_up.empty:
-                st.dataframe(df_up.head(10), use_container_width=True, hide_index=True)
-                colunas = list(df_up.columns)
-
-                st.markdown("**Mapeamento de colunas** — diga qual coluna da planilha é qual campo:")
-                mc1, mc2, mc3, mc4 = st.columns(4)
-                col_cliente  = mc1.selectbox("Cliente", colunas, key="map_cliente")
-                col_endereco = mc2.selectbox("Endereço", colunas, key="map_endereco")
-                col_telefone = mc3.selectbox("Telefone (opcional)", ["—"] + colunas, key="map_telefone")
-                col_ordem    = mc4.selectbox("Ordem (opcional)", ["—"] + colunas, key="map_ordem")
-
-                opcoes_mot = {f"{m['nome']} ({m['usuario']})": m["usuario"] for m in motoristas}
-                escolha_mot = st.selectbox(
-                    "Todas as linhas desta planilha pertencem a qual motorista?",
-                    list(opcoes_mot.keys()), key="map_motorista"
-                )
-                st.caption("Se a planilha já tiver uma coluna com o motorista de cada linha, "
-                           "me avise depois que eu adiciono a opção de mapear por linha em vez de tudo de uma vez.")
-
-                if st.button("📥 Importar", type="primary", key="btn_importar_planilha"):
-                    login_mot = opcoes_mot[escolha_mot]
-                    route_val = f"Rota - {login_mot}"
-                    data_str  = data_entrega.isoformat()
-
-                    entregas = []
-                    for i, row in df_up.iterrows():
-                        entregas.append({
-                            "route": route_val,
-                            "title": str(row.get(col_cliente, "—")),
-                            "address": str(row.get(col_endereco, "—")),
-                            "contact_phone": str(row.get(col_telefone, "—")) if col_telefone != "—" else "—",
-                            "order": row.get(col_ordem, i + 1) if col_ordem != "—" else i + 1,
-                            "planned_date": data_str,
-                        })
-
-                    qtd = salvar_entregas_db(entregas, data_str)
-                    st.success(f"✅ {qtd} entregas importadas para {data_str}, atribuídas a {escolha_mot}.")
-                    time.sleep(1)
-                    st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 🧑‍✈️ Cadastrar Motorista")
-    with st.form("form_novo_motorista"):
-        c1, c2 = st.columns(2)
-        nm_nome  = c1.text_input("Nome completo")
-        nm_login = c2.text_input("Login")
-        c3, c4 = st.columns(2)
-        nm_senha = c3.text_input("Senha", type="password")
-        nm_placa = c4.text_input("Placa do veículo", placeholder="Ex: ABC1D23")
-        if st.form_submit_button("Criar motorista"):
-            if not (nm_nome and nm_login and nm_senha):
-                st.warning("Preencha nome, login e senha.")
-            else:
-                criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
-                              modulos=["rastreio"], placa=nm_placa)
-                salvar_vinculo_db(nm_login, nm_nome)
-                st.success(f"Motorista **{nm_nome}** cadastrado! Login: `{nm_login}`")
-                time.sleep(1)
-                st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 📋 Motoristas Cadastrados")
-    motoristas = [u for u in listar_usuarios() if u.get("role") == "motorista"]
-    if not motoristas:
-        st.caption("Nenhum motorista cadastrado ainda.")
-    else:
-        st.dataframe(pd.DataFrame([{
-            "Nome": m.get("nome", "—"),
-            "Login": m.get("usuario", "—"),
-            "Placa": m.get("placa", "—"),
-        } for m in motoristas]), use_container_width=True, hide_index=True)
-
-
 # ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
 def renderizar_rastreio(papel: str, user: dict = None,
                         datas_db: list = None, pode_exp: bool = False):
@@ -395,20 +299,9 @@ def renderizar_rastreio(papel: str, user: dict = None,
 
     if df.empty:
         st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
-        if papel in ("adm", "supervisor"):
-            st.markdown("---")
-            _aba_cadastros(datas_db)
         return is_hoje
 
     df = garantir_colunas(df.copy())
-
-    # ── Motorista só vê as próprias entregas ───────────────────────
-    if papel == "motorista":
-        minha_chave = user.get("usuario", "")
-        df = df[df["route"].apply(extrair_chave) == minha_chave]
-        if df.empty:
-            st.info("⏳ Nenhuma entrega atribuída a você para o dia selecionado.")
-            return is_hoje
 
     # Aplica filtros
     df_f = aplicar_busca(df, termo)
@@ -421,7 +314,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
     # ── Abas ──────────────────────────────────────────────────────
     abas_nomes = ["🏠 Dashboard"]
     if pode_exp: abas_nomes.append("📥 Exportar")
-    if pode_editar(user): abas_nomes.append("🧑‍✈️ Cadastros")
     abas = st.tabs(abas_nomes)
 
     # ══ DASHBOARD ════════════════════════════════════════════════
@@ -520,11 +412,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
                             f"KingStar_{mes}.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary", use_container_width=True)
-
-    # ══ CADASTROS (nova aba, só ADM/Supervisor) ═══════════════════
-    if pode_editar(user):
-        with abas[-1]:
-            _aba_cadastros(datas_db)
 
     # Auto-refresh controlado pelo main.py
     return is_hoje
