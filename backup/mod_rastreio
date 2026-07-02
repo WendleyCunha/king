@@ -312,7 +312,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
         st.warning(f"Nenhum resultado para **{termo}**."); return is_hoje
 
     # ── Abas ──────────────────────────────────────────────────────
-    abas_nomes = ["🏠 Dashboard", "🧑 Visão por Motorista"]
+    abas_nomes = ["🏠 Dashboard"]
     if pode_exp: abas_nomes.append("📥 Exportar")
     abas = st.tabs(abas_nomes)
 
@@ -341,7 +341,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
                  if r and "não identificada" not in str(r).lower()] if "route" in df_f.columns else []
         if rotas:
             st.markdown("### 🧑 Motoristas em Operação")
-            st.caption("Clique no nome do motorista para abrir os detalhes.")
+            st.caption("Clique no nome do motorista para abrir os detalhes (fila, ocorrências, notificados e edição).")
             cols = st.columns(min(len(rotas), 4))
             for idx, rota in enumerate(rotas):
                 with cols[idx % 4]:
@@ -362,22 +362,9 @@ def renderizar_rastreio(papel: str, user: dict = None,
             "Tracking": get_series(df_f,"tracking_id"),
         }), use_container_width=True, hide_index=True)
 
-    # ══ VISÃO POR MOTORISTA (grade de cards clicáveis) ════════════
-    with abas[1]:
-        rotas = [r for r in sorted(df["route"].unique())
-                 if r and "não identificada" not in str(r).lower()] if "route" in df.columns else []
-        if not rotas:
-            st.info("Nenhuma rota registrada.")
-        else:
-            st.caption("Clique em um motorista para abrir a visão completa (fila, ocorrências, notificados e edição).")
-            cols = st.columns(3)
-            for idx, rota in enumerate(rotas):
-                with cols[idx % 3]:
-                    _card_motorista(rota, df, idx, "visao", data_consulta, user)
-
     # ══ EXPORTAR ══════════════════════════════════════════════════
     if pode_exp:
-        with abas[2]:
+        with abas[1]:
             st.markdown("### 💾 Exportação de Dados")
 
             def montar(df_src):
