@@ -686,6 +686,24 @@ def _visualizacao_motorista(user):
                                 st.rerun()
 
 
+# ── ABA NOVA: Chat embutido dentro do Rastreio, ao lado de Cadastros ──
+def _aba_chat_no_rastreio(papel, user):
+    # Import LOCAL (dentro da função) de propósito: o mod_chat.py importa
+    # coisas do mod_rastreio.py (pros links de rastreio no popover), então
+    # importar mod_chat no topo deste arquivo criaria um import circular
+    # (A importa B que importa A). Importando aqui dentro, só na hora de
+    # usar, os dois módulos já estão totalmente carregados e isso não
+    # acontece.
+    try:
+        from modulo.mod_chat import renderizar_chat
+        renderizar_chat(papel, user)
+    except Exception as e:
+        st.error("⚠️ O Chat encontrou um problema e não pôde carregar agora. "
+                 "O restante do Rastreio (Dashboard, Exportar, Cadastros) "
+                 "continua funcionando normalmente.")
+        st.code(f"{type(e).__name__}: {e}", language="text")
+
+
 # ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
 def renderizar_rastreio(papel: str, user: dict = None,
                         datas_db: list = None, pode_exp: bool = False):
@@ -774,7 +792,9 @@ def renderizar_rastreio(papel: str, user: dict = None,
     abas_nomes = ["🏠 Dashboard"]
     if pode_exp: abas_nomes.append("📥 Exportar")
     mostra_cadastros = pode_editar(user)
-    if mostra_cadastros: abas_nomes.append("🧑‍✈️ Cadastros")
+    if mostra_cadastros:
+        abas_nomes.append("🧑‍✈️ Cadastros")
+        abas_nomes.append("💬 Chat")
     abas = st.tabs(abas_nomes)
 
     # ══ DASHBOARD ════════════════════════════════════════════════
@@ -874,10 +894,12 @@ def renderizar_rastreio(papel: str, user: dict = None,
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary", use_container_width=True)
 
-    # ══ CADASTROS (nova aba, só ADM/Supervisor) ═══════════════════
+    # ══ CADASTROS + CHAT (novas abas, só ADM/Supervisor) ══════════
     if mostra_cadastros:
-        with abas[-1]:
+        with abas[-2]:
             _aba_cadastros(datas_db)
+        with abas[-1]:
+            _aba_chat_no_rastreio(papel, user)
 
     # Auto-refresh controlado pelo main.py
     return is_hoje
