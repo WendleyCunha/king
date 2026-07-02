@@ -249,6 +249,55 @@ user  = st.session_state.user
 papel = user.get("role", "operacional")
 mods  = modulos_do_usuario(user)
 
+# ══════════════════════════════════════════════════════════════════
+# VISÃO EXCLUSIVA DO MOTORISTA — sem sidebar, Rastreio e Chat em abas
+# ══════════════════════════════════════════════════════════════════
+if papel == "motorista":
+    st.markdown("""
+    <style>
+    section[data-testid="stSidebar"] { display: none !important; }
+    .block-container { padding-top: 1.2rem !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    lb = get_logo()
+    mh1, mh2, mh3 = st.columns([1, 3, 1])
+    with mh1:
+        if lb:
+            st.markdown(f'<img src="data:image/png;base64,{lb}" style="height:42px;">',
+                        unsafe_allow_html=True)
+    with mh2:
+        st.markdown(f"""
+        <div style="text-align:center;line-height:1.2;">
+            <div style="font-size:1.05rem;font-weight:800;color:#2c3e50;">{user['nome']}</div>
+            <div style="font-size:0.72rem;color:#9aabb8;">KingStar · Motorista</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with mh3:
+        if st.button("Sair", key="btn_sair_motorista", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+
+    st.markdown("<hr style='margin:10px 0 14px;border:none;border-top:1px solid #eee;'>",
+                unsafe_allow_html=True)
+
+    aba_entregas, aba_chat = st.tabs(["🚚 Minhas Entregas", "💬 Chat"])
+    with aba_entregas:
+        renderizar_rastreio(papel, user, datas_db=[], pode_exp=False)
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=20000, key="rastreio_auto_refresh_motorista")
+        except Exception:
+            pass
+    with aba_chat:
+        try:
+            renderizar_chat(papel, user)
+        except Exception as _erro_chat_runtime:
+            st.error("⚠️ O Chat encontrou um problema e não pôde carregar agora.")
+            st.code(f"{type(_erro_chat_runtime).__name__}: {_erro_chat_runtime}", language="text")
+
+    st.stop()
+
 # ── SIDEBAR ───────────────────────────────────────────────────────
 with st.sidebar:
     lb = get_logo()
