@@ -25,41 +25,13 @@ except Exception:
 
 BRT = timezone(timedelta(hours=-3))
 
-
-# ── CSS — mesmo padrão visual do módulo de Tickets (cards, cores, piscante) ──
-def _injetar_css_chat():
-    st.markdown("""
-    <style>
-    @keyframes cvpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
-    @keyframes cvbordapiscar {
-        0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);}
-        50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);}
-    }
-    /* Card de conversa AGUARDANDO ATENDIMENTO (mensagem não lida) — pisca
-       igual ao card de ticket com SLA vencido */
-    div[class*="st-key-cvcard_pend_"] button {
-        text-align:left !important; justify-content:flex-start !important;
-        border:2px solid #8A6D1F !important;
-        background:#FBF3D9 !important;
-        color:#6B5A2A !important;
-        font-weight:800 !important;
-        animation: cvbordapiscar 1s infinite;
-        border-radius:10px !important;
-    }
-    /* Card de conversa OK (já respondida) — dourado sóbrio, igual aos
-       cards padrão do sistema */
-    div[class*="st-key-cvcard_ok_"] button {
-        text-align:left !important; justify-content:flex-start !important;
-        background:#fff !important; border:1px solid #e2e8f0 !important;
-        border-left:4px solid #C9A84C !important;
-        color:#2c3e50 !important; font-weight:600 !important;
-        border-radius:10px !important;
-    }
-    .cv-blink { animation: cvpiscar 1s infinite; background:#8A6D1F; color:#fff;
-        padding:2px 10px; border-radius:12px; font-size:0.72rem; font-weight:800;
-        display:inline-block; }
-    </style>
-    """, unsafe_allow_html=True)
+# ── Atualização parcial (st.fragment) em vez de recarregar a página inteira ──
+# streamlit-autorefresh recarrega TUDO a cada N segundos, o que "briga" com
+# qualquer clique feito bem na hora do refresh (parece travar). st.fragment
+# é nativo do Streamlit (>=1.33) e atualiza só o pedaço marcado, sem mexer
+# no resto da tela — resolve o travamento e fica mais rápido.
+_FRAGMENT_DECORATOR = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+_TEM_FRAGMENT = _FRAGMENT_DECORATOR is not None
 
 
 def _fmt_hora(ts):
@@ -186,7 +158,31 @@ def _card_conversa(c: dict, info_motoristas: dict, selecionado_atual):
 
 
 # ── ABA: ATENDIMENTO (conversas em aberto) ─────────────────────────
-def _render_atendimento(usuario: str, motoristas: list, info_motoristas: dict):
+def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: dict):
+    # CSS aqui dentro (não no nível do módulo) porque, ao virar st.fragment,
+    # esta função pode reexecutar sozinha sem passar pelo restante da página.
+    st.markdown("""
+    <style>
+    @keyframes cvpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
+    @keyframes cvbordapiscar {
+        0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);}
+        50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);}
+    }
+    div[class*="st-key-cvcard_pend_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        border:2px solid #8A6D1F !important; background:#FBF3D9 !important;
+        color:#6B5A2A !important; font-weight:800 !important;
+        animation: cvbordapiscar 1s infinite; border-radius:10px !important;
+    }
+    div[class*="st-key-cvcard_ok_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-left:4px solid #C9A84C !important;
+        color:#2c3e50 !important; font-weight:600 !important; border-radius:10px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     if not motoristas:
         st.info("Nenhum motorista cadastrado ainda.")
         return
@@ -260,15 +256,23 @@ def _render_atendimento(usuario: str, motoristas: list, info_motoristas: dict):
             st.rerun()
 
     st.markdown("---")
-    try:
-        import streamlit_autorefresh  # noqa: F401
-        st.caption("🔄 Atualização automática a cada 2s está ativa.")
-    except ImportError:
+    if _TEM_FRAGMENT:
+        st.caption("🔄 Atualização automática ativa (parcial, a cada 2s — não recarrega a página inteira).")
+    else:
         st.caption(
-            "⚠️ Atualização automática INDISPONÍVEL — adicione `streamlit-autorefresh` "
-            "ao seu `requirements.txt` e faça o deploy de novo. Sem isso, as mensagens "
-            "só aparecem quando a página é recarregada manualmente."
+            "⚠️ Seu Streamlit é muito antigo para atualização automática parcial. "
+            "Atualize `streamlit>=1.35.0` no requirements.txt, ou use o botão abaixo."
         )
+        if st.button("🔄 Atualizar agora", key="btn_refresh_adm", use_container_width=True):
+            st.rerun()
+
+
+# Aplica o fragment (atualização parcial a cada 2s) se disponível na sua
+# versão do Streamlit; senão, roda normal (só atualiza com interação manual).
+if _TEM_FRAGMENT:
+    _render_atendimento = _FRAGMENT_DECORATOR(run_every=2)(_render_atendimento_impl)
+else:
+    _render_atendimento = _render_atendimento_impl
 
 
 # ── ABA: HISTÓRICO (conversas finalizadas, busca + exportação) ─────
@@ -347,7 +351,7 @@ def _render_historico(motoristas: list, info_motoristas: dict):
 
 
 # ── ABA: visão do motorista (falar com o suporte) ──────────────────
-def _render_chat_motorista(usuario: str):
+def _render_chat_motorista_impl(usuario: str):
     # Sem título, sem aviso de "ADM online/offline" — só a caixa de digitar
     # (no topo) e a conversa, pra caber limpo no celular.
 
@@ -367,6 +371,11 @@ def _render_chat_motorista(usuario: str):
 
     marcar_mensagens_lidas(usuario, "adm")
     msgs = obter_mensagens_chat(usuario)
+
+    if not _TEM_FRAGMENT:
+        if st.button("🔄 Atualizar mensagens", use_container_width=True, key="btn_refresh_motorista"):
+            st.rerun()
+
     with st.container(height=400, border=True):
         if not msgs:
             st.caption("Nenhuma mensagem ainda. Envie sua dúvida acima.")
@@ -377,9 +386,14 @@ def _render_chat_motorista(usuario: str):
             st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
 
 
+if _TEM_FRAGMENT:
+    _render_chat_motorista = _FRAGMENT_DECORATOR(run_every=2)(_render_chat_motorista_impl)
+else:
+    _render_chat_motorista = _render_chat_motorista_impl
+
+
 # ── FUNÇÃO PRINCIPAL ────────────────────────────────────────────────
 def renderizar_chat(papel, user):
-    _injetar_css_chat()
     usuario = user.get("usuario", "")
     nome = user.get("nome", usuario)
 
@@ -399,10 +413,3 @@ def renderizar_chat(papel, user):
 
     else:
         _render_chat_motorista(usuario)
-
-    # Polling leve — mesmo padrão que você já usa no módulo de rastreio
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=2000, key="chat_auto_refresh")
-    except Exception:
-        pass
