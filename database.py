@@ -485,9 +485,15 @@ def deletar_arquivo_raci_db(file_id: str):
 
 # ══════════════════════════════════════════════════════════════════
 # DIÁRIO DE BORDO
-# Coleção: /diario_bordo/{id} → { id, usuario, atividade, data, hora, criado_em }
+# Coleção: /diario_bordo/{id} → { id, usuario, atividade, data, hora, criado_em,
+#                                  inicio, fim, duracao_segundos, status,
+#                                  origem, origem_ref }
 # Regra: cada usuário só enxerga (por padrão) os próprios registros;
 # passar usuario=None em listar_diario_bordo_db traz de todos (uso admin/gestão).
+#
+# status possíveis: "em_andamento" (cronômetro rodando) ou "finalizado".
+# origem: "diario" (iniciada direto no Diário de Bordo) ou "lembrete"
+# (iniciada a partir de um lembrete pessoal — origem_ref guarda o id dele).
 # ══════════════════════════════════════════════════════════════════
 
 def _parse_data_curta(s: str):
@@ -501,7 +507,10 @@ def _parse_data_curta(s: str):
 
 def criar_registro_diario_db(usuario: str, atividade: str) -> str:
     """Registra a atividade que o usuário está executando agora, com data e hora,
-    gerando um histórico consultável posteriormente (diário de bordo)."""
+    gerando um histórico consultável posteriormente (diário de bordo).
+    Mantida por compatibilidade — não usa cronômetro. Prefira
+    iniciar_atividade_diario_db / finalizar_atividade_diario_db para
+    registros com duração."""
     ref = get_db().collection("diario_bordo").document()
     agora = datetime.now(BRT)
     ref.set({
@@ -513,6 +522,64 @@ def criar_registro_diario_db(usuario: str, atividade: str) -> str:
         "criado_em": agora.strftime("%d/%m/%Y %H:%M:%S"),
     })
     return ref.id
+
+def iniciar_atividade_diario_db(usuario: str, atividade: str, origem: str = "diario", origem_ref=None) -> str:
+    """
+    Inicia o cronômetro de uma atividade no diário de bordo.
+    origem: "diario" (iniciada direto) ou "lembrete" (a partir de um lembrete).
+    origem_ref: id do lembrete, quando origem="lembrete".
+    Retorna o id do registro criado.
+    """
+    ref = get_db().collection("diario_bordo").document()
+    agora = datetime.now(BRT)
+    ref.set({
+        "id": ref.id,
+        "usuario": usuario,
+        "atividade": atividade,
+        "data": agora.strftime("%d/%m/%Y"),
+        "hora": agora.strftime("%H:%M"),
+        "criado_em": agora.strftime("%d/%m/%Y %H:%M:%S"),
+        "inicio": agora,
+        "fim": None,
+        "duracao_segundos": None,
+        "status": "em_andamento",
+        "origem": origem,
+        "origem_ref": origem_ref,
+    })
+    return ref.id
+
+def finalizar_atividade_diario_db(id_registro: str):
+    """Finaliza o cronômetro de uma atividade em andamento, calculando a duração em segundos."""
+    ref = get_db().collection("diario_bordo").document(id_registro)
+    doc = ref.get()
+    if not doc.exists:
+        return False, "Registro não encontrado."
+    d = doc.to_dict()
+    if d.get("status") != "em_andamento":
+        return False, "Essa atividade já foi finalizada."
+    inicio = d.get("inicio")
+    fim = datetime.now(BRT)
+    duracao = (fim - inicio).total_seconds() if inicio else 0
+    ref.update({
+        "fim": fim,
+        "duracao_segundos": duracao,
+        "status": "finalizado",
+    })
+    return True, "Atividade finalizada."
+
+def obter_atividade_em_andamento_db(usuario: str):
+    """
+    Retorna o registro em andamento do usuário (dict com 'id' incluso),
+    ou None se não houver nenhum. Usa só 1 filtro de igualdade (usuario) —
+    não precisa de índice composto novo no Firestore.
+    """
+    docs = get_db().collection("diario_bordo").where("usuario", "==", usuario).stream()
+    for d in docs:
+        item = d.to_dict()
+        if item.get("status") == "em_andamento":
+            item["id"] = d.id
+            return item
+    return None
 
 def listar_diario_bordo_db(usuario: str = None, data_ini=None, data_fim=None) -> list:
     """
