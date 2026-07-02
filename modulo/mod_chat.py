@@ -1,26 +1,65 @@
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, timedelta, timezone
 
 from database import listar_usuarios, obter_tickets_db
 from database_chat import (
     enviar_mensagem_chat, obter_mensagens_chat, marcar_mensagens_lidas,
     listar_conversas_com_nao_lidas, marcar_presenca_adm,
-    listar_admins_online,
+    listar_admins_online, obter_status_conversa, finalizar_conversa_chat,
+    reabrir_ou_criar_conversa,
 )
 
 # Import isolado: se o mod_rastreio.py tiver qualquer problema, o Chat
-# continua funcionando normalmente — só o resumo "Entregas hoje" fica
-# indisponível, em vez de derrubar a tela inteira.
+# continua funcionando normalmente — só o resumo "Entregas hoje" (com os
+# links de rastreio) fica indisponível, em vez de derrubar a tela inteira.
 try:
-    from modulo.mod_rastreio import extrair_chave, garantir_colunas
+    from modulo.mod_rastreio import extrair_chave, garantir_colunas, TRACKING_BASE
     _RESUMO_ENTREGAS_OK = True
 except Exception:
     _RESUMO_ENTREGAS_OK = False
     def extrair_chave(rota): return rota
     def garantir_colunas(df): return df
+    TRACKING_BASE = ""
 
 BRT = timezone(timedelta(hours=-3))
+
+
+# ── CSS — mesmo padrão visual do módulo de Tickets (cards, cores, piscante) ──
+def _injetar_css_chat():
+    st.markdown("""
+    <style>
+    @keyframes cvpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
+    @keyframes cvbordapiscar {
+        0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);}
+        50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);}
+    }
+    /* Card de conversa AGUARDANDO ATENDIMENTO (mensagem não lida) — pisca
+       igual ao card de ticket com SLA vencido */
+    div[class*="st-key-cvcard_pend_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        border:2px solid #8A6D1F !important;
+        background:#FBF3D9 !important;
+        color:#6B5A2A !important;
+        font-weight:800 !important;
+        animation: cvbordapiscar 1s infinite;
+        border-radius:10px !important;
+    }
+    /* Card de conversa OK (já respondida) — dourado sóbrio, igual aos
+       cards padrão do sistema */
+    div[class*="st-key-cvcard_ok_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-left:4px solid #C9A84C !important;
+        color:#2c3e50 !important; font-weight:600 !important;
+        border-radius:10px !important;
+    }
+    .cv-blink { animation: cvpiscar 1s infinite; background:#8A6D1F; color:#fff;
+        padding:2px 10px; border-radius:12px; font-size:0.72rem; font-weight:800;
+        display:inline-block; }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def _fmt_hora(ts):
@@ -32,25 +71,241 @@ def _fmt_hora(ts):
         return ""
 
 
-def _resumo_entregas_hoje(login_motorista: str):
-    """Retorna (total, concluidas, pendentes, falhas) das entregas de HOJE desse motorista."""
+def _entregas_hoje_df(login_motorista: str) -> pd.DataFrame:
     hoje = datetime.now(BRT).date().isoformat()
     tickets = obter_tickets_db(hoje)
     if not tickets:
-        return 0, 0, 0, 0
+        return pd.DataFrame()
     df = pd.DataFrame(tickets)
     df = garantir_colunas(df.copy())
     if "route" not in df.columns:
-        return 0, 0, 0, 0
-    df = df[df["route"].apply(extrair_chave) == login_motorista]
+        return pd.DataFrame()
+    return df[df["route"].apply(extrair_chave) == login_motorista]
+
+
+def _popover_entregas(login_motorista: str, nome_m: str):
+    df = _entregas_hoje_df(login_motorista)
+    st.markdown(f"**{nome_m}** — {datetime.now(BRT).strftime('%d/%m/%Y')}")
+    if df.empty:
+        st.caption("Nenhuma entrega atribuída a esse motorista hoje.")
+        return
+
     total  = len(df)
-    concl  = int((df["_status_visual"] == "✅ Sucesso").sum()) if "_status_visual" in df.columns else 0
-    falhas = int((df["_status_visual"] == "❌ Falhou").sum()) if "_status_visual" in df.columns else 0
+    concl  = int((df["_status_visual"] == "✅ Sucesso").sum())
+    falhas = int((df["_status_visual"] == "❌ Falhou").sum())
     pend   = total - concl - falhas
-    return total, concl, pend, falhas
+    st.markdown(
+        f"📦 Total: **{total}**  \n✅ Concluídas: **{concl}**  \n"
+        f"⏳ Pendentes: **{pend}**  \n❌ Falhas: **{falhas}**"
+    )
+
+    st.markdown("---")
+    st.caption("🔗 Links de rastreio — clique no ícone de copiar em cada um:")
+    tem_link = False
+    for _, row in df.iterrows():
+        tid = str(row.get("tracking_id", "") or "").strip()
+        if tid and tid not in ("—", "nan", "None") and TRACKING_BASE:
+            tem_link = True
+            st.caption(f"#{row.get('order','—')} · {row.get('title','—')}")
+            st.code(f"{TRACKING_BASE}{tid}", language=None)
+    if not tem_link:
+        st.caption("Nenhum link de rastreio disponível ainda hoje para este motorista.")
 
 
+def _gerar_html_transcript(nome_m: str, login_m: str, msgs: list) -> bytes:
+    """Gera um HTML autônomo da conversa — abre no navegador e pode ser
+    impresso/salvo como PDF via Ctrl+P > Salvar como PDF."""
+    linhas = []
+    for m in msgs:
+        quem = nome_m if m["remetente_tipo"] == "motorista" else m.get("remetente", "ADM")
+        hora = _fmt_hora(m.get("timestamp"))
+        texto = str(m.get("texto", "")).replace("<", "&lt;").replace(">", "&gt;")
+        linhas.append(
+            f'<div style="margin:8px 0;padding:8px 12px;border-left:3px solid #C9A84C;'
+            f'background:#f8f9fa;border-radius:6px;"><b>{quem}</b> '
+            f'<span style="color:#888;font-size:0.8rem;">{hora}</span>'
+            f'<br>{texto}</div>'
+        )
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Conversa - {nome_m}</title></head>
+<body style="font-family:Arial,sans-serif;max-width:700px;margin:20px auto;color:#2c3e50;">
+<h2 style="color:#C9A84C;">KingStar · Conversa com {nome_m}</h2>
+<p style="color:#888;">Login: {login_m} · Exportado em {datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}</p>
+<hr>
+{''.join(linhas) if linhas else '<p>Sem mensagens.</p>'}
+</body></html>"""
+    return html.encode("utf-8")
+
+
+def _card_conversa(c: dict, info_motoristas: dict, selecionado_atual):
+    login_m = c["motorista"]
+    info    = info_motoristas.get(login_m, {})
+    nome_m  = info.get("nome") or login_m
+    nao_lidas = c["nao_lidas"]
+    piscando  = nao_lidas > 0
+    ctx = "pend" if piscando else "ok"
+
+    label = f"🚚 {nome_m}"
+    if piscando:
+        label += f" 🔴 {nao_lidas} nova(s)"
+
+    if st.button(label, key=f"cvcard_{ctx}_{login_m}", use_container_width=True):
+        st.session_state.chat_motorista_sel = login_m
+        st.rerun()
+
+
+# ── ABA: ATENDIMENTO (conversas em aberto) ─────────────────────────
+def _render_atendimento(usuario: str, motoristas: list, info_motoristas: dict):
+    if not motoristas:
+        st.info("Nenhum motorista cadastrado ainda.")
+        return
+
+    todas = listar_conversas_com_nao_lidas(motoristas)
+    ativas = []
+    for c in todas:
+        if not c["ultima_hora"]:
+            continue  # esse motorista nunca mandou mensagem — não aparece
+        if obter_status_conversa(c["motorista"]) == "finalizada":
+            continue  # conversa encerrada — só aparece no Histórico
+        ativas.append(c)
+
+    ativas.sort(key=lambda c: (c["nao_lidas"] == 0, -(c["ultima_hora"].timestamp())))
+
+    if "chat_motorista_sel" not in st.session_state:
+        st.session_state.chat_motorista_sel = ativas[0]["motorista"] if ativas else None
+
+    logins_ativos = [c["motorista"] for c in ativas]
+    if st.session_state.chat_motorista_sel not in logins_ativos:
+        st.session_state.chat_motorista_sel = logins_ativos[0] if logins_ativos else None
+
+    col_lista, col_chat = st.columns([1, 2])
+
+    with col_lista:
+        st.markdown("**Conversas em atendimento**")
+        if not ativas:
+            st.caption("Nenhuma conversa em aberto no momento. 🎉")
+        for c in ativas:
+            _card_conversa(c, info_motoristas, st.session_state.chat_motorista_sel)
+
+    motorista_sel = st.session_state.chat_motorista_sel
+
+    with col_chat:
+        if not motorista_sel:
+            st.info("Nenhuma conversa selecionada.")
+            return
+
+        info    = info_motoristas.get(motorista_sel, {})
+        nome_m  = info.get("nome") or motorista_sel
+        placa_m = info.get("placa") or "—"
+
+        hc1, hc2, hc3 = st.columns([2.2, 1, 1])
+        with hc1:
+            st.markdown(f"**🚚 {nome_m}** · placa `{placa_m}` · login `{motorista_sel}`")
+        with hc2:
+            if _RESUMO_ENTREGAS_OK:
+                with st.popover("📦 Entregas hoje", use_container_width=True):
+                    _popover_entregas(motorista_sel, nome_m)
+            else:
+                st.caption("Resumo indisponível")
+        with hc3:
+            if st.button("✅ Finalizar", use_container_width=True, key=f"finalizar_{motorista_sel}"):
+                finalizar_conversa_chat(motorista_sel, usuario)
+                st.session_state.chat_motorista_sel = None
+                st.success(f"Conversa com {nome_m} finalizada!")
+                time.sleep(.5)
+                st.rerun()
+
+        marcar_mensagens_lidas(motorista_sel, "motorista")
+        msgs = obter_mensagens_chat(motorista_sel)
+        with st.container(height=380, border=True):
+            if not msgs:
+                st.caption("Sem mensagens ainda nesta conversa.")
+            for m in msgs:
+                quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
+                st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+        txt = st.chat_input(f"Responder para {nome_m}...", key="chat_input_adm")
+        if txt:
+            enviar_mensagem_chat(motorista_sel, usuario, txt, "adm")
+            st.rerun()
+
+
+# ── ABA: HISTÓRICO (conversas finalizadas, busca + exportação) ─────
+def _render_historico(motoristas: list, info_motoristas: dict):
+    st.markdown("**Buscar conversas finalizadas**")
+    termo = st.text_input("🔍 Nome ou login do motorista", key="hist_busca",
+                          placeholder="Digite para filtrar...")
+
+    finalizadas = []
+    for m in motoristas:
+        if obter_status_conversa(m) != "finalizada":
+            continue
+        info = info_motoristas.get(m, {})
+        nome_m = info.get("nome") or m
+        if termo and termo.lower() not in nome_m.lower() and termo.lower() not in m.lower():
+            continue
+        finalizadas.append((m, nome_m))
+
+    if not finalizadas:
+        st.info("Nenhuma conversa finalizada encontrada.")
+        return
+
+    st.caption(f"{len(finalizadas)} conversa(s) finalizada(s).")
+
+    for login_m, nome_m in finalizadas:
+        with st.expander(f"🚚 {nome_m} · `{login_m}`"):
+            msgs = obter_mensagens_chat(login_m)
+            if not msgs:
+                st.caption("Sem mensagens.")
+            else:
+                with st.container(height=280, border=True):
+                    for m in msgs:
+                        quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
+                        st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+
+                html_bytes = _gerar_html_transcript(nome_m, login_m, msgs)
+                st.download_button(
+                    "📄 Baixar conversa (.html — abra e use Ctrl+P → Salvar como PDF)",
+                    data=html_bytes,
+                    file_name=f"Conversa_{login_m}_{datetime.now(BRT).strftime('%Y%m%d')}.html",
+                    mime="text/html",
+                    key=f"dl_hist_{login_m}",
+                    use_container_width=True,
+                )
+
+            if st.button("↩️ Reabrir conversa", key=f"reabrir_{login_m}", use_container_width=True):
+                reabrir_ou_criar_conversa(login_m)
+                st.success("Conversa reaberta! Vá para a aba Atendimento para continuar.")
+                time.sleep(.6)
+                st.rerun()
+
+
+# ── ABA: visão do motorista (falar com o suporte) ──────────────────
+def _render_chat_motorista(usuario: str):
+    st.subheader("💬 Falar com o Suporte")
+    online = listar_admins_online()
+    if online:
+        st.success("🟢 Online agora: " + ", ".join(a["nome"] for a in online))
+    else:
+        st.warning("🟡 Nenhum ADM online no momento — sua mensagem será respondida assim que possível.")
+
+    marcar_mensagens_lidas(usuario, "adm")
+    msgs = obter_mensagens_chat(usuario)
+    with st.container(height=420, border=True):
+        if not msgs:
+            st.caption("Nenhuma mensagem ainda. Envie sua dúvida abaixo.")
+        for m in msgs:
+            quem = "🚚 Você" if m["remetente_tipo"] == "motorista" else f"🛠️ {m['remetente']}"
+            st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+
+    txt = st.chat_input("Digite sua mensagem...", key="chat_input_motorista")
+    if txt:
+        enviar_mensagem_chat(usuario, usuario, txt, "motorista")
+        st.rerun()
+
+
+# ── FUNÇÃO PRINCIPAL ────────────────────────────────────────────────
 def renderizar_chat(papel, user):
+    _injetar_css_chat()
     usuario = user.get("usuario", "")
     nome = user.get("nome", usuario)
 
@@ -61,97 +316,19 @@ def renderizar_chat(papel, user):
         motoristas_cad  = [u for u in listar_usuarios() if u.get("role") == "motorista"]
         info_motoristas = {u["usuario"]: u for u in motoristas_cad}
         motoristas      = list(info_motoristas.keys())
-        if not motoristas:
-            st.info("Nenhum motorista cadastrado ainda.")
-            return
 
-        conversas = listar_conversas_com_nao_lidas(motoristas)
-        # não lidas primeiro, depois mais recentes
-        conversas.sort(
-            key=lambda c: (c["nao_lidas"] == 0, -(c["ultima_hora"].timestamp() if c["ultima_hora"] else 0))
-        )
-
-        col_lista, col_chat = st.columns([1, 2])
-
-        with col_lista:
-            st.markdown("**Conversas**")
-            labels, mapa = [], {}
-            for c in conversas:
-                login_m = c["motorista"]
-                info    = info_motoristas.get(login_m, {})
-                nome_m  = info.get("nome") or login_m
-                badge   = f" 🔴 {c['nao_lidas']}" if c["nao_lidas"] else ""
-                label   = f"{nome_m}{badge}"
-                labels.append(label)
-                mapa[label] = login_m
-            escolha = st.radio("Motorista", labels, label_visibility="collapsed", key="chat_lista_motoristas")
-            motorista_sel = mapa.get(escolha)
-
-        with col_chat:
-            if motorista_sel:
-                info    = info_motoristas.get(motorista_sel, {})
-                nome_m  = info.get("nome") or motorista_sel
-                placa_m = info.get("placa") or "—"
-
-                hc1, hc2 = st.columns([3, 1])
-                with hc1:
-                    st.markdown(f"**🚚 {nome_m}** · placa `{placa_m}` · login `{motorista_sel}`")
-                with hc2:
-                    if _RESUMO_ENTREGAS_OK:
-                        with st.popover("📦 Entregas hoje", use_container_width=True):
-                            total, concl, pend, falhas = _resumo_entregas_hoje(motorista_sel)
-                            st.markdown(f"**{nome_m}** — {datetime.now(BRT).strftime('%d/%m/%Y')}")
-                            if total == 0:
-                                st.caption("Nenhuma entrega atribuída a esse motorista hoje.")
-                            else:
-                                st.markdown(
-                                    f"📦 Total: **{total}**  \n"
-                                    f"✅ Concluídas: **{concl}**  \n"
-                                    f"⏳ Pendentes: **{pend}**  \n"
-                                    f"❌ Falhas: **{falhas}**"
-                                )
-                    else:
-                        st.caption("Resumo indisponível")
-
-                marcar_mensagens_lidas(motorista_sel, "motorista")
-                msgs = obter_mensagens_chat(motorista_sel)
-                with st.container(height=380, border=True):
-                    if not msgs:
-                        st.caption("Sem mensagens ainda nesta conversa.")
-                    for m in msgs:
-                        quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
-                        st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
-                txt = st.chat_input(f"Responder para {nome_m}...", key="chat_input_adm")
-                if txt:
-                    enviar_mensagem_chat(motorista_sel, usuario, txt, "adm")
-                    st.rerun()
+        aba_atend, aba_hist = st.tabs(["💬 Atendimento", "📜 Histórico"])
+        with aba_atend:
+            _render_atendimento(usuario, motoristas, info_motoristas)
+        with aba_hist:
+            _render_historico(motoristas, info_motoristas)
 
     else:
-        # visão do motorista
-        st.subheader("💬 Falar com o Suporte")
-        online = listar_admins_online()
-        if online:
-            st.success("🟢 Online agora: " + ", ".join(a["nome"] for a in online))
-        else:
-            st.warning("🟡 Nenhum ADM online no momento — sua mensagem será respondida assim que possível.")
-
-        marcar_mensagens_lidas(usuario, "adm")
-        msgs = obter_mensagens_chat(usuario)
-        with st.container(height=420, border=True):
-            if not msgs:
-                st.caption("Nenhuma mensagem ainda. Envie sua dúvida abaixo.")
-            for m in msgs:
-                quem = "🚚 Você" if m["remetente_tipo"] == "motorista" else f"🛠️ {m['remetente']}"
-                st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
-
-        txt = st.chat_input("Digite sua mensagem...", key="chat_input_motorista")
-        if txt:
-            enviar_mensagem_chat(usuario, usuario, txt, "motorista")
-            st.rerun()
+        _render_chat_motorista(usuario)
 
     # Polling leve — mesmo padrão que você já usa no módulo de rastreio
     try:
         from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=4000, key="chat_auto_refresh")
+        st_autorefresh(interval=2000, key="chat_auto_refresh")
     except Exception:
         pass
