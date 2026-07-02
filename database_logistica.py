@@ -44,18 +44,17 @@ def salvar_entregas_db(entregas: list, data_alvo: str) -> int:
     return count
 
 
-def dar_baixa_entrega_db(doc_id: str, status: str, foto_bytes: bytes, observacao: str = ""):
+def dar_baixa_entrega_db(doc_id: str, status: str, foto_bytes: bytes = None, observacao: str = ""):
     """
-    Registra a baixa de uma entrega feita pelo motorista, com FOTO OBRIGATÓRIA.
+    Registra a baixa de uma entrega feita pelo motorista. A foto é OPCIONAL —
+    se enviada, fica salva; se não, a baixa é registrada normalmente sem foto.
     status: "sucesso" ou "falha".
     Retorna (True, msg) em caso de sucesso, ou (False, msg_erro).
     """
-    if not foto_bytes:
-        return False, "📸 A foto é obrigatória para dar baixa na entrega."
-
-    tamanho_mb = len(foto_bytes) / (1024 * 1024)
-    if tamanho_mb > 4.0:
-        return False, f"Foto muito grande ({tamanho_mb:.1f}MB) — tire a foto novamente."
+    if foto_bytes:
+        tamanho_mb = len(foto_bytes) / (1024 * 1024)
+        if tamanho_mb > 4.0:
+            return False, f"Foto muito grande ({tamanho_mb:.1f}MB) — tire a foto novamente."
 
     db = get_db()
     ref = db.collection("entregas").document(doc_id)
@@ -81,12 +80,13 @@ def dar_baixa_entrega_db(doc_id: str, status: str, foto_bytes: bytes, observacao
 
     ref.update(campos)
 
-    db.collection("fotos_entrega").document(doc_id).set({
-        "entrega_id": doc_id,
-        "bin": foto_bytes,
-        "status": status,
-        "data": agora.strftime("%d/%m/%Y %H:%M"),
-    })
+    if foto_bytes:
+        db.collection("fotos_entrega").document(doc_id).set({
+            "entrega_id": doc_id,
+            "bin": foto_bytes,
+            "status": status,
+            "data": agora.strftime("%d/%m/%Y %H:%M"),
+        })
 
     return True, "✅ Baixa registrada com sucesso!"
 
@@ -95,3 +95,38 @@ def obter_foto_entrega_db(doc_id: str):
     """Retorna os bytes da foto de uma entrega, ou None se não houver."""
     doc = get_db().collection("fotos_entrega").document(doc_id).get()
     return doc.to_dict().get("bin") if doc.exists else None
+
+
+def buscar_entregas_por_codigo_db(termo: str, limite: int = 200) -> list:
+    """
+    Busca entregas em TODO o histórico (todas as datas já importadas) cujo
+    código do cliente contenha o termo buscado — busca parcial, sem
+    diferenciar maiúsculas/minúsculas.
+
+    Só encontra entregas que tenham o campo 'cliente_codigo' preenchido
+    (ou seja, importadas com a coluna de código mapeada no upload).
+
+    Aviso de performance: isso varre a coleção 'entregas' inteira e filtra
+    no Python (Firestore não tem busca parcial de texto nativa) — é o mesmo
+    padrão já usado em outras buscas do sistema (Rastreio, Tickets). Para
+    volumes muito grandes de entregas seria melhor um índice de busca
+    dedicado, mas isso é assunto para quando o volume justificar.
+    """
+    termo_norm = (termo or "").strip().lower()
+    if not termo_norm:
+        return []
+
+    db = get_db()
+    resultados = []
+    for doc in db.collection("entregas").stream():
+        dados = doc.to_dict() or {}
+        item = dados.get("payload", dados)
+        codigo = str(item.get("cliente_codigo", "") or "").strip().lower()
+        if termo_norm in codigo:
+            resultado = dict(item)
+            resultado["_doc_id"] = doc.id
+            resultado.setdefault("data_entrega", dados.get("data_entrega", ""))
+            resultados.append(resultado)
+            if len(resultados) >= limite:
+                break
+    return resultados
