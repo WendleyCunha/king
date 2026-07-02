@@ -7,7 +7,22 @@ import streamlit as st
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database import (obter_vinculo_db, salvar_vinculo_db, deletar_rota_db,
                       pode_editar, pode_deletar, obter_tickets_db,
-                      criar_usuario, listar_usuarios)
+                      criar_usuario, listar_usuarios, deletar_usuario,
+                      redefinir_senha_usuario)
+
+# Import isolado: se o seu database.py ainda não tiver a função
+# atualizar_dados_usuario (nova, usada para editar nome/placa do motorista),
+# a edição fica indisponível com um aviso, em vez de derrubar o Rastreio inteiro.
+try:
+    from database import atualizar_dados_usuario
+    _EDICAO_MOTORISTA_OK = True
+except Exception:
+    _EDICAO_MOTORISTA_OK = False
+    def atualizar_dados_usuario(*args, **kwargs):
+        raise RuntimeError(
+            "atualizar_dados_usuario não existe ainda no seu database.py. "
+            "Peça a função nova pro assistente e cole no database.py."
+        )
 
 # Import isolado: se o database_logistica.py tiver qualquer problema
 # (arquivo não subiu, erro de sintaxe, etc.), o Rastreio inteiro continua
@@ -390,11 +405,56 @@ def _aba_cadastros(datas_db):
         if not motoristas:
             st.caption("Nenhum motorista cadastrado ainda.")
         else:
-            st.dataframe(pd.DataFrame([{
-                "Nome": m.get("nome", "—"),
-                "Login": m.get("usuario", "—"),
-                "Placa": m.get("placa", "—"),
-            } for m in motoristas]), use_container_width=True, hide_index=True)
+            for m in motoristas:
+                login_m = m.get("usuario", "—")
+                with st.expander(
+                    f"🧑‍✈️ **{m.get('nome','—')}** · `{login_m}` · placa {m.get('placa') or '—'}"
+                ):
+                    st.markdown("**✏️ Editar dados**")
+                    ec1, ec2 = st.columns(2)
+                    novo_nome  = ec1.text_input("Nome", value=m.get("nome", ""), key=f"ed_nome_{login_m}")
+                    nova_placa = ec2.text_input("Placa", value=m.get("placa", ""), key=f"ed_placa_{login_m}")
+                    if st.button("💾 Salvar dados", key=f"ed_salvar_{login_m}"):
+                        if not _EDICAO_MOTORISTA_OK:
+                            st.error(
+                                "Função de edição indisponível — falta adicionar "
+                                "`atualizar_dados_usuario` no seu database.py (veja instruções abaixo do código)."
+                            )
+                        else:
+                            try:
+                                atualizar_dados_usuario(login_m, nome=novo_nome, placa=nova_placa)
+                                # mantém o nome exibido no Dashboard/cards sincronizado
+                                salvar_vinculo_db(login_m, novo_nome)
+                                st.success("Dados atualizados!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Não consegui salvar: {e}")
+
+                    st.markdown("---")
+                    st.markdown("**🔑 Redefinir senha**")
+                    sc1, sc2 = st.columns([3, 1])
+                    nova_senha = sc1.text_input(
+                        "Nova senha", type="password", key=f"ed_senha_{login_m}",
+                        label_visibility="collapsed", placeholder="Nova senha (mín. 6 caracteres)"
+                    )
+                    if sc2.button("Redefinir", key=f"ed_btn_senha_{login_m}", use_container_width=True):
+                        if not nova_senha or len(nova_senha) < 6:
+                            st.warning("A senha deve ter pelo menos 6 caracteres.")
+                        else:
+                            ok, msg = redefinir_senha_usuario(login_m, nova_senha)
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                time.sleep(1)
+                                st.rerun()
+
+                    st.markdown("---")
+                    if st.checkbox("Liberar exclusão deste motorista", key=f"ed_chk_del_{login_m}"):
+                        if st.button("🗑️ Excluir motorista", key=f"ed_del_{login_m}"):
+                            deletar_usuario(login_m)
+                            st.success("Motorista excluído.")
+                            time.sleep(1)
+                            st.rerun()
 
     except Exception as e:
         st.error(f"⚠️ A aba de Cadastros encontrou um erro e foi interrompida, "
