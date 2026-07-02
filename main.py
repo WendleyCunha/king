@@ -313,25 +313,18 @@ with st.sidebar:
 
     for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
         if key not in mods: continue
+        lbl = label
+        # Chat agora vive dentro do Rastreio (aba ao lado de Cadastros) —
+        # o badge de mensagens pendentes aparece aqui, no botão Rastreio.
+        if key == "rastreio" and papel in ("adm", "supervisor"):
+            _pend_nav = _total_chat_pendentes()
+            if _pend_nav:
+                lbl = f"{label} 💬 🔴 {_pend_nav}"
         ativo = st.session_state.modulo_ativo == key
-        if st.button(label, key=f"nav_{key}", use_container_width=True,
+        if st.button(lbl, key=f"nav_{key}", use_container_width=True,
                      type="primary" if ativo else "secondary"):
             st.session_state.modulo_ativo = key
             st.rerun()
-
-    # ── Chat: disponível para TODOS os papéis (não passa pelo sistema de "mods"),
-    # com badge de mensagens pendentes de motoristas para ADM/Supervisor ──
-    chat_label = "💬 Chat"
-    if papel in ("adm", "supervisor"):
-        _pend = _total_chat_pendentes()
-        if _pend:
-            chat_label = f"💬 Chat 🔴 {_pend}"
-
-    ativo_chat = st.session_state.modulo_ativo == "chat"
-    if st.button(chat_label, key="nav_chat", use_container_width=True,
-                 type="primary" if ativo_chat else "secondary"):
-        st.session_state.modulo_ativo = "chat"
-        st.rerun()
 
     if papel == "adm":
         ativo = st.session_state.modulo_ativo == "config"
@@ -400,12 +393,20 @@ if papel == "motorista" and modulo_ativo == "home":
     modulo_ativo = "rastreio"
     st.rerun()
 
-# ── NOTIFICAÇÃO DE CHAT NO PAINEL GERAL (visível em qualquer tela, exceto no próprio chat) ──
-if papel in ("adm", "supervisor") and modulo_ativo != "chat":
+# Chat deixou de ser um módulo próprio — agora é uma aba dentro do
+# Rastreio (ao lado de Cadastros). Sessões antigas que ainda apontem
+# pra "chat" são redirecionadas pra lá.
+if modulo_ativo == "chat":
+    st.session_state.modulo_ativo = "rastreio"
+    modulo_ativo = "rastreio"
+    st.rerun()
+
+# ── NOTIFICAÇÃO DE CHAT NO PAINEL GERAL (visível em qualquer tela, exceto dentro do Rastreio) ──
+if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
     _pend_geral = _total_chat_pendentes()
     if _pend_geral:
         st.info(f"💬 Você tem **{_pend_geral}** mensagem(ns) de motoristas aguardando resposta. "
-                f"Acesse o menu **Chat** na barra lateral para responder.")
+                f"Acesse **Rastreio → aba Chat** para responder.")
 
 # ── ROTEAMENTO ────────────────────────────────────────────────────
 if modulo_ativo == "home":
@@ -429,15 +430,6 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
     renderizar_cartas(papel, user)
-
-elif modulo_ativo == "chat":
-    try:
-        renderizar_chat(papel, user)
-    except Exception as _erro_chat_runtime:
-        st.error("⚠️ O Chat encontrou um problema e não pôde carregar agora. "
-                 "O restante do painel (Rastreio, Tickets, Cartas, Config) "
-                 "continua funcionando normalmente.")
-        st.code(f"{type(_erro_chat_runtime).__name__}: {_erro_chat_runtime}", language="text")
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
