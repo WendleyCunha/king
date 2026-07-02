@@ -270,11 +270,8 @@ if papel == "motorista":
     aba_entregas, aba_chat = st.tabs(["🚚 Minhas Entregas", "💬 Chat"])
     with aba_entregas:
         renderizar_rastreio(papel, user, datas_db=[], pode_exp=False)
-        try:
-            from streamlit_autorefresh import st_autorefresh
-            st_autorefresh(interval=20000, key="rastreio_auto_refresh_motorista")
-        except Exception:
-            pass
+        if st.button("🔄 Atualizar entregas", key="btn_refresh_rastreio_motorista", use_container_width=True):
+            st.rerun()
 
         # Nome do motorista + Sair ficam só aqui, no final da aba de entregas
         st.markdown("<hr style='margin:20px 0 14px;border:none;border-top:1px solid #eee;'>",
@@ -418,15 +415,14 @@ elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
     is_hoje = renderizar_rastreio(
         papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
     )
-    # Auto-refresh SEM recarregar a página (não derruba a sessão / não pede senha).
-    # Requer: streamlit-autorefresh no requirements.txt
+    # Atualização manual em vez de streamlit-autorefresh: esse componente
+    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
+    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
+    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
+    # manual é 100% seguro e não tem esse risco.
     if is_hoje:
-        try:
-            from streamlit_autorefresh import st_autorefresh
-            st_autorefresh(interval=20000, key="rastreio_auto_refresh")
-        except Exception:
-            # fallback: não usa <meta refresh> (que recarrega tudo e desloga)
-            pass
+        if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
+            st.rerun()
 
 elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
     renderizar_tickets(papel, user)
