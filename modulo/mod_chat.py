@@ -112,27 +112,58 @@ def _popover_entregas(login_motorista: str, nome_m: str):
         st.caption("Nenhum link de rastreio disponível ainda hoje para este motorista.")
 
 
-def _gerar_html_transcript(nome_m: str, login_m: str, msgs: list) -> bytes:
-    """Gera um HTML autônomo da conversa — abre no navegador e pode ser
-    impresso/salvo como PDF via Ctrl+P > Salvar como PDF."""
+def _filtrar_msgs_por_periodo(msgs: list, modo: str, dia=None, ano_mes=None) -> list:
+    """Filtra as mensagens de uma conversa por dia específico ou mês específico.
+    modo == 'Toda a conversa' não filtra nada."""
+    if modo == "Toda a conversa":
+        return msgs
+    filtradas = []
+    for m in msgs:
+        ts = m.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt_local = ts.astimezone(BRT)
+        except Exception:
+            continue
+        if modo == "Dia específico" and dia:
+            if dt_local.date() == dia:
+                filtradas.append(m)
+        elif modo == "Mês específico" and ano_mes:
+            if (dt_local.year, dt_local.month) == ano_mes:
+                filtradas.append(m)
+    return filtradas
+
+
+def _gerar_html_transcript(nome_m: str, login_m: str, msgs: list, rotulo_periodo: str = "") -> bytes:
+    """Gera um HTML autônomo da conversa (ou de um recorte dela) — abre no
+    navegador e pode ser impresso/salvo como PDF via Ctrl+P > Salvar como PDF."""
     linhas = []
     for m in msgs:
         quem = nome_m if m["remetente_tipo"] == "motorista" else m.get("remetente", "ADM")
         hora = _fmt_hora(m.get("timestamp"))
+        data_msg = ""
+        ts = m.get("timestamp")
+        if ts:
+            try:
+                data_msg = ts.astimezone(BRT).strftime("%d/%m/%Y")
+            except Exception:
+                pass
         texto = str(m.get("texto", "")).replace("<", "&lt;").replace(">", "&gt;")
         linhas.append(
             f'<div style="margin:8px 0;padding:8px 12px;border-left:3px solid #C9A84C;'
             f'background:#f8f9fa;border-radius:6px;"><b>{quem}</b> '
-            f'<span style="color:#888;font-size:0.8rem;">{hora}</span>'
+            f'<span style="color:#888;font-size:0.8rem;">{data_msg} {hora}</span>'
             f'<br>{texto}</div>'
         )
+    subtitulo_periodo = f" · Período: {rotulo_periodo}" if rotulo_periodo else ""
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Conversa - {nome_m}</title></head>
 <body style="font-family:Arial,sans-serif;max-width:700px;margin:20px auto;color:#2c3e50;">
 <h2 style="color:#C9A84C;">KingStar · Conversa com {nome_m}</h2>
-<p style="color:#888;">Login: {login_m} · Exportado em {datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}</p>
+<p style="color:#888;">Login: {login_m} · Exportado em {datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}{subtitulo_periodo}</p>
 <hr>
-{''.join(linhas) if linhas else '<p>Sem mensagens.</p>'}
+{''.join(linhas) if linhas else '<p>Nenhuma mensagem neste período.</p>'}
 </body></html>"""
     return html.encode("utf-8")
 
@@ -256,19 +287,44 @@ def _render_historico(motoristas: list, info_motoristas: dict):
             msgs = obter_mensagens_chat(login_m)
             if not msgs:
                 st.caption("Sem mensagens.")
-            else:
-                with st.container(height=280, border=True):
-                    for m in msgs:
-                        quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
-                        st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+                continue
 
-                html_bytes = _gerar_html_transcript(nome_m, login_m, msgs)
+            st.markdown("**📅 Período do download**")
+            modo_periodo = st.radio(
+                "Período", ["Toda a conversa", "Dia específico", "Mês específico"],
+                key=f"periodo_modo_{login_m}", horizontal=True, label_visibility="collapsed",
+            )
+
+            dia_sel, ano_mes_sel, rotulo_periodo, sufixo_arquivo = None, None, "", "completa"
+            if modo_periodo == "Dia específico":
+                dia_sel = st.date_input("Escolha o dia", key=f"periodo_dia_{login_m}")
+                rotulo_periodo = dia_sel.strftime("%d/%m/%Y")
+                sufixo_arquivo = dia_sel.strftime("%Y%m%d")
+            elif modo_periodo == "Mês específico":
+                mes_ref = st.date_input(
+                    "Escolha qualquer dia dentro do mês desejado", key=f"periodo_mes_{login_m}"
+                )
+                ano_mes_sel = (mes_ref.year, mes_ref.month)
+                rotulo_periodo = mes_ref.strftime("%m/%Y")
+                sufixo_arquivo = mes_ref.strftime("%Y%m")
+
+            msgs_filtradas = _filtrar_msgs_por_periodo(msgs, modo_periodo, dia_sel, ano_mes_sel)
+
+            with st.container(height=280, border=True):
+                if not msgs_filtradas:
+                    st.caption("Nenhuma mensagem no período selecionado.")
+                for m in msgs_filtradas:
+                    quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
+                    st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+
+            if msgs_filtradas:
+                html_bytes = _gerar_html_transcript(nome_m, login_m, msgs_filtradas, rotulo_periodo)
                 st.download_button(
-                    "📄 Baixar conversa (.html — abra e use Ctrl+P → Salvar como PDF)",
+                    "📄 Baixar este recorte (.html — abra e use Ctrl+P → Salvar como PDF)",
                     data=html_bytes,
-                    file_name=f"Conversa_{login_m}_{datetime.now(BRT).strftime('%Y%m%d')}.html",
+                    file_name=f"Conversa_{login_m}_{sufixo_arquivo}.html",
                     mime="text/html",
-                    key=f"dl_hist_{login_m}",
+                    key=f"dl_hist_{login_m}_{modo_periodo}_{sufixo_arquivo}",
                     use_container_width=True,
                 )
 
