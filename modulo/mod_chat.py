@@ -259,6 +259,17 @@ def _render_atendimento(usuario: str, motoristas: list, info_motoristas: dict):
             enviar_mensagem_chat(motorista_sel, usuario, txt, "adm")
             st.rerun()
 
+    st.markdown("---")
+    try:
+        import streamlit_autorefresh  # noqa: F401
+        st.caption("🔄 Atualização automática a cada 2s está ativa.")
+    except ImportError:
+        st.caption(
+            "⚠️ Atualização automática INDISPONÍVEL — adicione `streamlit-autorefresh` "
+            "ao seu `requirements.txt` e faça o deploy de novo. Sem isso, as mensagens "
+            "só aparecem quando a página é recarregada manualmente."
+        )
+
 
 # ── ABA: HISTÓRICO (conversas finalizadas, busca + exportação) ─────
 def _render_historico(motoristas: list, info_motoristas: dict):
@@ -337,16 +348,9 @@ def _render_historico(motoristas: list, info_motoristas: dict):
 
 # ── ABA: visão do motorista (falar com o suporte) ──────────────────
 def _render_chat_motorista(usuario: str):
-    st.subheader("💬 Falar com o Suporte")
-    online = listar_admins_online()
-    if online:
-        st.success("🟢 Online agora: " + ", ".join(a["nome"] for a in online))
-    else:
-        st.warning("🟡 Nenhum ADM online no momento — sua mensagem será respondida assim que possível.")
+    # Sem título, sem aviso de "ADM online/offline" — só a caixa de digitar
+    # (no topo) e a conversa, pra caber limpo no celular.
 
-    # Caixa de digitar NO TOPO (campo comum + botão, não o st.chat_input —
-    # esse último gruda sempre no rodapé da tela no Streamlit, então não
-    # serviria pra deixar no topo).
     with st.form("form_msg_motorista", clear_on_submit=True):
         col_txt, col_btn = st.columns([5, 1])
         txt = col_txt.text_input(
@@ -363,11 +367,11 @@ def _render_chat_motorista(usuario: str):
 
     marcar_mensagens_lidas(usuario, "adm")
     msgs = obter_mensagens_chat(usuario)
-    with st.container(height=420, border=True):
+    with st.container(height=400, border=True):
         if not msgs:
             st.caption("Nenhuma mensagem ainda. Envie sua dúvida acima.")
-        # Mais recentes primeiro (ordem invertida) — assim, ao abrir o chat,
-        # a última resposta do suporte já aparece sem precisar rolar.
+        # Mais recente primeiro — a última resposta já aparece no topo da
+        # caixa, sem precisar rolar nada.
         for m in reversed(msgs):
             quem = "🚚 Você" if m["remetente_tipo"] == "motorista" else f"🛠️ {m['remetente']}"
             st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
