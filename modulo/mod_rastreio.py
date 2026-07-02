@@ -202,8 +202,17 @@ def _conteudo_motorista(rota, df, data_consulta, user):
     if pode_deletar(user):
         if st.checkbox("Liberar exclusão desta rota", key=f"chk_{ch}"):
             if st.button("🗑️ Excluir Rota", key=f"delr_{ch}"):
-                deletar_rota_db(rota, data_consulta)
-                st.success("Excluído!"); time.sleep(.7); st.rerun()
+                try:
+                    deletar_rota_db(rota, data_consulta)
+                    st.success("Excluído!"); time.sleep(.7); st.rerun()
+                except Exception as e:
+                    st.error("⚠️ Não consegui excluir. Detalhe técnico abaixo:")
+                    st.code(f"{type(e).__name__}: {e}", language="text")
+                    st.caption(
+                        "Se a mensagem acima mencionar 'requires an index', abra o link "
+                        "que vem junto dela, clique em 'Criar índice' no Firebase, espere "
+                        "1-2 minutos ficar 'Ativado' e tente excluir de novo."
+                    )
 
     abas = st.tabs(["📋 Fila de Clientes", "⚠️ Ocorrências", "📱 Notificados"])
 
@@ -580,33 +589,56 @@ def _visualizacao_motorista(user):
     falhas = int((df["_status_visual"] == "❌ Falhou").sum())
     pend   = total - concl - falhas
 
-    st.markdown(_html(f"""
-    <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
-        <div class="kpi-card gold" style="flex:1;min-width:80px;">
-            <div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div>
-        </div>
-        <div class="kpi-card blue" style="flex:1;min-width:80px;">
-            <div class="kpi-label">✅ Feitas</div><div class="kpi-value">{concl}</div>
-        </div>
-        <div class="kpi-card gray" style="flex:1;min-width:80px;">
-            <div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pend}</div>
-        </div>
-        <div class="kpi-card red" style="flex:1;min-width:80px;">
-            <div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhas}</div>
-        </div>
-    </div>
-    """), unsafe_allow_html=True)
+    if "motorista_kpi_filtro" not in st.session_state:
+        st.session_state.motorista_kpi_filtro = "todos"
+    filtro = st.session_state.motorista_kpi_filtro
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        if st.button(f"📦 Total\n{total}", key="kpi_mot_total", use_container_width=True,
+                     type="primary" if filtro == "todos" else "secondary"):
+            st.session_state.motorista_kpi_filtro = "todos"
+            st.rerun()
+    with k2:
+        if st.button(f"✅ Feitas\n{concl}", key="kpi_mot_feitas", use_container_width=True,
+                     type="primary" if filtro == "feitas" else "secondary"):
+            st.session_state.motorista_kpi_filtro = "feitas"
+            st.rerun()
+    with k3:
+        if st.button(f"⏳ Pendentes\n{pend}", key="kpi_mot_pendentes", use_container_width=True,
+                     type="primary" if filtro == "pendentes" else "secondary"):
+            st.session_state.motorista_kpi_filtro = "pendentes"
+            st.rerun()
+    with k4:
+        if st.button(f"❌ Falhas\n{falhas}", key="kpi_mot_falhas", use_container_width=True,
+                     type="primary" if filtro == "falhas" else "secondary"):
+            st.session_state.motorista_kpi_filtro = "falhas"
+            st.rerun()
 
     if not _LOGISTICA_OK:
         st.warning("⚠️ A confirmação de entrega com foto está indisponível no momento "
                    "(módulo de logística não carregado). Fale com o administrador.")
 
+    # Filtra a LISTA (os KPIs acima continuam mostrando os totais reais,
+    # sem filtro, pra você sempre saber o panorama completo do dia)
+    if filtro == "feitas":
+        df_lista = df[df["_status_visual"] == "✅ Sucesso"]
+    elif filtro == "pendentes":
+        df_lista = df[df["_status_visual"] == "⏳ Pendente"]
+    elif filtro == "falhas":
+        df_lista = df[df["_status_visual"] == "❌ Falhou"]
+    else:
+        df_lista = df
+
     try:
-        df = df.sort_values(by="order", key=lambda s: pd.to_numeric(s, errors="coerce"))
+        df_lista = df_lista.sort_values(by="order", key=lambda s: pd.to_numeric(s, errors="coerce"))
     except Exception:
         pass
 
-    for _, row in df.iterrows():
+    if df_lista.empty:
+        st.info("Nenhuma entrega nesse filtro.")
+
+    for _, row in df_lista.iterrows():
         status = row.get("_status_visual", "⏳ Pendente")
         cor = {"✅ Sucesso": "tb", "❌ Falhou": "tr"}.get(status, "tg")
         doc_id = row.get("_doc_id")
