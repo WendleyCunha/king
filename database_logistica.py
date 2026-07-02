@@ -1,15 +1,16 @@
 """
 database_logistica.py
 Funções de banco exclusivas da logística de entregas (upload de planilha
-roteirizada) — separadas do database.py principal pelo mesmo motivo do
-database_chat.py: isolar uma área de negócio específica do restante do
-sistema (usuários, tickets, cartas, RH, etc.), sem duplicar a conexão.
+roteirizada + baixa de entrega com foto obrigatória) — separadas do
+database.py principal pelo mesmo motivo do database_chat.py: isolar uma
+área de negócio específica do restante do sistema.
 
 Reaproveita a mesma conexão Firestore (banco "portal") via get_db(),
 que já vive no database.py.
 """
 
-from database import get_db
+from database import get_db, BRT
+from datetime import datetime
 
 
 def salvar_entregas_db(entregas: list, data_alvo: str) -> int:
@@ -41,3 +42,56 @@ def salvar_entregas_db(entregas: list, data_alvo: str) -> int:
             batch = db.batch()
     batch.commit()
     return count
+
+
+def dar_baixa_entrega_db(doc_id: str, status: str, foto_bytes: bytes, observacao: str = ""):
+    """
+    Registra a baixa de uma entrega feita pelo motorista, com FOTO OBRIGATÓRIA.
+    status: "sucesso" ou "falha".
+    Retorna (True, msg) em caso de sucesso, ou (False, msg_erro).
+    """
+    if not foto_bytes:
+        return False, "📸 A foto é obrigatória para dar baixa na entrega."
+
+    tamanho_mb = len(foto_bytes) / (1024 * 1024)
+    if tamanho_mb > 4.0:
+        return False, f"Foto muito grande ({tamanho_mb:.1f}MB) — tire a foto novamente."
+
+    db = get_db()
+    ref = db.collection("entregas").document(doc_id)
+    doc_atual = ref.get()
+    if not doc_atual.exists:
+        return False, "Entrega não encontrada."
+
+    agora = datetime.now(BRT)
+    status_visual = "✅ Sucesso" if status == "sucesso" else "❌ Falhou"
+    campos = {
+        "_status_visual": status_visual,
+        "checkout_time": agora.isoformat(),
+        "checkout_observation": observacao.strip() if observacao and observacao.strip()
+                                 else ("Entrega realizada" if status == "sucesso" else "Falha na entrega"),
+    }
+
+    # Compatibilidade: se a entrega foi salva com um wrapper "payload"
+    # (formato antigo/externo), atualiza os campos DENTRO do payload;
+    # senão, atualiza direto na raiz do documento (formato do upload manual).
+    dados_doc = doc_atual.to_dict() or {}
+    if "payload" in dados_doc:
+        campos = {f"payload.{k}": v for k, v in campos.items()}
+
+    ref.update(campos)
+
+    db.collection("fotos_entrega").document(doc_id).set({
+        "entrega_id": doc_id,
+        "bin": foto_bytes,
+        "status": status,
+        "data": agora.strftime("%d/%m/%Y %H:%M"),
+    })
+
+    return True, "✅ Baixa registrada com sucesso!"
+
+
+def obter_foto_entrega_db(doc_id: str):
+    """Retorna os bytes da foto de uma entrega, ou None se não houver."""
+    doc = get_db().collection("fotos_entrega").document(doc_id).get()
+    return doc.to_dict().get("bin") if doc.exists else None
