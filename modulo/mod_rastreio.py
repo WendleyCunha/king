@@ -26,10 +26,12 @@ except Exception:
 
 # Import isolado: se o database_logistica.py tiver qualquer problema
 # (arquivo não subiu, erro de sintaxe, etc.), o Rastreio inteiro continua
-# funcionando normalmente — só a aba de Cadastros/Upload fica indisponível
-# com um aviso, em vez de derrubar o Dashboard e a Exportação.
+# funcionando normalmente — só a aba de Cadastros/Upload e a baixa de
+# entrega com foto ficam indisponíveis, com um aviso, em vez de derrubar
+# o Dashboard e a Exportação.
 try:
-    from database_logistica import salvar_entregas_db
+    from database_logistica import salvar_entregas_db, dar_baixa_entrega_db
+    from database import obter_tickets_com_id_db
     _LOGISTICA_OK = True
     _erro_import_logistica_msg = ""
 except Exception as _erro_import_logistica:
@@ -39,6 +41,10 @@ except Exception as _erro_import_logistica:
         raise RuntimeError(
             f"database_logistica.py não carregou corretamente: {_erro_import_logistica}"
         )
+    def dar_baixa_entrega_db(*args, **kwargs):
+        return False, "Função de baixa indisponível — atualize o database.py/database_logistica.py."
+    def obter_tickets_com_id_db(data_alvo):
+        return obter_tickets_db(data_alvo)  # fallback sem _doc_id (sem dar baixa)
 
 BRT           = timezone(timedelta(hours=-3))
 TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/tracking/"
@@ -468,7 +474,7 @@ def _visualizacao_motorista(user):
     hoje = datetime.now(BRT).date().isoformat()
     minha_chave = user.get("usuario", "")
 
-    tickets_raw = obter_tickets_db(hoje)
+    tickets_raw = obter_tickets_com_id_db(hoje) if _LOGISTICA_OK else obter_tickets_db(hoje)
     df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
 
     if df.empty:
@@ -505,6 +511,10 @@ def _visualizacao_motorista(user):
     </div>
     """), unsafe_allow_html=True)
 
+    if not _LOGISTICA_OK:
+        st.warning("⚠️ A confirmação de entrega com foto está indisponível no momento "
+                   "(módulo de logística não carregado). Fale com o administrador.")
+
     try:
         df = df.sort_values(by="order", key=lambda s: pd.to_numeric(s, errors="coerce"))
     except Exception:
@@ -513,6 +523,8 @@ def _visualizacao_motorista(user):
     for _, row in df.iterrows():
         status = row.get("_status_visual", "⏳ Pendente")
         cor = {"✅ Sucesso": "tb", "❌ Falhou": "tr"}.get(status, "tg")
+        doc_id = row.get("_doc_id")
+
         st.markdown(_html(f"""
         <div class="driver-card">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
@@ -523,6 +535,39 @@ def _visualizacao_motorista(user):
             <div style="font-size:0.82rem;color:#64778d;">📞 {esc(row.get('contact_phone','—'))}</div>
         </div>
         """), unsafe_allow_html=True)
+
+        # ── Dar baixa (só entregas pendentes, exige foto) ────────────
+        if status == "⏳ Pendente":
+            if not (_LOGISTICA_OK and doc_id):
+                st.caption("⚠️ Não é possível dar baixa nesta entrega agora.")
+            else:
+                with st.popover(f"📸 Dar baixa — #{row.get('order','—')}", use_container_width=True):
+                    st.caption("A foto é **obrigatória** — não é possível confirmar sucesso "
+                               "ou registrar falha sem tirar a foto no ato da entrega.")
+                    foto = st.camera_input("Tire a foto agora", key=f"foto_{doc_id}")
+                    resultado = st.radio(
+                        "Resultado da entrega", ["✅ Sucesso", "❌ Falha"],
+                        key=f"result_{doc_id}", horizontal=True,
+                    )
+                    motivo = ""
+                    if resultado == "❌ Falha":
+                        motivo = st.text_input(
+                            "Motivo da falha *", key=f"motivo_{doc_id}",
+                            placeholder="Ex: Cliente ausente, endereço não encontrado...",
+                        )
+                    if st.button("Confirmar baixa", key=f"confirmar_{doc_id}",
+                                 type="primary", use_container_width=True):
+                        if foto is None:
+                            st.error("📸 Tire a foto antes de confirmar — ela é obrigatória.")
+                        elif resultado == "❌ Falha" and not motivo.strip():
+                            st.warning("Descreva o motivo da falha antes de confirmar.")
+                        else:
+                            status_db = "sucesso" if resultado == "✅ Sucesso" else "falha"
+                            ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto.getvalue(), motivo)
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                time.sleep(1)
+                                st.rerun()
 
 
 # ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
