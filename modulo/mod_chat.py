@@ -344,19 +344,33 @@ def _render_chat_motorista(usuario: str):
     else:
         st.warning("🟡 Nenhum ADM online no momento — sua mensagem será respondida assim que possível.")
 
+    # Caixa de digitar NO TOPO (campo comum + botão, não o st.chat_input —
+    # esse último gruda sempre no rodapé da tela no Streamlit, então não
+    # serviria pra deixar no topo).
+    with st.form("form_msg_motorista", clear_on_submit=True):
+        col_txt, col_btn = st.columns([5, 1])
+        txt = col_txt.text_input(
+            "Mensagem", label_visibility="collapsed",
+            placeholder="Digite sua mensagem...", key="chat_input_motorista_txt",
+        )
+        enviar = col_btn.form_submit_button("Enviar", type="primary", use_container_width=True)
+        if enviar:
+            if txt.strip():
+                enviar_mensagem_chat(usuario, usuario, txt.strip(), "motorista")
+                st.rerun()
+            else:
+                st.warning("Escreva uma mensagem antes de enviar.")
+
     marcar_mensagens_lidas(usuario, "adm")
     msgs = obter_mensagens_chat(usuario)
     with st.container(height=420, border=True):
         if not msgs:
-            st.caption("Nenhuma mensagem ainda. Envie sua dúvida abaixo.")
-        for m in msgs:
+            st.caption("Nenhuma mensagem ainda. Envie sua dúvida acima.")
+        # Mais recentes primeiro (ordem invertida) — assim, ao abrir o chat,
+        # a última resposta do suporte já aparece sem precisar rolar.
+        for m in reversed(msgs):
             quem = "🚚 Você" if m["remetente_tipo"] == "motorista" else f"🛠️ {m['remetente']}"
             st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
-
-    txt = st.chat_input("Digite sua mensagem...", key="chat_input_motorista")
-    if txt:
-        enviar_mensagem_chat(usuario, usuario, txt, "motorista")
-        st.rerun()
 
 
 # ── FUNÇÃO PRINCIPAL ────────────────────────────────────────────────
