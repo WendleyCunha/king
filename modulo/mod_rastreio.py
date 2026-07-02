@@ -1,4 +1,4 @@
-import sys, os, io, time
+import sys, os, io, time, re
 import html as _h
 from datetime import datetime, timezone, timedelta
 import pandas as pd
@@ -73,6 +73,12 @@ def formatar_data(v):
 def extrair_chave(rota):
     if not rota: return "SEM_ROTA"
     return rota.split(" - ",1)[1].strip() if " - " in rota else rota.strip()
+
+def _normalizar_placa(s) -> str:
+    """Deixa só letras e números maiúsculos — assim 'PVC-7G92', 'pvc7g92' e
+    'PVC 7G92' são todos reconhecidos como a mesma placa na hora de casar
+    com o cadastro do motorista."""
+    return re.sub(r'[^A-Z0-9]', '', str(s or '').upper())
 
 def nome_motorista(rota):
     return obter_vinculo_db(extrair_chave(rota))
@@ -338,23 +344,100 @@ def _aba_cadastros(datas_db):
                     col_ordem    = mc4.selectbox("Ordem (opcional)", ["—"] + colunas, key="map_ordem")
 
                     opcoes_mot = {f"{m['nome']} ({m['usuario']})": m["usuario"] for m in motoristas}
-                    escolha_mot = st.selectbox(
-                        "Todas as linhas desta planilha pertencem a qual motorista?",
-                        list(opcoes_mot.keys()), key="map_motorista"
+
+                    st.markdown("---")
+                    modo_atrib = st.radio(
+                        "Como identificar o motorista de cada entrega?",
+                        ["🚗 Por placa/veículo (a planilha tem várias rotas/motoristas juntos)",
+                         "👤 Um único motorista para toda a planilha"],
+                        key="modo_atrib_upload",
                     )
-                    st.caption("Se a planilha já tiver uma coluna com o motorista de cada linha, "
-                               "me avise depois que eu adiciono a opção de mapear por linha em vez de tudo de uma vez.")
 
-                    if st.button("📥 Importar", type="primary", key="btn_importar_planilha"):
+                    login_por_linha = None   # função/dict que resolve o login por linha, quando modo = placa
+                    login_unico = None       # login fixo, quando modo = motorista único
+                    pronto_para_importar = True
+
+                    if modo_atrib.startswith("🚗"):
+                        col_placa = st.selectbox("Coluna com a placa/veículo", colunas, key="map_placa")
+
+                        # placas cadastradas -> login do motorista
+                        placas_cadastradas = {}
+                        for m in motoristas:
+                            p = _normalizar_placa(m.get("placa", ""))
+                            if p:
+                                placas_cadastradas[p] = m["usuario"]
+
+                        placas_planilha = sorted({
+                            str(v).strip() for v in df_up[col_placa].dropna().unique() if str(v).strip()
+                        })
+
+                        mapa_placa_login = {}   # placa_normalizada -> login (auto ou manual)
+                        nao_identificadas = []
+
+                        for placa_orig in placas_planilha:
+                            placa_norm = _normalizar_placa(placa_orig)
+                            login_auto = placas_cadastradas.get(placa_norm)
+                            if login_auto:
+                                mapa_placa_login[placa_norm] = login_auto
+                            else:
+                                nao_identificadas.append(placa_orig)
+
+                        st.markdown(
+                            f"🔎 **{len(placas_planilha)}** placa(s) na planilha · "
+                            f"✅ **{len(placas_planilha) - len(nao_identificadas)}** identificada(s) automaticamente · "
+                            f"⚠️ **{len(nao_identificadas)}** precisam de atribuição manual"
+                        )
+
+                        if mapa_placa_login:
+                            with st.expander("✅ Placas identificadas automaticamente", expanded=False):
+                                for placa_norm, login in mapa_placa_login.items():
+                                    nome_m = next((m["nome"] for m in motoristas if m["usuario"] == login), login)
+                                    st.caption(f"`{placa_norm}` → {nome_m} ({login})")
+
+                        if nao_identificadas:
+                            st.markdown("**⚠️ Atribua manualmente as placas não identificadas:**")
+                            for placa_orig in nao_identificadas:
+                                escolha_manual = st.selectbox(
+                                    f"Placa `{placa_orig}` pertence a:",
+                                    ["— Selecione —"] + list(opcoes_mot.keys()),
+                                    key=f"map_placa_manual_{_normalizar_placa(placa_orig)}",
+                                )
+                                if escolha_manual != "— Selecione —":
+                                    mapa_placa_login[_normalizar_placa(placa_orig)] = opcoes_mot[escolha_manual]
+                                else:
+                                    pronto_para_importar = False
+
+                        login_por_linha = lambda valor_placa: mapa_placa_login.get(_normalizar_placa(valor_placa))
+
+                    else:
+                        escolha_mot = st.selectbox(
+                            "Todas as linhas desta planilha pertencem a qual motorista?",
+                            list(opcoes_mot.keys()), key="map_motorista",
+                        )
+                        login_unico = opcoes_mot[escolha_mot]
+
+                    if not pronto_para_importar:
+                        st.warning("Atribua um motorista para TODAS as placas não identificadas antes de importar.")
+
+                    if st.button("📥 Importar", type="primary", key="btn_importar_planilha",
+                                 disabled=not pronto_para_importar):
                         try:
-                            login_mot = opcoes_mot[escolha_mot]
-                            route_val = f"Rota - {login_mot}"
-                            data_str  = data_entrega.isoformat()
-
+                            data_str = data_entrega.isoformat()
                             entregas = []
+                            sem_motorista = 0
+
                             for i, row in df_up.iterrows():
+                                if login_por_linha is not None:
+                                    login_linha = login_por_linha(row.get(col_placa, ""))
+                                else:
+                                    login_linha = login_unico
+
+                                if not login_linha:
+                                    sem_motorista += 1
+                                    continue  # linha com placa sem motorista resolvido — pula
+
                                 entregas.append({
-                                    "route": route_val,
+                                    "route": f"Rota - {login_linha}",
                                     "title": str(row.get(col_cliente, "—")),
                                     "address": str(row.get(col_endereco, "—")),
                                     "contact_phone": str(row.get(col_telefone, "—")) if col_telefone != "—" else "—",
@@ -363,8 +446,9 @@ def _aba_cadastros(datas_db):
                                 })
 
                             qtd = salvar_entregas_db(entregas, data_str)
-                            st.success(f"✅ {qtd} entregas importadas para {data_str}, atribuídas a {escolha_mot}.")
-                            time.sleep(1)
+                            msg_extra = f" ({sem_motorista} linha(s) pulada(s) sem motorista)" if sem_motorista else ""
+                            st.success(f"✅ {qtd} entregas importadas para {data_str}{msg_extra}.")
+                            time.sleep(1.2)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Não consegui importar a planilha: {e}")
