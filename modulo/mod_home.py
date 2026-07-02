@@ -15,6 +15,25 @@ from database import (
     criar_registro_diario_db, listar_diario_bordo_db, deletar_registro_diario_db,
 )
 
+# Import isolado: se o seu database.py ainda não tiver as 3 funções novas
+# do cronômetro (iniciar/finalizar/obter atividade em andamento), o Meu Dia
+# continua funcionando normalmente — só o cronômetro fica indisponível com
+# um aviso, em vez de derrubar a tela inteira.
+try:
+    from database import (
+        iniciar_atividade_diario_db, finalizar_atividade_diario_db,
+        obter_atividade_em_andamento_db,
+    )
+    _CRONOMETRO_OK = True
+except Exception:
+    _CRONOMETRO_OK = False
+    def iniciar_atividade_diario_db(*a, **k):
+        raise RuntimeError("Cronômetro indisponível — faltam funções novas no database.py.")
+    def finalizar_atividade_diario_db(*a, **k):
+        return False, "Cronômetro indisponível — faltam funções novas no database.py."
+    def obter_atividade_em_andamento_db(*a, **k):
+        return None
+
 BRT = timezone(timedelta(hours=-3))
 
 PAPEIS_RACI = ["", "R", "A", "C", "I"]
@@ -37,6 +56,8 @@ _CSS_HOME = """
 .home-origem { font-size:0.72rem; color:#64778d; }
 .home-motivo { font-size:0.75rem; color:#a93226; background:rgba(231,76,60,.08);
     border-radius:6px; padding:4px 8px; margin-top:4px; display:inline-block; }
+.home-execucao { font-size:0.75rem; color:#7a5f1a; background:rgba(201,168,76,.12);
+    border-radius:6px; padding:4px 8px; margin-top:4px; display:inline-block; }
 .ponto-regua { width: 30px; height: 30px; border-radius: 50%; background: #e2e8f0;
     display: flex; align-items: center; justify-content: center; font-weight: bold;
     color: #64778d; margin: 0 auto; border: 2px solid #cbd5e1; font-size: 12px; }
@@ -50,6 +71,10 @@ _CSS_HOME = """
 
 
 # ─── Helpers ──────────────────────────────────────────────────────
+def _html(s: str) -> str:
+    return "\n".join(linha.lstrip() for linha in s.splitlines())
+
+
 def _parse_data(s):
     if not s:
         return None
@@ -61,6 +86,19 @@ def _parse_data(s):
     return None
 
 
+def _formatar_duracao(segundos):
+    if not segundos:
+        return "—"
+    segundos = int(segundos)
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 def _salvar(projeto):
     atualizar_raci_projeto_db(
         projeto["id"],
@@ -70,6 +108,136 @@ def _salvar(projeto):
         pastas_virtuais=projeto.get("pastas_virtuais", {}),
         etapa_atual=projeto.get("etapa_atual", 0),
     )
+
+
+# ─── Cronômetro (compartilhado entre "Meu Dia" e "Diário de Bordo") ──
+def _widget_cronometro(uname, key_prefix="", autorefresh=True):
+    """
+    Mostra a atividade em andamento com cronômetro ao vivo + botão Finalizar,
+    ou o campo para iniciar uma nova, se não houver nenhuma rodando agora.
+    Só existe UMA atividade em andamento por vez (regra simples: você só
+    trabalha em uma coisa de cada vez, o cronômetro reflete isso).
+    """
+    if not _CRONOMETRO_OK:
+        st.warning("⚠️ Cronômetro indisponível no momento — peça para atualizar o database.py.")
+        return
+
+    atual = obter_atividade_em_andamento_db(uname)
+
+    if atual:
+        inicio = atual.get("inicio")
+        try:
+            decorrido = (datetime.now(BRT) - inicio).total_seconds()
+        except Exception:
+            decorrido = 0
+        h, resto = divmod(max(int(decorrido), 0), 3600)
+        m, s = divmod(resto, 60)
+        tempo_fmt = f"{h:02d}:{m:02d}:{s:02d}"
+
+        try:
+            hora_inicio = inicio.astimezone(BRT).strftime("%H:%M")
+        except Exception:
+            hora_inicio = "—"
+
+        origem_txt = " 🔔 (a partir de um lembrete)" if atual.get("origem") == "lembrete" else ""
+
+        st.markdown(_html(f"""
+        <div class="home-item hoje" style="display:flex;justify-content:space-between;
+                    align-items:center;flex-wrap:wrap;gap:10px;">
+            <div>
+                <b>⏱️ Em andamento:</b> {atual.get('atividade','')}{origem_txt}<br>
+                <span class="home-origem">Iniciado às {hora_inicio}</span>
+            </div>
+            <div style="font-size:1.5rem;font-weight:800;color:#C9A84C;">{tempo_fmt}</div>
+        </div>
+        """), unsafe_allow_html=True)
+
+        if st.button("🛑 Finalizar atividade", type="primary", use_container_width=True,
+                     key=f"{key_prefix}finalizar_cron"):
+            ok, msg = finalizar_atividade_diario_db(atual["id"])
+            if ok and atual.get("origem") == "lembrete" and atual.get("origem_ref"):
+                try:
+                    atualizar_lembrete_pessoal_db(atual["origem_ref"], status="Executado")
+                except Exception:
+                    pass
+            (st.success if ok else st.error)(msg)
+            time.sleep(.4)
+            st.rerun()
+
+        if autorefresh:
+            try:
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=1000, key=f"{key_prefix}cron_autorefresh")
+            except Exception:
+                pass
+
+    else:
+        with st.form(f"{key_prefix}form_iniciar_cron", clear_on_submit=True):
+            col_txt, col_btn = st.columns([5, 1])
+            atividade_agora = col_txt.text_input(
+                "Atividade atual", label_visibility="collapsed",
+                placeholder="Ex: Tratando ticket #199791 da loja Campinas...",
+                key=f"{key_prefix}cron_txt",
+            )
+            iniciar = col_btn.form_submit_button(
+                "▶️ Iniciar", type="primary", use_container_width=True
+            )
+            if iniciar:
+                if atividade_agora.strip():
+                    try:
+                        iniciar_atividade_diario_db(uname, atividade_agora.strip(), origem="diario")
+                        st.success("Cronômetro iniciado!")
+                        time.sleep(.3)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Não foi possível iniciar. Detalhe técnico: {e}")
+                else:
+                    st.warning("Descreva o que você está fazendo antes de iniciar.")
+
+
+def _linhas_produtividade(uname, data_ini, data_fim, lembretes):
+    """
+    Junta num só lugar:
+    - Registros do Diário de Bordo finalizados (cronometrados), sejam eles
+      iniciados diretamente ou a partir de um lembrete.
+    - Lembretes marcados como Executado que NUNCA tiveram cronômetro
+      (pra não sumir do relatório, só aparecem sem duração).
+    """
+    linhas = []
+    refs_com_timer = set()
+
+    diario_periodo = listar_diario_bordo_db(usuario=uname, data_ini=data_ini, data_fim=data_fim)
+    for r in diario_periodo:
+        if r.get("status") != "finalizado":
+            continue
+        origem = "🔔 Lembrete" if r.get("origem") == "lembrete" else "📔 Diário"
+        if r.get("origem") == "lembrete" and r.get("origem_ref"):
+            refs_com_timer.add(r.get("origem_ref"))
+        linhas.append({
+            "Data": r.get("data", ""),
+            "Atividade": r.get("atividade", ""),
+            "Origem": origem,
+            "Duração": _formatar_duracao(r.get("duracao_segundos")),
+            "_segundos": r.get("duracao_segundos") or 0,
+        })
+
+    for l in lembretes:
+        if l.get("status") != "Executado":
+            continue
+        if l.get("id") in refs_com_timer:
+            continue  # já contabilizado via o registro cronometrado do diário
+        dt_l = _parse_data(l.get("data_hora", ""))
+        if dt_l is None or not (data_ini <= dt_l.date() <= data_fim):
+            continue
+        linhas.append({
+            "Data": dt_l.strftime("%d/%m/%Y"),
+            "Atividade": l.get("texto", ""),
+            "Origem": "🔔 Lembrete",
+            "Duração": "— (sem cronômetro)",
+            "_segundos": 0,
+        })
+
+    return linhas
 
 
 # ─── Função principal ─────────────────────────────────────────────
@@ -88,7 +256,7 @@ def renderizar_home(papel: str, user: dict = None):
 
     tabs = st.tabs([
         "📅 Meu Dia", "📔 Diário de Bordo",
-        "📊 Meus Projetos (RACI)", "🔔 Todos os Lembretes",
+        "📊 Meus Projetos (RACI)", "🔔 Lembretes & Produtividade",
     ])
 
     with tabs[0]:
@@ -101,7 +269,7 @@ def renderizar_home(papel: str, user: dict = None):
         _render_aba_raci(raci_projetos)
 
     with tabs[3]:
-        _render_todos_lembretes(lembretes, raci_projetos)
+        _render_todos_lembretes(uname, lembretes, raci_projetos)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -110,47 +278,32 @@ def renderizar_home(papel: str, user: dict = None):
 def _render_meu_dia(uname, lembretes, raci_projetos):
     hoje = date.today()
 
-    # ── Registro rápido no Diário de Bordo (o que estou fazendo agora) ──
+    # ── Cronômetro: o que estou fazendo agora ──────────────────────
     st.markdown("##### 📝 O que você está fazendo agora?")
-    with st.form("form_diario_rapido", clear_on_submit=True):
-        col_txt, col_btn = st.columns([5, 1])
-        atividade_agora = col_txt.text_input(
-            "Atividade atual", label_visibility="collapsed",
-            placeholder="Ex: Tratando ticket #199791 da loja Campinas...",
-            key="diario_rapido_txt",
-        )
-        registrar = col_btn.form_submit_button(
-            "📌 Registrar", type="primary", use_container_width=True
-        )
-        if registrar:
-            if atividade_agora.strip():
-                try:
-                    criar_registro_diario_db(uname, atividade_agora.strip())
-                    st.success("Atividade registrada no seu diário de bordo!")
-                    time.sleep(.4)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Não foi possível gravar. Detalhe técnico: {e}")
-            else:
-                st.warning("Descreva o que você está fazendo antes de registrar.")
+    _widget_cronometro(uname, key_prefix="md_", autorefresh=True)
 
-    # Mostra os últimos registros de hoje, para conferência imediata de que gravou
+    # Mostra os últimos registros de hoje, para conferência imediata
     registros_hoje = listar_diario_bordo_db(usuario=uname, data_ini=hoje, data_fim=hoje)
     if registros_hoje:
         with st.expander(f"📔 Registros de hoje ({len(registros_hoje)})", expanded=False):
             for r in registros_hoje:
-                st.caption(f"⏱ {r.get('hora','')} — {r.get('atividade','')}")
+                dur = _formatar_duracao(r.get("duracao_segundos")) if r.get("status") == "finalizado" else "⏱️ em andamento"
+                st.caption(f"⏱ {r.get('hora','')} — {r.get('atividade','')} · {dur}")
 
     st.divider()
 
+    tem_ativa = _CRONOMETRO_OK and obter_atividade_em_andamento_db(uname) is not None
+
     itens = []
     for l in lembretes:
-        if l.get("status", "Pendente") != "Pendente":
+        status_atual = l.get("status", "Pendente")
+        if status_atual not in ("Pendente", "Em Execução"):
             continue
         itens.append({
             "origem": "🗒️ Pessoal", "texto": l.get("texto", ""),
             "quando": l.get("data_hora", ""), "ref": l.get("id"),
             "historico": l.get("historico_adiamentos", []),
+            "em_execucao": status_atual == "Em Execução",
         })
 
     for rp in raci_projetos:
@@ -167,7 +320,7 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
                 itens.append({
                     "origem": f"📊 {rp.get('nome','')} / {et.get('nome','')}",
                     "texto": at.get("atividade", ""), "quando": dp, "ref": None,
-                    "historico": [],
+                    "historico": [], "em_execucao": False,
                 })
 
     atrasados, de_hoje, futuros = [], [], []
@@ -233,7 +386,8 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
         algum = True
         st.markdown(f"##### {titulo}")
         for it in lista_g:
-            cb1, cb2, cb3 = st.columns([4, 1, 1])
+            em_exec = it.get("em_execucao", False)
+            cb1, cb2, cb3, cb4 = st.columns([3, 1, 1, 1.2])
             with cb1:
                 ultimo_motivo_html = ""
                 if it["historico"]:
@@ -242,11 +396,12 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
                         f'<div class="home-motivo">⏳ Adiado — motivo: '
                         f'{ultimo.get("motivo","")}</div>'
                     )
+                execucao_html = '<div class="home-execucao">⏱️ Em execução</div>' if em_exec else ""
                 st.markdown(
                     f'<div class="home-item {classe}">'
                     f'<b>{it["texto"]}</b><br>'
                     f'<span class="home-origem">{it["origem"]} · {it["quando"]}</span>'
-                    f'{ultimo_motivo_html}'
+                    f'{ultimo_motivo_html}{execucao_html}'
                     f'</div>', unsafe_allow_html=True)
             if it["ref"] is not None:
                 with cb2:
@@ -280,6 +435,24 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
                                 if ok:
                                     time.sleep(.4)
                                     st.rerun()
+                with cb4:
+                    if em_exec:
+                        st.caption("⏱️ Rodando")
+                    elif tem_ativa:
+                        st.caption("🔒 Finalize a atual")
+                    elif _CRONOMETRO_OK:
+                        if st.button("▶️ Iniciar", key=f"iniciar_lemb_{it['ref']}",
+                                     use_container_width=True):
+                            try:
+                                iniciar_atividade_diario_db(
+                                    uname, it["texto"], origem="lembrete", origem_ref=it["ref"]
+                                )
+                                atualizar_lembrete_pessoal_db(it["ref"], status="Em Execução")
+                                st.success("Cronômetro iniciado!")
+                                time.sleep(.3)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Não foi possível iniciar: {e}")
     if not algum:
         st.info("🎉 Nenhuma tarefa pendente no momento.")
 
@@ -290,30 +463,11 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
 def _render_diario_bordo(uname):
     st.markdown("##### 📔 Diário de Bordo")
     st.caption(
-        "Registre aqui o que você está trabalhando no momento. Cada registro fica "
-        "gravado com data e hora, formando um histórico que você pode consultar depois."
+        "Inicie o cronômetro com o que você está trabalhando agora. Ao finalizar, "
+        "o tempo gasto fica gravado no histórico abaixo."
     )
 
-    with st.form("form_diario_bordo", clear_on_submit=True):
-        atividade_txt = st.text_area(
-            "O que você está fazendo agora?", height=80,
-            placeholder="Ex: Tratando ticket #199791 da loja Campinas...",
-            key="diario_bordo_txt_area",
-        )
-        se = st.form_submit_button(
-            "📝 Registrar Atividade", type="primary", use_container_width=True
-        )
-        if se:
-            if atividade_txt.strip():
-                try:
-                    criar_registro_diario_db(uname, atividade_txt.strip())
-                    st.success("Atividade registrada!")
-                    time.sleep(.4)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Não foi possível gravar. Detalhe técnico: {e}")
-            else:
-                st.warning("Descreva a atividade antes de registrar.")
+    _widget_cronometro(uname, key_prefix="db_", autorefresh=False)
 
     st.divider()
     st.markdown("###### 🔎 Consultar histórico")
@@ -352,8 +506,14 @@ def _render_diario_bordo(uname):
         for r in registros_dia:
             c1, c2 = st.columns([6, 1])
             with c1:
+                if r.get("status") == "em_andamento":
+                    dur_txt = "⏱️ em andamento"
+                else:
+                    dur_txt = _formatar_duracao(r.get("duracao_segundos"))
+                origem_txt = " · 🔔 via lembrete" if r.get("origem") == "lembrete" else ""
                 st.markdown(
-                    f'<div class="home-item">⏱ <b>{r.get("hora","")}</b> — {r.get("atividade","")}</div>',
+                    f'<div class="home-item">⏱ <b>{r.get("hora","")}</b> — {r.get("atividade","")} '
+                    f'<span class="home-origem">({dur_txt}{origem_txt})</span></div>',
                     unsafe_allow_html=True,
                 )
             with c2:
@@ -365,6 +525,8 @@ def _render_diario_bordo(uname):
     df_exp = pd.DataFrame([{
         "Data": r.get("data", ""), "Hora": r.get("hora", ""),
         "Atividade": r.get("atividade", ""),
+        "Duração": _formatar_duracao(r.get("duracao_segundos")) if r.get("status") == "finalizado" else "em andamento",
+        "Origem": "Lembrete" if r.get("origem") == "lembrete" else "Diário",
     } for r in registros])
 
     from io import BytesIO
@@ -766,7 +928,7 @@ def _render_analise_projeto(projeto):
 
 
 # ════════════════════════════════════════════════════════════════
-# ABA 4 — TODOS OS LEMBRETES (dashboard de período + vínculo a projeto)
+# ABA 4 — LEMBRETES & PRODUTIVIDADE
 # ════════════════════════════════════════════════════════════════
 def _periodo_por_preset(preset):
     hoje = date.today()
@@ -778,7 +940,7 @@ def _periodo_por_preset(preset):
     return None, None  # Personalizado: tratado fora
 
 
-def _render_todos_lembretes(lembretes, raci_projetos):
+def _render_todos_lembretes(uname, lembretes, raci_projetos):
     st.markdown("##### 📊 Dossiê de Atividades")
     st.caption("Filtre por período para apresentar o que foi executado — útil para repasse a gestores.")
 
@@ -861,6 +1023,44 @@ def _render_todos_lembretes(lembretes, raci_projetos):
         else:
             st.info("Nenhuma atividade executada nesse período ainda.")
 
+        # ── PRODUTIVIDADE CONSOLIDADA (Diário + Lembretes, com tempo) ──
+        st.divider()
+        st.markdown("##### ⏱️ Produtividade Consolidada (Diário + Lembretes)")
+        st.caption(
+            "Une os registros do Diário de Bordo (cronometrados) com os lembretes "
+            "concluídos no mesmo período — inclusive os que viraram cronômetro a "
+            "partir de um lembrete. Tudo num relatório só."
+        )
+
+        linhas_prod = _linhas_produtividade(uname, data_ini, data_fim, lembretes)
+        if not linhas_prod:
+            st.info("Nenhuma atividade (com ou sem cronômetro) registrada nesse período.")
+        else:
+            segundos_totais = sum(l["_segundos"] for l in linhas_prod)
+            st.markdown(f"**⏱️ Tempo total cronometrado no período:** {_formatar_duracao(segundos_totais)}")
+
+            df_prod = pd.DataFrame([
+                {"Data": l["Data"], "Atividade": l["Atividade"], "Origem": l["Origem"], "Duração": l["Duração"]}
+                for l in sorted(linhas_prod, key=lambda x: x["Data"])
+            ])
+            st.dataframe(df_prod, use_container_width=True, hide_index=True)
+
+            from io import BytesIO
+            buf_p = BytesIO()
+            with pd.ExcelWriter(buf_p, engine="xlsxwriter") as writer:
+                df_prod.to_excel(writer, index=False, sheet_name="Produtividade")
+                ws = writer.sheets["Produtividade"]
+                for i, col in enumerate(df_prod.columns):
+                    largura = max(df_prod[col].astype(str).map(len).max(), len(col)) + 2
+                    ws.set_column(i, i, largura)
+            buf_p.seek(0)
+            st.download_button(
+                "📥 Baixar Produtividade Consolidada (.xlsx)", data=buf_p.getvalue(),
+                file_name=f"Produtividade_{uname}_{data_ini.strftime('%Y%m%d')}_a_{data_fim.strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
     st.divider()
     st.markdown("##### 🔔 Gerenciar Meus Lembretes")
     if not lembretes:
@@ -868,8 +1068,8 @@ def _render_todos_lembretes(lembretes, raci_projetos):
         return
 
     filtro = st.multiselect(
-        "Filtrar por status:", ["Pendente", "Executado"],
-        default=["Pendente"], key="filtro_lembretes_home",
+        "Filtrar por status:", ["Pendente", "Em Execução", "Executado"],
+        default=["Pendente", "Em Execução"], key="filtro_lembretes_home",
     )
     opcoes_vinculo = ["Pontual (fora de projetos)"] + nomes_proj_v
     for l in lembretes:
@@ -878,7 +1078,7 @@ def _render_todos_lembretes(lembretes, raci_projetos):
             continue
         with st.container(border=True):
             cols = st.columns([3, 1.4, 1.6, 1, 1])
-            icone = "✅" if status_l == "Executado" else "🔵"
+            icone = {"Executado": "✅", "Em Execução": "⏱️"}.get(status_l, "🔵")
             cols[0].write(f"{icone} {l.get('texto','')}")
             cols[1].caption(l.get("data_hora", ""))
 
