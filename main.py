@@ -323,7 +323,13 @@ elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
     renderizar_cartas(papel, user)
 
 elif modulo_ativo == "chat":
-    renderizar_chat(papel, user)
+    try:
+        renderizar_chat(papel, user)
+    except Exception as _erro_chat_runtime:
+        st.error("⚠️ O Chat encontrou um problema e não pôde carregar agora. "
+                 "O restante do painel (Rastreio, Tickets, Cartas, Config) "
+                 "continua funcionando normalmente.")
+        st.code(f"{type(_erro_chat_runtime).__name__}: {_erro_chat_runtime}", language="text")
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
