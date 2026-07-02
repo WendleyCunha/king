@@ -461,6 +461,70 @@ def _aba_cadastros(datas_db):
                  f"mas o restante do Rastreio continua funcionando. Detalhe: {e}")
 
 
+# ── VISÃO EXCLUSIVA DO MOTORISTA ────────────────────────────────
+# Sem seletor de período, sem busca, sem filtros de status/notificação,
+# sem abas — só as entregas de hoje, num layout limpo e direto.
+def _visualizacao_motorista(user):
+    hoje = datetime.now(BRT).date().isoformat()
+    minha_chave = user.get("usuario", "")
+
+    tickets_raw = obter_tickets_db(hoje)
+    df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
+
+    if df.empty:
+        st.info("⏳ Nenhuma entrega para hoje.")
+        return
+
+    df = garantir_colunas(df.copy())
+    if "route" in df.columns:
+        df = df[df["route"].apply(extrair_chave) == minha_chave]
+
+    if df.empty:
+        st.info("⏳ Nenhuma entrega atribuída a você hoje.")
+        return
+
+    total  = len(df)
+    concl  = int((df["_status_visual"] == "✅ Sucesso").sum())
+    falhas = int((df["_status_visual"] == "❌ Falhou").sum())
+    pend   = total - concl - falhas
+
+    st.markdown(_html(f"""
+    <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
+        <div class="kpi-card gold" style="flex:1;min-width:80px;">
+            <div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div>
+        </div>
+        <div class="kpi-card blue" style="flex:1;min-width:80px;">
+            <div class="kpi-label">✅ Feitas</div><div class="kpi-value">{concl}</div>
+        </div>
+        <div class="kpi-card gray" style="flex:1;min-width:80px;">
+            <div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pend}</div>
+        </div>
+        <div class="kpi-card red" style="flex:1;min-width:80px;">
+            <div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhas}</div>
+        </div>
+    </div>
+    """), unsafe_allow_html=True)
+
+    try:
+        df = df.sort_values(by="order", key=lambda s: pd.to_numeric(s, errors="coerce"))
+    except Exception:
+        pass
+
+    for _, row in df.iterrows():
+        status = row.get("_status_visual", "⏳ Pendente")
+        cor = {"✅ Sucesso": "tb", "❌ Falhou": "tr"}.get(status, "tg")
+        st.markdown(_html(f"""
+        <div class="driver-card">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div style="font-weight:700;color:#2c3e50;">#{esc(row.get('order','—'))} · {esc(row.get('title','—'))}</div>
+                <span class="tag {cor}">{esc(status)}</span>
+            </div>
+            <div style="font-size:0.82rem;color:#64778d;margin-top:4px;">📍 {esc(row.get('address','—'))}</div>
+            <div style="font-size:0.82rem;color:#64778d;">📞 {esc(row.get('contact_phone','—'))}</div>
+        </div>
+        """), unsafe_allow_html=True)
+
+
 # ── FUNÇÃO PRINCIPAL ──────────────────────────────────────────────
 def renderizar_rastreio(papel: str, user: dict = None,
                         datas_db: list = None, pode_exp: bool = False):
@@ -468,6 +532,12 @@ def renderizar_rastreio(papel: str, user: dict = None,
     if datas_db is None: datas_db = []
 
     _injetar_css()
+
+    # Motorista tem uma visão totalmente separada e simplificada — não
+    # passa por nenhum dos filtros, abas ou lógica de ADM/Supervisor abaixo.
+    if papel == "motorista":
+        _visualizacao_motorista(user)
+        return True
 
     hoje  = datetime.now(BRT).date().isoformat()
     ontem = (datetime.now(BRT).date() - timedelta(days=1)).isoformat()
