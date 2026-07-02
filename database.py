@@ -261,6 +261,21 @@ def obter_tickets_db(data_alvo: str) -> list:
                    .where("data_entrega","==",data_alvo).stream()
     return [d.to_dict().get("payload", d.to_dict()) for d in docs]
 
+def obter_tickets_com_id_db(data_alvo: str) -> list:
+    """
+    Igual a obter_tickets_db, mas cada item vem com o campo '_doc_id'
+    (o ID do documento no Firestore). Necessário para o motorista poder
+    dar baixa numa entrega específica (foto obrigatória + status).
+    """
+    docs = get_db().collection("entregas") \
+                   .where("data_entrega","==",data_alvo).stream()
+    out = []
+    for d in docs:
+        item = dict(d.to_dict().get("payload", d.to_dict()))
+        item["_doc_id"] = d.id
+        out.append(item)
+    return out
+
 def obter_datas_disponiveis_db() -> list:
     docs  = get_db().collection("entregas").select(["data_entrega"]).stream()
     datas: dict = {}
