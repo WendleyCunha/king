@@ -23,6 +23,14 @@ except Exception:
     def garantir_colunas(df): return df
     TRACKING_BASE = ""
 
+# Import isolado: busca de entregas por código em todo o histórico.
+try:
+    from database_logistica import buscar_entregas_por_codigo_db
+    _BUSCA_ENTREGAS_OK = True
+except Exception:
+    _BUSCA_ENTREGAS_OK = False
+    def buscar_entregas_por_codigo_db(*a, **k): return []
+
 BRT = timezone(timedelta(hours=-3))
 
 # ── Atualização parcial (st.fragment) em vez de recarregar a página inteira ──
@@ -70,6 +78,12 @@ def _popover_entregas(login_motorista: str, nome_m: str):
         f"📦 Total: **{total}**  \n✅ Concluídas: **{concl}**  \n"
         f"⏳ Pendentes: **{pend}**  \n❌ Falhas: **{falhas}**"
     )
+
+    st.markdown("---")
+    st.caption("📋 Entregas do dia (código · cliente):")
+    for _, row in df.iterrows():
+        codigo = row.get("cliente_codigo", "—") or "—"
+        st.caption(f"`{codigo}` · {row.get('title','—')}")
 
     st.markdown("---")
     st.caption("🔗 Links de rastreio — clique no ícone de copiar em cada um:")
@@ -186,6 +200,28 @@ def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: di
     if not motoristas:
         st.info("Nenhum motorista cadastrado ainda.")
         return
+
+    if _BUSCA_ENTREGAS_OK:
+        with st.expander("🔍 Buscar entrega por código do cliente (todo o histórico)"):
+            termo_busca = st.text_input(
+                "Código ou parte do código", key="busca_entrega_codigo",
+                placeholder="Ex: 10234",
+            )
+            if termo_busca.strip():
+                resultados = buscar_entregas_por_codigo_db(termo_busca.strip())
+                if not resultados:
+                    st.caption("Nenhuma entrega encontrada com esse código.")
+                else:
+                    st.caption(f"{len(resultados)} resultado(s) encontrado(s):")
+                    for r in resultados:
+                        login_m = extrair_chave(r.get("route", ""))
+                        info_m  = info_motoristas.get(login_m, {})
+                        nome_m  = info_m.get("nome") or login_m
+                        status_r = r.get("_status_visual", "⏳ Pendente")
+                        st.markdown(
+                            f"**`{r.get('cliente_codigo','—')}`** · {r.get('title','—')} · "
+                            f"📅 {r.get('data_entrega','—')} · 🚚 {nome_m} · {status_r}"
+                        )
 
     todas = listar_conversas_com_nao_lidas(motoristas)
     ativas = []
