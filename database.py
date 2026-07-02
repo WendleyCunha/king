@@ -22,6 +22,7 @@ MODULOS_PADRAO = {
     "adm":         ["rastreio","tickets","cartas","exportar"],
     "supervisor":  ["rastreio","tickets","cartas","exportar"],
     "operacional": ["rastreio"],
+    "motorista":   ["rastreio"],
 }
 
 def modulos_do_usuario(user: dict) -> list:
@@ -52,8 +53,8 @@ def verificar_login(usuario: str, senha: str):
             return d
     return None
 
-def criar_usuario(nome, usuario, senha, role, modulos=None, departamento=""):
-    """Cria usuário. Agora aceita 'departamento' (Regra 1)."""
+def criar_usuario(nome, usuario, senha, role, modulos=None, departamento="", placa=""):
+    """Cria usuário. Agora aceita 'departamento' (Regra 1) e 'placa' (motoristas)."""
     if modulos is None:
         modulos = MODULOS_PADRAO.get(role, ["rastreio"])
     get_db().collection("usuarios").document(usuario).set({
@@ -61,7 +62,18 @@ def criar_usuario(nome, usuario, senha, role, modulos=None, departamento=""):
         "senha_hash": hash_senha(senha),
         "role": role, "modulos": modulos,
         "departamento": departamento,
+        "placa": placa,
     })
+
+def atualizar_dados_usuario(usuario: str, nome: str = None, placa: str = None):
+    """Edita nome e/ou placa de um usuário (usado na edição de motoristas)."""
+    campos = {}
+    if nome is not None and nome.strip():
+        campos["nome"] = nome.strip()
+    if placa is not None:
+        campos["placa"] = placa.strip()
+    if campos:
+        get_db().collection("usuarios").document(usuario).update(campos)
 
 def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
     """Retorna (True, msg_sucesso) ou (False, msg_erro)."""
