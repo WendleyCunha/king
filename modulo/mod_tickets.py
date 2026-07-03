@@ -1,7 +1,7 @@
 """
-KingStar — Módulo de Tickets  (v3)
+KingStar — Módulo de Tickets  (v3 + patch de performance)
 ─────────────────────────────────────────────────────────────────────────────
-Correções / novidades nesta versão:
+Correções / novidades desta versão:
   [1] Bug do HTML aparecendo como código-fonte → corrigido com _html()
       (remove a indentação que o Markdown interpretava como bloco de código)
       + escape do texto livre do usuário (assunto, descrição, etc).
@@ -14,6 +14,12 @@ Correções / novidades nesta versão:
         - supervisor  → todos os tickets + aba "Equipe" do seu departamento
         - adm         → tudo de todos
   [6] ADM pode excluir TODOS os tickets pelo painel Sync Zendesk.
+  [7] PERFORMANCE: listar_tickets() agora é cacheada (ttl curto) e toda
+      função de escrita (criar/atualizar/comentar/excluir) invalida esse
+      cache explicitamente. Antes, listar_tickets() baixava a coleção
+      inteira do Firestore em TODO rerun da tela de Tickets (que acontece
+      a cada clique — responder, mudar status, abrir popup etc.), e esse
+      custo só cresce conforme o histórico de tickets aumenta.
 """
 import streamlit as st
 import pandas as pd
@@ -111,6 +117,7 @@ def transferir_tickets(tids: list, novo_responsavel: str):
         if n % 450 == 0:
             batch.commit(); batch = db.batch()
     batch.commit()
+    listar_tickets.clear()
     return n
 
 def sla_restante(criado_em: str, horas_sla: int = 24) -> tuple:
@@ -260,7 +267,16 @@ def abrir_ticket_popup(tid, user, papel):
         _popup2()
 
 # ── CRUD Firestore ─────────────────────────────────────────────────
+@st.cache_data(ttl=10, show_spinner=False)
 def listar_tickets() -> list:
+    """
+    OTIMIZADO: cacheada por 10s. Antes, essa função baixava a coleção
+    'tickets' INTEIRA do Firestore em todo rerun da tela (que acontece a
+    cada clique de responder/mudar status/abrir popup/paginar). O custo
+    crescia junto com o histórico de tickets (incluindo os importados do
+    Zendesk). Toda função de escrita abaixo chama listar_tickets.clear()
+    para não mostrar dado desatualizado por mais que alguns segundos.
+    """
     docs = get_db().collection(COLECAO).stream()
     return sorted(
         [d.to_dict() for d in docs],
@@ -278,11 +294,13 @@ def criar_ticket(dados: dict) -> str:
     base.setdefault("status", "aberto")
     base.setdefault("horas_sla", 24)
     ref.set(base)
+    listar_tickets.clear()
     return ref.id
 
 def atualizar_ticket(tid: str, dados: dict):
     dados["atualizado_em"] = agora_brt()
     get_db().collection(COLECAO).document(tid).update(dados)
+    listar_tickets.clear()
 
 def adicionar_comentario(tid: str, autor: str, texto: str):
     from google.cloud.firestore import ArrayUnion
@@ -292,6 +310,7 @@ def adicionar_comentario(tid: str, autor: str, texto: str):
         }]),
         "atualizado_em": agora_brt(),
     })
+    listar_tickets.clear()
 
 # ── Sync Zendesk ───────────────────────────────────────────────────
 def sync_zendesk() -> tuple:
@@ -327,6 +346,7 @@ def sync_zendesk() -> tuple:
                 "horas_sla":    24,
             }, merge=True)
         batch.commit()
+        listar_tickets.clear()
         return True, len(tickets), f"{len(tickets)} tickets sincronizados"
     except Exception as e:
         return False, 0, str(e)
@@ -345,6 +365,7 @@ def deletar_todos_tickets() -> int:
             batch.delete(doc.reference)
             total += 1
         batch.commit()
+    listar_tickets.clear()
     return total
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1034,8 +1055,8 @@ def _render_novo(user):
 #   📊 Dashboard       → KPIs gerais, top atendente, motivo mais acionado
 #   👥 Por Atendente   → produtividade individual + transferência de tickets
 #   📋 Por Motivo      → volume por tabulação + quem está com cada uma
-#   ⏳ SLA Perdido     → ranking de quem mais perdeu SLA e detalhe dos casos
-#   📥 Exportar        → relatório completo em Excel (.xlsx, 3 abas)
+#   ⏳ SLA Perdido      → ranking de quem mais perdeu SLA e detalhe dos casos
+#   📥 Exportar         → relatório completo em Excel (.xlsx, 3 abas)
 # Filtros de Atendente e Motivo no topo valem para TODAS as abas.
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1577,6 +1598,7 @@ def _render_sync():
                 prog.progress(min(total/500, 1.0), text=f"{total} importados...")
                 url = data.get("next_page")
             prog.empty()
+            listar_tickets.clear()
             st.success(f"✅ {total} tickets importados para o Firestore!")
 
     # ── Estatísticas ──────────────────────────────────────────────
