@@ -63,12 +63,24 @@ def get_logo():
     return None
 
 def _total_chat_pendentes():
-    """Soma as mensagens não lidas de motoristas em todas as conversas (visão ADM)."""
+    """
+    Soma as mensagens não lidas de motoristas em todas as conversas (visão ADM).
+    OTIMIZADO: listar_conversas_com_nao_lidas agora lê 1 doc-resumo pequeno
+    por motorista (não mais até 1000 mensagens por motorista) — ver
+    database_chat.py. Ainda assim, cacheia por alguns segundos porque essa
+    função roda no sidebar, ou seja, em TODO rerun de QUALQUER página.
+    """
     try:
-        motoristas_ids = [u["usuario"] for u in listar_usuarios() if u.get("role") == "motorista"]
-        return sum(c["nao_lidas"] for c in listar_conversas_com_nao_lidas(motoristas_ids))
+        motoristas_ids = tuple(
+            u["usuario"] for u in listar_usuarios() if u.get("role") == "motorista"
+        )
+        return _total_chat_pendentes_cache(motoristas_ids)
     except Exception:
         return 0
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _total_chat_pendentes_cache(motoristas_ids: tuple) -> int:
+    return sum(c["nao_lidas"] for c in listar_conversas_com_nao_lidas(list(motoristas_ids)))
 
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
@@ -316,6 +328,9 @@ with st.sidebar:
         lbl = label
         # Chat agora vive dentro do Rastreio (aba ao lado de Cadastros) —
         # o badge de mensagens pendentes aparece aqui, no botão Rastreio.
+        # (cacheado por 5s em _total_chat_pendentes — ver database_chat.py
+        # para o motivo da otimização; sem isso, essa chamada rodava
+        # pesada a cada rerun de QUALQUER tela, não só do Chat.)
         if key == "rastreio" and papel in ("adm", "supervisor"):
             _pend_nav = _total_chat_pendentes()
             if _pend_nav:
@@ -383,8 +398,15 @@ with hc2:
         st.rerun()
 
 # ── DADOS ─────────────────────────────────────────────────────────
-datas_db     = obter_datas_disponiveis_db()
 modulo_ativo = st.session_state.modulo_ativo
+
+# OTIMIZAÇÃO: obter_datas_disponiveis_db() varre a coleção 'entregas'
+# inteira (todo o histórico de entregas já feitas) só para montar a
+# lista de datas do seletor do Rastreio. Antes rodava incondicionalmente
+# em TODA renderização (Tickets, Cartas, Configurações...), mesmo quando
+# a tela em questão nunca usa esse dado. Agora só busca quando o módulo
+# Rastreio está de fato aberto (também é cacheada por 60s em database.py).
+datas_db = obter_datas_disponiveis_db() if modulo_ativo == "rastreio" else []
 
 # Motorista não tem acesso ao módulo Home — se a sessão dele ainda
 # apontar pra lá (ex: login antigo, antes dessa regra existir), redireciona.
@@ -407,6 +429,12 @@ if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
     if _pend_geral:
         st.info(f"💬 Você tem **{_pend_geral}** mensagem(ns) de motoristas aguardando resposta. "
                 f"Acesse **Rastreio → aba Chat** para responder.")
+
+# Se o módulo Rastreio precisar dessas datas mas o usuário navegou para
+# outra aba antes deste ponto, garante que datas_db já esteja resolvido
+# (evita usar variável desatualizada quando modulo_ativo mudou acima).
+if modulo_ativo == "rastreio" and not datas_db:
+    datas_db = obter_datas_disponiveis_db()
 
 # ── ROTEAMENTO ────────────────────────────────────────────────────
 if modulo_ativo == "home":
