@@ -54,7 +54,7 @@ def verificar_login(usuario: str, senha: str):
     return None
 
 def criar_usuario(nome, usuario, senha, role, modulos=None, departamento="", placa=""):
-    """Cria usuário. Agora aceita 'departamento' (Regra 1) e 'placa' (motoristas)."""
+    """Cria usuário. Aceita 'departamento' (Regra 1) e 'placa' (motoristas)."""
     if modulos is None:
         modulos = MODULOS_PADRAO.get(role, ["rastreio"])
     get_db().collection("usuarios").document(usuario).set({
@@ -64,6 +64,7 @@ def criar_usuario(nome, usuario, senha, role, modulos=None, departamento="", pla
         "departamento": departamento,
         "placa": placa,
     })
+    listar_usuarios.clear()
 
 def atualizar_dados_usuario(usuario: str, nome: str = None, placa: str = None):
     """Edita nome e/ou placa de um usuário (usado na edição de motoristas)."""
@@ -74,6 +75,7 @@ def atualizar_dados_usuario(usuario: str, nome: str = None, placa: str = None):
         campos["placa"] = placa.strip()
     if campos:
         get_db().collection("usuarios").document(usuario).update(campos)
+        listar_usuarios.clear()
 
 def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
     """Retorna (True, msg_sucesso) ou (False, msg_erro)."""
@@ -88,10 +90,12 @@ def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
     get_db().collection("usuarios").document(usuario).update(
         {"senha_hash": hash_senha(nova_senha)}
     )
+    listar_usuarios.clear()
     return True, "Senha alterada com sucesso! Faça login novamente."
 
 def atualizar_modulos_usuario(usuario: str, modulos: list):
     get_db().collection("usuarios").document(usuario).update({"modulos": modulos})
+    listar_usuarios.clear()
 
 def redefinir_senha_usuario(usuario: str, nova_senha: str):
     """Reset de senha pelo admin — não exige a senha atual."""
@@ -103,21 +107,26 @@ def redefinir_senha_usuario(usuario: str, nova_senha: str):
     get_db().collection("usuarios").document(usuario).update(
         {"senha_hash": hash_senha(nova_senha)}
     )
+    listar_usuarios.clear()
     return True, "Senha redefinida com sucesso."
 
 def atualizar_departamento_usuario(usuario: str, departamento: str):
     get_db().collection("usuarios").document(usuario).update({"departamento": departamento})
+    listar_usuarios.clear()
 
+@st.cache_data(ttl=15, show_spinner=False)
 def listar_usuarios():
     return [d.to_dict() for d in get_db().collection("usuarios").stream()]
 
 def deletar_usuario(usuario):
     get_db().collection("usuarios").document(usuario).delete()
+    listar_usuarios.clear()
 
 # ══════════════════════════════════════════════════════════════════
 # DEPARTAMENTOS  (Regra 1)
 # Coleção: /departamentos/{nome}  → { nome, descricao, criado_em }
 # ══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=30, show_spinner=False)
 def listar_departamentos() -> list:
     docs = get_db().collection("departamentos").stream()
     out = []
@@ -139,6 +148,7 @@ def criar_departamento(nome: str, descricao: str = ""):
         "descricao": descricao,
         "criado_em": datetime.now(BRT).isoformat(),
     })
+    listar_departamentos.clear()
     return True, f"Departamento '{nome}' criado."
 
 def deletar_departamento(dep_id: str):
@@ -160,6 +170,7 @@ def deletar_departamento(dep_id: str):
         return False, f"Não excluído: {len(tabs)} tabulação(ões) vinculada(s)."
 
     ref.delete()
+    listar_departamentos.clear()
     return True, f"Departamento '{dep_id}' excluído."
 
 # ══════════════════════════════════════════════════════════════════
@@ -168,6 +179,7 @@ def deletar_departamento(dep_id: str):
 #   { nome, departamento, descricao, atendentes[], prioridade, sla_horas, criado_em }
 #   atendentes == []  → liberado para todo o departamento
 # ══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=30, show_spinner=False)
 def listar_tabulacoes() -> list:
     docs = get_db().collection("tabulacoes").stream()
     out = []
@@ -205,6 +217,7 @@ def criar_tabulacao(nome, departamento, descricao="",
         "sla_horas": int(sla_horas),
         "criado_em": datetime.now(BRT).isoformat(),
     })
+    listar_tabulacoes.clear()
     return True, f"Tabulação '{nome}' criada em '{departamento}'."
 
 def atualizar_tabulacao(tab_id, atendentes=None, prioridade=None, sla_horas=None):
@@ -217,6 +230,7 @@ def atualizar_tabulacao(tab_id, atendentes=None, prioridade=None, sla_horas=None
     if sla_horas  is not None: updates["sla_horas"]  = int(sla_horas)
     if updates:
         ref.update(updates)
+        listar_tabulacoes.clear()
     return True, "Tabulação atualizada."
 
 def deletar_tabulacao(tab_id):
@@ -224,6 +238,7 @@ def deletar_tabulacao(tab_id):
     if not ref.get().exists:
         return False, "Tabulação não encontrada."
     ref.delete()
+    listar_tabulacoes.clear()
     return True, "Tabulação excluída."
 
 def resolver_destinatario_ticket(departamento, tabulacao_nome=None):
@@ -276,6 +291,7 @@ def obter_tickets_com_id_db(data_alvo: str) -> list:
         out.append(item)
     return out
 
+@st.cache_data(ttl=60, show_spinner=False)
 def obter_datas_disponiveis_db() -> list:
     docs  = get_db().collection("entregas").select(["data_entrega"]).stream()
     datas: dict = {}
@@ -317,6 +333,7 @@ def deletar_rota_db(rota: str, data: str):
 
     if encontrou:
         batch.commit()
+        obter_datas_disponiveis_db.clear()
 
 # ══════════════════════════════════════════════════════════════════
 # CARTAS DE DÉBITO (RH)
@@ -604,15 +621,29 @@ def finalizar_atividade_diario_db(id_registro: str):
 def obter_atividade_em_andamento_db(usuario: str):
     """
     Retorna o registro em andamento do usuário (dict com 'id' incluso),
-    ou None se não houver nenhum. Usa só 1 filtro de igualdade (usuario) —
-    não precisa de índice composto novo no Firestore.
+    ou None se não houver nenhum.
+
+    OTIMIZAÇÃO: agora filtra 'status == em_andamento' diretamente na
+    consulta (com .limit(1)) em vez de baixar todo o histórico do usuário
+    e filtrar em Python. Isso é essencial porque essa função é chamada
+    repetidamente pelo cronômetro (widget de "Meu Dia") — sem o filtro no
+    servidor, o custo crescia com o tamanho do histórico do usuário.
+
+    Requer um índice composto (usuario ASC, status ASC) no Firestore —
+    na primeira execução, se faltar, o próprio erro traz o link pronto
+    para criar em 1 clique no console do Firebase.
     """
-    docs = get_db().collection("diario_bordo").where("usuario", "==", usuario).stream()
+    docs = (
+        get_db().collection("diario_bordo")
+        .where("usuario", "==", usuario)
+        .where("status", "==", "em_andamento")
+        .limit(1)
+        .stream()
+    )
     for d in docs:
         item = d.to_dict()
-        if item.get("status") == "em_andamento":
-            item["id"] = d.id
-            return item
+        item["id"] = d.id
+        return item
     return None
 
 def listar_diario_bordo_db(usuario: str = None, data_ini=None, data_fim=None) -> list:
