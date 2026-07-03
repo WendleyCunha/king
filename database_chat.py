@@ -8,14 +8,33 @@ Este arquivo usa a MESMA conexão Firestore do restante do painel (o banco
 nomeado "portal", aberto via get_db() em database.py) — não é um banco de
 dados diferente. O que é separado é o CÓDIGO e as COLEÇÕES:
     - mensagens_chat  (uma conversa por motorista, compartilhada com todos os ADMs)
+    - conversas_chat  (1 doc-resumo por motorista: status + contadores)
     - presenca_adm    (quem está com o painel aberto agora)
 Isso já é suficiente pra isolar o chat: se algo quebrar aqui, não derruba
 o database.py principal, e vice-versa.
 
 Fica na raiz do projeto, ao lado do database.py e do main.py.
+
+──────────────────────────────────────────────────────────────────────
+OTIMIZAÇÃO DE PERFORMANCE (leia antes de mexer):
+Antes, "quantas mensagens não lidas esse motorista tem?" era respondido
+baixando até 1000 mensagens da conversa inteira e contando em Python —
+e isso rodava para TODOS os motoristas, a cada rerun de QUALQUER página
+do sistema (porque o main.py usa esse número no badge da sidebar) e
+também a cada 2s dentro do fragment do Chat. Isso é O(mensagens) e caro.
+
+Agora mantemos um contador incremental no doc-resumo /conversas_chat/{id}:
+    - nao_lidas_adm       → quantas mensagens do MOTORISTA o ADM não leu
+    - nao_lidas_motorista → quantas mensagens do ADM o motorista não leu
+Cada envio faz um Increment(1); cada "marcar como lida" zera o campo.
+listar_conversas_com_nao_lidas() passa a ler 1 documento pequeno por
+motorista, em vez de até 1000 mensagens por motorista.
+──────────────────────────────────────────────────────────────────────
 """
 
 from datetime import datetime, timezone
+
+from google.cloud.firestore import Increment
 
 from database import get_db
 
@@ -51,7 +70,9 @@ def _rodar_query(query):
 
 def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, remetente_tipo: str):
     """
-    Salva uma mensagem na conversa de um motorista específico.
+    Salva uma mensagem na conversa de um motorista específico e incrementa
+    o contador de não-lidas do "outro lado" no doc-resumo da conversa
+    (em vez de recontar tudo depois).
     remetente_tipo: "motorista" ou "adm"
     A conversa é sempre indexada pelo login do motorista (1 conversa por
     motorista, compartilhada entre todos os ADMs — como uma caixa de
@@ -60,18 +81,32 @@ def enviar_mensagem_chat(motorista_usuario: str, remetente: str, texto: str, rem
     (mesmo que um ADM já tenha finalizado antes) — é assim que o motorista
     "reaparece" na lista de atendimento ao chamar de novo.
     """
-    if not texto or not texto.strip():
+    texto = (texto or "").strip()
+    if not texto:
         return
-    get_db().collection("mensagens_chat").add({
+
+    db = get_db()
+    db.collection("mensagens_chat").add({
         "conversa_id": motorista_usuario,
         "remetente": remetente,
         "remetente_tipo": remetente_tipo,
-        "texto": texto.strip(),
+        "texto": texto,
         "timestamp": datetime.now(timezone.utc),
         "lida": False,
     })
+
+    # Quem manda incrementa o contador de quem vai LER (o outro lado).
+    campo_incr = "nao_lidas_adm" if remetente_tipo == "motorista" else "nao_lidas_motorista"
+    updates = {
+        "motorista": motorista_usuario,
+        "atualizado_em": datetime.now(timezone.utc),
+        campo_incr: Increment(1),
+        "ultima_msg": texto,
+        "ultima_msg_de": remetente_tipo,
+    }
     if remetente_tipo == "motorista":
-        reabrir_ou_criar_conversa(motorista_usuario)
+        updates["status"] = "aberta"
+    db.collection("conversas_chat").document(motorista_usuario).set(updates, merge=True)
 
 
 # ── STATUS DA CONVERSA (aberta / finalizada) ────────────────────────
@@ -102,7 +137,9 @@ def finalizar_conversa_chat(motorista_usuario: str, finalizado_por: str):
 
 
 def obter_mensagens_chat(motorista_usuario: str, limite: int = 200):
-    """Retorna as mensagens da conversa de um motorista, em ordem cronológica."""
+    """Retorna as mensagens da conversa de um motorista, em ordem cronológica.
+    Usada para abrir e ler UMA conversa específica (não para contar não-lidas
+    de todo mundo — isso agora é listar_conversas_com_nao_lidas)."""
     query = (
         get_db().collection("mensagens_chat")
         .where("conversa_id", "==", motorista_usuario)
@@ -115,11 +152,21 @@ def obter_mensagens_chat(motorista_usuario: str, limite: int = 200):
 
 def marcar_mensagens_lidas(motorista_usuario: str, remetente_tipo_oposto: str):
     """
-    Marca como lidas as mensagens vindas do "outro lado".
+    Marca como lidas as mensagens vindas do "outro lado" e zera o contador
+    correspondente no doc-resumo da conversa.
     Chame com remetente_tipo_oposto="motorista" quando um ADM abrir a conversa,
     e com remetente_tipo_oposto="adm" quando o motorista abrir o chat dele.
     """
     db = get_db()
+
+    # Zera o contador incremental (rápido, 1 escrita) — é o que os badges usam.
+    campo_incr = "nao_lidas_adm" if remetente_tipo_oposto == "motorista" else "nao_lidas_motorista"
+    db.collection("conversas_chat").document(motorista_usuario).set(
+        {campo_incr: 0}, merge=True
+    )
+
+    # Mantém o histórico de "lida=True" nas mensagens individuais (usado na
+    # tela de conversa aberta, não no cálculo de badge).
     query = (
         db.collection("mensagens_chat")
         .where("conversa_id", "==", motorista_usuario)
@@ -139,17 +186,22 @@ def listar_conversas_com_nao_lidas(lista_motoristas: list):
     """
     Para o painel do ADM: retorna, para cada motorista, quantas mensagens
     não lidas ele mandou e qual foi a última mensagem.
+
+    OTIMIZADO: lê 1 documento pequeno (/conversas_chat/{motorista}) por
+    motorista, em vez de baixar até 1000 mensagens por motorista e contar
+    em Python. O contador vem pronto (nao_lidas_adm), mantido de forma
+    incremental por enviar_mensagem_chat / marcar_mensagens_lidas.
     """
+    db = get_db()
     resultado = []
     for m in lista_motoristas:
-        msgs = obter_mensagens_chat(m, limite=1000)
-        nao_lidas = sum(1 for x in msgs if x["remetente_tipo"] == "motorista" and not x["lida"])
-        ultima = msgs[-1] if msgs else None
+        doc = db.collection("conversas_chat").document(m).get()
+        d = doc.to_dict() if doc.exists else {}
         resultado.append({
             "motorista": m,
-            "nao_lidas": nao_lidas,
-            "ultima_msg": ultima["texto"] if ultima else "",
-            "ultima_hora": ultima["timestamp"] if ultima else None,
+            "nao_lidas": d.get("nao_lidas_adm", 0),
+            "ultima_msg": d.get("ultima_msg", ""),
+            "ultima_hora": d.get("atualizado_em"),
         })
     return resultado
 
