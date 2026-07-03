@@ -36,6 +36,14 @@ except Exception:
 
 BRT = timezone(timedelta(hours=-3))
 
+# Intervalo entre reconsultas ao Firestore para o cronômetro. O relógio na
+# tela segue "tickando" a cada 1s (client-side, sem custo de banco); só a
+# checagem "ainda está em andamento / já foi finalizado por outra aba?"
+# roda a cada N segundos. Isso é o que resolve a lentidão: antes, cada
+# tick de 1s do fragment baixava TODO o histórico do usuário no
+# diario_bordo; agora batemos no banco no máximo 1x a cada 10s.
+_INTERVALO_CHECAGEM_CRONOMETRO_SEG = 10
+
 PAPEIS_RACI = ["", "R", "A", "C", "I"]
 PRIORIDADES = ["Alto", "Médio", "Baixo"]
 STATUS_ATIV = ["Não Iniciado", "Em Andamento", "Concluído", "Atrasado"]
@@ -119,18 +127,57 @@ _FRAGMENT_DECORATOR = getattr(st, "fragment", None) or getattr(st, "experimental
 _TEM_FRAGMENT = _FRAGMENT_DECORATOR is not None
 
 
+def _obter_atividade_cacheada(uname: str, key_prefix: str, forcar: bool = False):
+    """
+    Camada de cache em session_state para a atividade em andamento.
+    Só consulta o Firestore se: nunca consultou ainda, se passou o
+    intervalo de _INTERVALO_CHECAGEM_CRONOMETRO_SEG desde a última vez,
+    ou se forcar=True (usado logo após iniciar/finalizar, para refletir
+    a ação imediatamente sem esperar o próximo ciclo).
+    """
+    cache_key   = f"{key_prefix}atividade_cache_{uname}"
+    checado_key = f"{key_prefix}ultima_checagem_{uname}"
+    agora = datetime.now(BRT)
+
+    ultima_checagem = st.session_state.get(checado_key)
+    precisa_checar = (
+        forcar
+        or cache_key not in st.session_state
+        or ultima_checagem is None
+        or (agora - ultima_checagem).total_seconds() > _INTERVALO_CHECAGEM_CRONOMETRO_SEG
+    )
+
+    if precisa_checar:
+        st.session_state[cache_key]   = obter_atividade_em_andamento_db(uname)
+        st.session_state[checado_key] = agora
+
+    return st.session_state[cache_key]
+
+
+def _invalidar_cache_cronometro(uname: str, key_prefix: str):
+    """Chamar depois de iniciar/finalizar uma atividade, para a tela
+    refletir a mudança na hora, sem esperar o próximo ciclo de 10s."""
+    st.session_state.pop(f"{key_prefix}atividade_cache_{uname}", None)
+    st.session_state.pop(f"{key_prefix}ultima_checagem_{uname}", None)
+
+
 def _widget_cronometro_corpo(uname, key_prefix=""):
     """
     Mostra a atividade em andamento com cronômetro ao vivo + botão Finalizar,
     ou o campo para iniciar uma nova, se não houver nenhuma rodando agora.
     Só existe UMA atividade em andamento por vez (regra simples: você só
     trabalha em uma coisa de cada vez, o cronômetro reflete isso).
+
+    IMPORTANTE (performance): a checagem "tem atividade em andamento?" é
+    cacheada em session_state e só bate no Firestore a cada
+    _INTERVALO_CHECAGEM_CRONOMETRO_SEG segundos — não a cada tick do
+    fragment (que roda a cada 1s só para atualizar o relógio na tela).
     """
     if not _CRONOMETRO_OK:
         st.warning("⚠️ Cronômetro indisponível no momento — peça para atualizar o database.py.")
         return
 
-    atual = obter_atividade_em_andamento_db(uname)
+    atual = _obter_atividade_cacheada(uname, key_prefix)
 
     if atual:
         inicio = atual.get("inicio")
@@ -168,6 +215,7 @@ def _widget_cronometro_corpo(uname, key_prefix=""):
                     atualizar_lembrete_pessoal_db(atual["origem_ref"], status="Executado")
                 except Exception:
                     pass
+            _invalidar_cache_cronometro(uname, key_prefix)
             (st.success if ok else st.error)(msg)
             time.sleep(.4)
             st.rerun()
@@ -195,6 +243,7 @@ def _widget_cronometro_corpo(uname, key_prefix=""):
                 if atividade_agora.strip():
                     try:
                         iniciar_atividade_diario_db(uname, atividade_agora.strip(), origem="diario")
+                        _invalidar_cache_cronometro(uname, key_prefix)
                         st.success("Cronômetro iniciado!")
                         time.sleep(.3)
                         st.rerun()
@@ -206,7 +255,9 @@ def _widget_cronometro_corpo(uname, key_prefix=""):
 
 # Duas versões do mesmo cronômetro:
 # - "vivo" (usado no Meu Dia): relógio atualiza sozinho a cada 1s via
-#   st.fragment — sem o bug de "timer fantasma" do streamlit-autorefresh.
+#   st.fragment — mas agora sem custo de Firestore a cada tick, graças
+#   ao cache em session_state (só bate no banco a cada ~10s ou quando
+#   forçado por uma ação do usuário).
 # - "estático" (usado no Diário de Bordo): não fica se auto-atualizando,
 #   evita rodar dois relógios/fragmentos independentes ao mesmo tempo.
 if _TEM_FRAGMENT:
@@ -320,7 +371,7 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
 
     st.divider()
 
-    tem_ativa = _CRONOMETRO_OK and obter_atividade_em_andamento_db(uname) is not None
+    tem_ativa = _CRONOMETRO_OK and _obter_atividade_cacheada(uname, "md_") is not None
 
     itens = []
     for l in lembretes:
@@ -476,6 +527,7 @@ def _render_meu_dia(uname, lembretes, raci_projetos):
                                     uname, it["texto"], origem="lembrete", origem_ref=it["ref"]
                                 )
                                 atualizar_lembrete_pessoal_db(it["ref"], status="Em Execução")
+                                _invalidar_cache_cronometro(uname, "md_")
                                 st.success("Cronômetro iniciado!")
                                 time.sleep(.3)
                                 st.rerun()
