@@ -333,10 +333,20 @@ def renderizar_home(papel: str, user: dict = None):
     lembretes = listar_lembretes_pessoais(uname)
     raci_projetos = listar_raci_projetos()
 
-    tabs = st.tabs([
-        "📅 Meu Dia", "📔 Diário de Bordo",
-        "📊 Meus Projetos (RACI)", "🔔 Lembretes & Produtividade",
-    ])
+    # A aba "Meus Projetos (RACI)" (criar/editar projetos, etapas, atividades,
+    # dossiê etc.) é visível SÓ para o ADM. Os demais papéis continuam vendo
+    # normalmente, na aba "Meu Dia", as atividades RACI em que a própria
+    # pessoa é Responsável (R) — isso não muda, pois já é filtrado por
+    # usuário em _render_meu_dia. O que fica restrito é a GESTÃO dos
+    # projetos (ver todas as etapas, todos os atendentes, editar, excluir).
+    mostra_raci = (papel == "adm")
+
+    nomes_abas = ["📅 Meu Dia", "📔 Diário de Bordo"]
+    if mostra_raci:
+        nomes_abas.append("📊 Meus Projetos (RACI)")
+    nomes_abas.append("🔔 Lembretes & Produtividade")
+
+    tabs = st.tabs(nomes_abas)
 
     with tabs[0]:
         _render_meu_dia(uname, lembretes, raci_projetos)
@@ -344,11 +354,14 @@ def renderizar_home(papel: str, user: dict = None):
     with tabs[1]:
         _render_diario_bordo(uname)
 
-    with tabs[2]:
-        _render_aba_raci(raci_projetos)
-
-    with tabs[3]:
-        _render_todos_lembretes(uname, lembretes, raci_projetos)
+    if mostra_raci:
+        with tabs[2]:
+            _render_aba_raci(raci_projetos)
+        with tabs[3]:
+            _render_todos_lembretes(uname, lembretes, raci_projetos)
+    else:
+        with tabs[2]:
+            _render_todos_lembretes(uname, lembretes, raci_projetos)
 
 
 # ════════════════════════════════════════════════════════════════
