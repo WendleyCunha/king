@@ -1105,8 +1105,7 @@ def _render_novo(user):
     if tickets_cliente:
         abertos_cli = sum(1 for x in tickets_cliente if x.get("status") in STATUS_ABERTOS)
         st.markdown(_html(f"""
-        <div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;
-                    padding:10px 14px;margin:6px 0;color:#6B5A2A;font-size:0.85rem;">
+        <div class="tk-banner">
             🗂 Este código de cliente já possui <b>{len(tickets_cliente)}</b> chamado(s)
             anterior(es){f" ({abertos_cli} em aberto)" if abertos_cli else ""}.
             O novo chamado será aberto separadamente, com <b>assunto próprio</b>, mas ficará
