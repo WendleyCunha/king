@@ -20,6 +20,15 @@ Correções / novidades desta versão:
       inteira do Firestore em TODO rerun da tela de Tickets (que acontece
       a cada clique — responder, mudar status, abrir popup etc.), e esse
       custo só cresce conforme o histórico de tickets aumenta.
+  [8] TICKET FINALIZADO passa a ser somente leitura: não é mais possível
+      comentar nem alterar status depois que o autor valida e encerra.
+  [9] HISTÓRICO POR CLIENTE: ao abrir um novo chamado, o código do cliente
+      é conferido contra os tickets já existentes. Se o cliente já tiver
+      chamado(s) anterior(es), eles são listados (com o histórico de
+      comentários) tanto na tela de abertura quanto dentro do detalhe do
+      ticket — assim vários chamados do mesmo cliente (assuntos diferentes)
+      ficam "amarrados" por um histórico único, sem misturar as conversas
+      de cada chamado.
 """
 import streamlit as st
 import pandas as pd
@@ -244,6 +253,48 @@ def ticket_visivel(t, user, papel) -> bool:
     # operacional
     return _usuario_atende(t, user)
 
+# ── Histórico por CLIENTE (Regra nova) ─────────────────────────────
+def normalizar_codigo_cliente(cod) -> str:
+    """Normaliza o código do cliente para comparação (remove espaços)."""
+    return str(cod or "").strip()
+
+def tickets_do_cliente(cliente_codigo: str, excluir_id: str = None) -> list:
+    """Busca, entre TODOS os tickets já existentes (qualquer departamento,
+    qualquer atendente, qualquer status), todos os que pertencem ao mesmo
+    código de cliente. É essa busca que 'amarra' vários chamados do mesmo
+    cliente — mesmo com assuntos diferentes — a um histórico único.
+    Ordenado do mais recente para o mais antigo."""
+    cod = normalizar_codigo_cliente(cliente_codigo)
+    if not cod:
+        return []
+    todos = listar_tickets()
+    return sorted(
+        [t for t in todos
+         if normalizar_codigo_cliente(t.get("cliente_codigo")) == cod
+         and t.get("id") != excluir_id],
+        key=lambda x: x.get("criado_em",""), reverse=True
+    )
+
+def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
+    """Renderiza a lista de tickets de um cliente (assunto, status, data)
+    com o histórico de comentários de cada um, dentro de um expander."""
+    for tc in lista_tickets:
+        sv_tc = STATUS_CFG.get(tc.get("status","aberto"), (tc.get("status",""),))[0]
+        st.markdown(_html(f"""
+        <div style="border-bottom:1px solid #eee;padding:8px 0;">
+            <b style="color:#2c3e50;">#{esc(tc.get("id_zendesk", str(tc.get("id",""))[:8]))}</b>
+            — {esc(tc.get("assunto","—"))}
+            &nbsp;·&nbsp; <span style="color:#6B5A2A;">{esc(sv_tc)}</span>
+            &nbsp;·&nbsp; <span style="color:#64778d;">{esc(str(tc.get("criado_em",""))[:16])}</span>
+            &nbsp;·&nbsp; 🏢 {esc(tc.get("departamento") or tc.get("categoria") or "—")}
+        </div>"""), unsafe_allow_html=True)
+        comentarios_tc = tc.get("comentarios", [])
+        if comentarios_tc:
+            for c in comentarios_tc:
+                st.caption(f'💬 **{c.get("autor","")}** ({str(c.get("data",""))[:16]}): {c.get("texto","")}')
+        else:
+            st.caption("Sem comentários registrados neste chamado.")
+
 # ── Popup (modal) de detalhe ───────────────────────────────────────
 def abrir_ticket_popup(tid, user, papel):
     """Abre o detalhe do ticket num POPUP (st.dialog). Se a versão do
@@ -310,6 +361,18 @@ def adicionar_comentario(tid: str, autor: str, texto: str):
         }]),
         "atualizado_em": agora_brt(),
     })
+    listar_tickets.clear()
+
+def vincular_ticket_relacionado(tid: str, novo_id: str):
+    """Adiciona o id do novo chamado à lista 'tickets_relacionados' de um
+    ticket anterior do mesmo cliente (amarração bidirecional, best-effort)."""
+    try:
+        from google.cloud.firestore import ArrayUnion
+        get_db().collection(COLECAO).document(tid).update({
+            "tickets_relacionados": ArrayUnion([novo_id]),
+        })
+    except Exception:
+        pass
     listar_tickets.clear()
 
 # ── Sync Zendesk ───────────────────────────────────────────────────
@@ -870,6 +933,19 @@ def _detalhe_corpo(t, tid, user, papel):
         </div>
     </div>"""), unsafe_allow_html=True)
 
+    # ── Histórico do CLIENTE — outros chamados com o mesmo código ──
+    # Mesmo cliente pode ter vários tickets (assuntos diferentes); todos
+    # ficam amarrados aqui via cliente_codigo, sem misturar as conversas.
+    relacionados = tickets_do_cliente(t.get("cliente_codigo"), excluir_id=tid)
+    if relacionados:
+        abertos_rel = sum(1 for x in relacionados if x.get("status") in STATUS_ABERTOS)
+        with st.expander(
+            f"🗂 Histórico do cliente — {len(relacionados)} outro(s) chamado(s)"
+            + (f" ({abertos_rel} em aberto)" if abertos_rel else ""),
+            expanded=False
+        ):
+            _render_bloco_historico_cliente(relacionados)
+
     # Descrição — texto puro e seguro
     st.markdown("**📝 Descrição**")
     st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
@@ -878,6 +954,7 @@ def _detalhe_corpo(t, tid, user, papel):
 
     status_atual = t.get("status", "aberto")
     terminal     = status_atual in ("finalizado", "cancelado")
+    finalizado   = status_atual == "finalizado"
     pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
     # Status editável só pelo atendente/supervisor/adm e enquanto não terminal.
     # A PRIORIDADE nunca é editável aqui (vem do cadastro da tabulação).
@@ -886,50 +963,56 @@ def _detalhe_corpo(t, tid, user, papel):
     STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
 
     # ── Tratativa: Status + Prioridade + resposta + Enviar (tudo junto) ──
+    # Ticket FINALIZADO é somente leitura: não pode comentar nem mudar status.
     st.markdown("---")
-    with st.form(f"form_trat_{tid}", clear_on_submit=True):
-        cs1, cs2 = st.columns(2)
-        with cs1:
-            if status_edit:
-                idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
-                novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
-                                           format_func=lambda k: STATUS_CFG[k][0],
-                                           key=f"det_status_{tid}")
-            else:
-                novo_status = status_atual
-                st.markdown("**Status**")
-                st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
-        with cs2:
-            st.markdown("**Prioridade**")
-            st.markdown(
-                pill(pv, pbg, pc) +
-                ' <span style="font-size:0.7rem;color:#94a3b8;">(definida na tabulação)</span>',
-                unsafe_allow_html=True)
+    if finalizado:
+        st.info("🔒 Este chamado está **finalizado** e foi encerrado definitivamente. "
+                 "Não é mais possível comentar ou alterar o status — consulte o "
+                 "histórico abaixo.")
+    else:
+        with st.form(f"form_trat_{tid}", clear_on_submit=True):
+            cs1, cs2 = st.columns(2)
+            with cs1:
+                if status_edit:
+                    idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
+                    novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
+                                               format_func=lambda k: STATUS_CFG[k][0],
+                                               key=f"det_status_{tid}")
+                else:
+                    novo_status = status_atual
+                    st.markdown("**Status**")
+                    st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
+            with cs2:
+                st.markdown("**Prioridade**")
+                st.markdown(
+                    pill(pv, pbg, pc) +
+                    ' <span style="font-size:0.7rem;color:#94a3b8;">(definida na tabulação)</span>',
+                    unsafe_allow_html=True)
 
-        novo_com = st.text_area("Escrever resposta / comentário", height=90,
-                                placeholder="Digite a tratativa...", key=f"com_{tid}")
-        enviar = st.form_submit_button("Enviar", type="primary", use_container_width=True)
+            novo_com = st.text_area("Escrever resposta / comentário", height=90,
+                                    placeholder="Digite a tratativa...", key=f"com_{tid}")
+            enviar = st.form_submit_button("Enviar", type="primary", use_container_width=True)
 
-        if enviar:
-            updates = {}
-            if status_edit and novo_status != status_atual:
-                updates["status"] = novo_status
-            tem_com = bool(novo_com and novo_com.strip())
-            if tem_com:
-                adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
-            if updates:
-                atualizar_ticket(tid, updates)
-            if tem_com or updates:
-                msg = "Enviado!"
-                if updates.get("status") == "resolvido":
-                    msg = ("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
-                           "permanece em 'Todos os tickets'.")
-                st.success(msg); time.sleep(.5)
-                if updates.get("status") in ("resolvido", "cancelado"):
-                    st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None
-                st.rerun()
-            else:
-                st.warning("Escreva uma resposta ou altere o status antes de enviar.")
+            if enviar:
+                updates = {}
+                if status_edit and novo_status != status_atual:
+                    updates["status"] = novo_status
+                tem_com = bool(novo_com and novo_com.strip())
+                if tem_com:
+                    adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
+                if updates:
+                    atualizar_ticket(tid, updates)
+                if tem_com or updates:
+                    msg = "Enviado!"
+                    if updates.get("status") == "resolvido":
+                        msg = ("✅ Ticket marcado como Resolvido! Saiu das suas tratativas e "
+                               "permanece em 'Todos os tickets'.")
+                    st.success(msg); time.sleep(.5)
+                    if updates.get("status") in ("resolvido", "cancelado"):
+                        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None
+                    st.rerun()
+                else:
+                    st.warning("Escreva uma resposta ou altere o status antes de enviar.")
 
     # ── Histórico dos comentários ──
     st.markdown("#### 💬 Histórico")
@@ -953,6 +1036,7 @@ def _detalhe_corpo(t, tid, user, papel):
 
     # ── Validação do AUTOR (no FIM do layout) ──
     # Quando resolvido, quem abriu valida (encerra) ou reabre.
+    # (Ticket já finalizado não passa por aqui — status_atual != "resolvido".)
     if status_atual == "resolvido" and t.get("aberto_por") == user.get("usuario"):
         st.markdown("---")
         st.markdown(_html(
@@ -1009,14 +1093,32 @@ def _render_novo(user):
     atend_prev = ", ".join(dest["atendentes"]) if dest["atendentes"] else f"todo o depto {dep_sel}"
     st.caption(f"⏱ SLA: **{sla_h}h** · 🎯 Prioridade: **{prio_padrao}** · 👥 Vai para: **{atend_prev}**")
 
+    # ── Regra nova: CÓDIGO DO CLIENTE fora do form, para validar/buscar
+    # histórico ao vivo (mesmo padrão do departamento/tabulação acima).
+    st.markdown("**Dados do cliente**")
+    cl1, cl2 = st.columns([1, 2])
+    cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234", key="novo_cli_codigo")
+    cli_nome   = cl2.text_input("Nome do cliente *", placeholder="Ex: João da Silva", key="novo_cli_nome")
+
+    cod_norm = normalizar_codigo_cliente(cli_codigo)
+    tickets_cliente = tickets_do_cliente(cod_norm) if cod_norm else []
+    if tickets_cliente:
+        abertos_cli = sum(1 for x in tickets_cliente if x.get("status") in STATUS_ABERTOS)
+        st.markdown(_html(f"""
+        <div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;
+                    padding:10px 14px;margin:6px 0;color:#6B5A2A;font-size:0.85rem;">
+            🗂 Este código de cliente já possui <b>{len(tickets_cliente)}</b> chamado(s)
+            anterior(es){f" ({abertos_cli} em aberto)" if abertos_cli else ""}.
+            O novo chamado será aberto separadamente, com <b>assunto próprio</b>, mas ficará
+            <b>amarrado ao mesmo histórico do cliente</b> (visível dentro do ticket).
+        </div>"""), unsafe_allow_html=True)
+        with st.expander(f"📜 Ver histórico deste cliente ({len(tickets_cliente)} chamado(s))"):
+            _render_bloco_historico_cliente(tickets_cliente)
+    elif cod_norm:
+        st.caption("✅ Nenhum chamado anterior encontrado para este código de cliente — será o primeiro dele.")
+
     with st.form("form_novo_ticket", clear_on_submit=True):
         assunto = st.text_input("Assunto *", placeholder="Descreva o problema")
-
-        # Dados do CLIENTE (Solicitante = usuário logado, automático)
-        cl1, cl2 = st.columns([1,2])
-        cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234")
-        cli_nome   = cl2.text_input("Nome do cliente *", placeholder="Ex: João da Silva")
-
         descricao  = st.text_area("Descrição *", height=120)
 
         st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**  ·  "
@@ -1025,7 +1127,7 @@ def _render_novo(user):
         if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
             if not assunto.strip() or not descricao.strip():
                 st.error("Preencha Assunto e Descrição.")
-            elif not cli_codigo.strip() or not cli_nome.strip():
+            elif not cod_norm or not cli_nome.strip():
                 st.error("Informe o Código e o Nome do cliente.")
             else:
                 novo_id = criar_ticket({
@@ -1037,13 +1139,26 @@ def _render_novo(user):
                     "prioridade": prio_padrao,        # vem da tabulação (Regra 4)
                     "horas_sla": sla_h,
                     "atendentes": dest["atendentes"], # Regra 2
-                    "cliente_codigo": cli_codigo.strip(),
+                    "cliente_codigo": cod_norm,
                     "cliente_nome": cli_nome.strip(),
                     "solicitante_nome": user.get("nome",""),   # sempre o logado
                     "aberto_por": user.get("usuario",""),
+                    # Amarração com o histórico do cliente (snapshot no momento
+                    # da abertura; a exibição em tela sempre recalcula ao vivo
+                    # via tickets_do_cliente, então continua correta mesmo se
+                    # novos tickets surgirem depois).
+                    "tickets_relacionados": [x.get("id") for x in tickets_cliente],
                 })
+                # Amarra de volta: cada ticket anterior do cliente passa a
+                # referenciar este novo também (histórico bidirecional).
+                for tc in tickets_cliente:
+                    if tc.get("id"):
+                        vincular_ticket_relacionado(tc["id"], novo_id)
+                aviso_hist = (f" 🗂 Amarrado ao histórico de {len(tickets_cliente)} "
+                              f"chamado(s) anterior(es) deste cliente."
+                              if tickets_cliente else "")
                 st.success(f"✅ Chamado **#{novo_id[:8]}** aberto em **{dep_sel}**! "
-                           f"Roteado para: {atend_prev}.")
+                           f"Roteado para: {atend_prev}.{aviso_hist}")
                 st.balloons(); time.sleep(1.5)
                 st.session_state.tk_modo = "lista"; st.rerun()
 
