@@ -12,7 +12,6 @@ from database import (
     # ── novas funções ──
     listar_departamentos, criar_departamento, deletar_departamento,
     atualizar_departamento_usuario, redefinir_senha_usuario,
-    listar_tabulacoes, criar_tabulacao, atualizar_tabulacao, deletar_tabulacao,
 )
 from modulo.mod_rastreio import renderizar_rastreio
 
@@ -494,33 +493,6 @@ elif modulo_ativo == "config" and papel == "adm":
                         (st.success if ok else st.error)(msg)
                         if ok: time.sleep(.6); st.rerun()
 
-            # Tabulações que o usuário atende (do depto dele)
-            st.markdown("**📋 Tabulações vinculadas**")
-            tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep]
-            if not tabs_dep:
-                st.caption("Nenhuma tabulação no departamento deste usuário.")
-            else:
-                optnames = {t["id"]: t["nome"] for t in tabs_dep}
-                atuais   = [t["id"] for t in tabs_dep if uname in t.get("atendentes", [])]
-                sel = st.multiselect("Tabulações que este usuário atende",
-                                     options=list(optnames.keys()),
-                                     default=atuais,
-                                     format_func=lambda x: optnames.get(x, x),
-                                     key=f"utabs_{ctx}_{uname}_{idx}")
-                if st.button("💾 Salvar tabulações", key=f"svutabs_{ctx}_{uname}_{idx}"):
-                    for t in tabs_dep:
-                        tid   = t["id"]
-                        atend = list(t.get("atendentes", []))
-                        tem   = uname in atend
-                        quer  = tid in sel
-                        if quer and not tem:
-                            atend.append(uname)
-                            atualizar_tabulacao(tid, atendentes=atend)
-                        elif (not quer) and tem:
-                            atend = [a for a in atend if a != uname]
-                            atualizar_tabulacao(tid, atendentes=atend)
-                    st.success("Tabulações atualizadas!"); time.sleep(.5); st.rerun()
-
             # Excluir
             if uname != "admin":
                 st.markdown("---")
@@ -540,41 +512,8 @@ elif modulo_ativo == "config" and papel == "adm":
                 atualizar_modulos_usuario(uname, ns)
                 st.success("Salvo!"); time.sleep(.5); st.rerun()
 
-    def _editar_tabulacao_card(tab, todos_usuarios):
-        atend = tab.get("atendentes", [])
-        atend_str = (", ".join(f"`{a}`" for a in atend) if atend else "🌐 Todo o departamento")
-        with st.expander(f"📋 **{tab['nome']}** · ⏱ {tab.get('sla_horas',24)}h"):
-            st.markdown(f"**Atendentes:** {atend_str}")
-            if tab.get("descricao"):
-                st.markdown(f"**Descrição:** {tab['descricao']}")
-
-            st.markdown("**Editar:**")
-            users_dep = [u for u in todos_usuarios if u.get("departamento") == tab.get("departamento")]
-            opts = {u["usuario"]: u.get("nome", u["usuario"]) for u in users_dep}
-            for a in atend:
-                opts.setdefault(a, a)
-            novos = st.multiselect("Atendentes", options=list(opts.keys()), default=atend,
-                                   format_func=lambda x: f"{opts.get(x,x)} ({x})",
-                                   key=f"atd_{tab['id']}")
-            e1, e2 = st.columns(2)
-            nova_prio = e1.selectbox("Prioridade", ["Normal","Alta","Urgente","Baixa"],
-                                     index=["Normal","Alta","Urgente","Baixa"].index(tab.get("prioridade","Normal")),
-                                     key=f"prio_{tab['id']}")
-            novo_sla  = e2.number_input("SLA (h)", min_value=1, max_value=720,
-                                        value=int(tab.get("sla_horas",24)), key=f"sla_{tab['id']}")
-            b1, b2 = st.columns(2)
-            if b1.button("💾 Salvar", key=f"svtab_{tab['id']}", type="primary"):
-                ok, msg = atualizar_tabulacao(tab["id"], atendentes=novos,
-                                              prioridade=nova_prio, sla_horas=novo_sla)
-                (st.success if ok else st.error)(msg)
-                if ok: time.sleep(.5); st.rerun()
-            if b2.button("🗑️ Excluir", key=f"deltab_{tab['id']}"):
-                ok, msg = deletar_tabulacao(tab["id"])
-                (st.success if ok else st.error)(msg)
-                if ok: time.sleep(.5); st.rerun()
-
-    aba_u, aba_m, aba_dep, aba_tab, aba_mot = st.tabs(
-        ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "📋 Tabulação", "🗂️ Motivos"]
+    aba_u, aba_m, aba_dep, aba_mot = st.tabs(
+        ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "🗂️ Motivos"]
     )
 
     # ─── ABA USUÁRIOS (sub-abas por departamento) ─────────────────
@@ -673,61 +612,15 @@ elif modulo_ativo == "config" and papel == "adm":
             st.info("Nenhum departamento cadastrado ainda.")
         for dep in deps:
             users_dep = [u for u in listar_usuarios() if u.get("departamento") == dep["nome"]]
-            tabs_dep  = [t for t in listar_tabulacoes() if t.get("departamento") == dep["nome"]]
-            with st.expander(f"🏢 **{dep['nome']}** · 👤 {len(users_dep)} usuário(s) · 📋 {len(tabs_dep)} tabulação(ões)"):
+            with st.expander(f"🏢 **{dep['nome']}** · 👤 {len(users_dep)} usuário(s)"):
                 if dep.get("descricao"):
                     st.caption(dep["descricao"])
                 if users_dep:
                     st.markdown("**Usuários:** " + ", ".join(f"`{u['usuario']}`" for u in users_dep))
-                if tabs_dep:
-                    st.markdown("**Tabulações:** " + ", ".join(f"`{t['nome']}`" for t in tabs_dep))
                 if st.button(f"🗑️ Excluir '{dep['nome']}'", key=f"deldep_{dep['id']}"):
                     ok, msg = deletar_departamento(dep["id"])
                     (st.success if ok else st.error)(msg)
                     if ok: time.sleep(.5); st.rerun()
-
-    # ─── ABA TABULAÇÃO (sub-abas por departamento) ────────────────
-    with aba_tab:
-        st.markdown("### 📋 Tabulações por Departamento")
-        deps           = listar_departamentos()
-        dep_nomes      = [d["nome"] for d in deps]
-        todos_usuarios = listar_usuarios()
-
-        if not dep_nomes:
-            st.warning("⚠️ Cadastre um departamento antes de criar tabulações.")
-        else:
-            sub = st.tabs([f"🏢 {d}" for d in dep_nomes])
-            for i, dn in enumerate(dep_nomes):
-                with sub[i]:
-                    with st.expander(f"➕ Nova Tabulação em {dn}", expanded=False):
-                        with st.form(f"form_tab_{i}"):
-                            t_nome = st.text_input("Nome da Tabulação",
-                                                   placeholder="Ex: Troca de produto, Entrega atrasada...",
-                                                   key=f"tn_{i}")
-                            t_desc = st.text_area("Descrição (opcional)", height=70, key=f"tdsc_{i}")
-                            users_do_dep = [u for u in todos_usuarios if u.get("departamento") == dn]
-                            opts = {u["usuario"]: u.get("nome", u["usuario"]) for u in users_do_dep}
-                            t_atendentes = st.multiselect(
-                                "Atendentes específicos (vazio = todo o departamento)",
-                                options=list(opts.keys()),
-                                format_func=lambda x: f"{opts.get(x,x)} ({x})",
-                                key=f"tatd_{i}")
-                            tp1, tp2 = st.columns(2)
-                            t_prio  = tp1.selectbox("Prioridade padrão", ["Normal","Alta","Urgente","Baixa"], key=f"tprio_{i}")
-                            t_sla   = tp2.number_input("SLA (horas)", min_value=1, max_value=720, value=24, step=1, key=f"tsla_{i}")
-                            if st.form_submit_button("Criar Tabulação"):
-                                ok, msg = criar_tabulacao(
-                                    nome=t_nome, departamento=dn, descricao=t_desc,
-                                    atendentes=t_atendentes, prioridade=t_prio, sla_horas=t_sla
-                                )
-                                (st.success if ok else st.error)(msg)
-                                if ok: time.sleep(.8); st.rerun()
-
-                    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dn]
-                    if not tabs_dep:
-                        st.info("Nenhuma tabulação neste departamento.")
-                    for tab in tabs_dep:
-                        _editar_tabulacao_card(tab, todos_usuarios)
 
     # ─── ABA MOTIVOS (Motivo Pai → Motivo Filho → Etapa) ──────────
     # Substitui a lógica antiga de Tabulação para o módulo de Tickets:
