@@ -573,8 +573,8 @@ elif modulo_ativo == "config" and papel == "adm":
                 (st.success if ok else st.error)(msg)
                 if ok: time.sleep(.5); st.rerun()
 
-    aba_u, aba_m, aba_dep, aba_tab = st.tabs(
-        ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "📋 Tabulação"]
+    aba_u, aba_m, aba_dep, aba_tab, aba_mot = st.tabs(
+        ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "📋 Tabulação", "🗂️ Motivos"]
     )
 
     # ─── ABA USUÁRIOS (sub-abas por departamento) ─────────────────
@@ -728,6 +728,19 @@ elif modulo_ativo == "config" and papel == "adm":
                         st.info("Nenhuma tabulação neste departamento.")
                     for tab in tabs_dep:
                         _editar_tabulacao_card(tab, todos_usuarios)
+
+    # ─── ABA MOTIVOS (Motivo Pai → Motivo Filho → Etapa) ──────────
+    # Substitui a lógica antiga de Tabulação para o módulo de Tickets:
+    # Motivo Pai carrega o SLA de triagem (SLA1); Motivo Filho e Etapa são
+    # escolhidos pelo atendente durante o atendimento (ver mod_tickets.py).
+    # Etapas vermelhas exigem data futura (SLA2) e travam a trilha do ticket.
+    with aba_mot:
+        try:
+            from modulo.mod_motivos import renderizar_motivos
+            renderizar_motivos(papel, listar_usuarios())
+        except Exception as _erro_import_motivos:
+            st.error("⚠️ Falha ao carregar o cadastro de Motivos. Detalhe técnico abaixo:")
+            st.exception(_erro_import_motivos)
 
 
 else:
