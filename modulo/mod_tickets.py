@@ -1229,11 +1229,6 @@ def _render_novo(user):
         motivo_obj = next(m for m in pais_dep if m["nome"] == pai_sel)
         sla_dias = int(motivo_obj.get("sla_dias", 5))
 
-    prioridade_sel = st.selectbox(
-        "Prioridade *", list(PRIO_CFG.keys()),
-        format_func=lambda k: PRIO_CFG[k][0], index=2, key="novo_prioridade"
-    )
-
     st.caption(f"⏱ Prazo para triagem (1º SLA): **{sla_dias} dia(s)**. O atendente que "
                f"receber o chamado tem esse prazo para analisar e classificar a Etapa correta.")
 
@@ -1277,7 +1272,7 @@ def _render_novo(user):
                     "motivo_pai": motivo_obj["nome"] if motivo_obj else "",
                     "motivo_pai_id": motivo_obj["id"] if motivo_obj else "",
                     "sla1_prazo_dias": sla_dias,
-                    "prioridade": prioridade_sel,
+                    "prioridade": (motivo_obj.get("prioridade", "normal") if motivo_obj else "normal"),
                     "atendentes": [],
                     "cliente_codigo": cod_norm,
                     "cliente_nome": cli_nome.strip(),
