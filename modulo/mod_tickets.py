@@ -1,34 +1,47 @@
 """
-KingStar — Módulo de Tickets  (v3 + patch de performance)
+KingStar — Módulo de Tickets  (v4 — Motivos Pai/Filho/Etapa + SLA em cascata)
 ─────────────────────────────────────────────────────────────────────────────
-Correções / novidades desta versão:
-  [1] Bug do HTML aparecendo como código-fonte → corrigido com _html()
-      (remove a indentação que o Markdown interpretava como bloco de código)
-      + escape do texto livre do usuário (assunto, descrição, etc).
-  [2] Abertura escolhe o DEPARTAMENTO. Só usuários do depto tratam o ticket
-      (roteamento via resolver_destinatario_ticket).
-  [3] Só aparecem as TABULAÇÕES vinculadas ao departamento escolhido.
-  [4] SLA vem da tabulação e gera ALERTA PISCANTE quando vence com ticket pendente.
-  [5] Visibilidade por papel:
-        - operacional → só os próprios tickets
-        - supervisor  → todos os tickets + aba "Equipe" do seu departamento
-        - adm         → tudo de todos
-  [6] ADM pode excluir TODOS os tickets pelo painel Sync Zendesk.
-  [7] PERFORMANCE: listar_tickets() agora é cacheada (ttl curto) e toda
-      função de escrita (criar/atualizar/comentar/excluir) invalida esse
-      cache explicitamente. Antes, listar_tickets() baixava a coleção
-      inteira do Firestore em TODO rerun da tela de Tickets (que acontece
-      a cada clique — responder, mudar status, abrir popup etc.), e esse
-      custo só cresce conforme o histórico de tickets aumenta.
-  [8] TICKET FINALIZADO passa a ser somente leitura: não é mais possível
-      comentar nem alterar status depois que o autor valida e encerra.
-  [9] HISTÓRICO POR CLIENTE: ao abrir um novo chamado, o código do cliente
-      é conferido contra os tickets já existentes. Se o cliente já tiver
-      chamado(s) anterior(es), eles são listados (com o histórico de
-      comentários) tanto na tela de abertura quanto dentro do detalhe do
-      ticket — assim vários chamados do mesmo cliente (assuntos diferentes)
-      ficam "amarrados" por um histórico único, sem misturar as conversas
-      de cada chamado.
+Novidades desta versão (mantém tudo da v3 + patch de performance):
+
+  [10] CLASSIFICAÇÃO EM ÁRVORE (Motivo Pai → Motivo Filho → Etapa):
+       - Abertura do chamado escolhe Departamento + MOTIVO PAI (que carrega
+         o SLA de triagem, ex.: 5 dias) — isso é o SLA1.
+       - O atendente, ao tratar o ticket, define o MOTIVO FILHO e a ETAPA.
+         Esse é o momento em que o SLA1 é congelado (cumprido/perdido) —
+         serve pra saber se ele chegou a tempo de pelo menos analisar e
+         direcionar o caso.
+       - Etapa PRETA: não exige nada além disso; o prazo continua sendo o
+         do Motivo Pai (SLA1), mesmo depois de classificada.
+       - Etapa VERMELHA: exige que o atendente informe uma DATA FUTURA
+         (SLA2). Ao confirmar, a trilha (Motivo Filho + Etapa + Data) fica
+         TRAVADA PARA SEMPRE — evita "disfarçar" atraso mudando a etapa
+         depois. A partir daí, o prazo mostrado no ticket passa a ser essa
+         data (substitui o SLA do Pai enquanto essa etapa estiver vigente).
+       - Etapas podem "reaproveitar" a árvore de outro Motivo Filho (ex.:
+         "Bloqueio de estoque" dentro de "Troca Adaptação" reaproveita a
+         árvore cadastrada em "Compras"), evitando recadastro duplicado.
+       - Etapas podem vincular atendentes específicos; ao serem escolhidas,
+         o ticket é reatribuído automaticamente a eles.
+
+  [11] ALERTA DE INTERAÇÃO (🔵 piscante azul-claro):
+       Toda vez que alguém interage num ticket (comenta, muda status,
+       classifica a etapa, ou registra um contato/observação avulsa), o
+       sistema grava quem foi e quando. Se essa interação NÃO foi do(s)
+       atendente(s) responsável(is) pelo ticket, um badge azul piscante
+       aparece pra eles — tanto na lista quanto no detalhe — até que ELES
+       PRÓPRIOS interajam com o ticket (não basta abrir/visualizar).
+       Isso cobre o caso de alguém da operação ter tido contato com o
+       cliente sem o "dono" do ticket saber.
+
+  [12] REGISTRO DE CONTATO/OBSERVAÇÃO: qualquer pessoa com visibilidade do
+       ticket (mesmo não sendo o atendente responsável) pode registrar uma
+       observação avulsa, que dispara o alerta de interação acima para o
+       responsável.
+
+  Tudo o mais (roteamento por departamento, tabulações legadas em tickets
+  antigos/Zendesk, visibilidade por papel, ticket finalizado = somente
+  leitura, histórico por cliente, performance com cache, Sync Zendesk,
+  exclusão total, Visão Geral da Operação) permanece como na v3.
 """
 import streamlit as st
 import pandas as pd
@@ -46,6 +59,11 @@ from database import (
     get_db,
     listar_departamentos, listar_tabulacoes, resolver_destinatario_ticket,
     listar_usuarios,
+)
+from mod_motivos import (
+    listar_motivos_pai, motivos_pai_do_departamento,
+    listar_motivos_filho, listar_motivos_filho_de,
+    listar_etapas, listar_etapas_de, resolver_etapa_final,
 )
 
 BRT     = timezone(timedelta(hours=-3))
@@ -80,6 +98,7 @@ GOLD       = "#C9A84C"   # dourado base
 GOLD_WARN  = "#D4A12C"   # faltando <30min  (ouro médio)
 GOLD_VENC  = "#8A6D1F"   # SLA vencido      (ouro escuro / bronze)
 GREEN_OK   = "#16A34A"   # barra saudável
+BLUE_INFO  = "#60A5FA"   # interação nova (azul-claro)
 
 # ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
@@ -102,6 +121,7 @@ def texto_busca(t) -> str:
         t.get("tabulacao",""), t.get("departamento",""),
         t.get("categoria",""), t.get("subcategoria",""),
         t.get("prioridade",""), t.get("status",""),
+        t.get("motivo_pai",""), t.get("motivo_filho",""), t.get("etapa_atual",""),
     ]
     for a in t.get("atendentes", []):
         partes.append(a)
@@ -129,51 +149,88 @@ def transferir_tickets(tids: list, novo_responsavel: str):
     listar_tickets.clear()
     return n
 
-def sla_restante(criado_em: str, horas_sla: int = 24) -> tuple:
-    """Retorna (texto, pct_usado, vencido)."""
+# ── SLA em cascata (SLA1 = Motivo Pai / SLA2 = Etapa vermelha travada) ──
+def deadline_ativo(t) -> tuple:
+    """Retorna (datetime_limite ou None, origem) onde origem é:
+      'etapa' → SLA2 (etapa vermelha já travada, com data confirmada)
+      'pai'   → SLA1 (prazo do Motivo Pai, ou horas_sla legado p/ tickets
+                antigos/Zendesk que não usam a árvore de motivos)
+    """
+    if t.get("etapa_vermelha") and t.get("etapa_data_prevista"):
+        try:
+            d = datetime.fromisoformat(str(t["etapa_data_prevista"]))
+            d = d.replace(hour=23, minute=59, second=59, tzinfo=BRT)
+            return d, "etapa"
+        except Exception:
+            pass
     try:
-        dt = datetime.fromisoformat(criado_em.replace(" ","T")).replace(tzinfo=BRT)
-        limite = dt + timedelta(hours=horas_sla)
-        agora  = datetime.now(BRT)
-        diff   = limite - agora
-        total  = timedelta(hours=horas_sla).total_seconds()
-        decorrido = (agora - dt).total_seconds()
-        pct    = min(decorrido / total * 100, 100)
-        if diff.total_seconds() <= 0:
-            return "Expirado", 100, True
-        h = int(diff.total_seconds() // 3600)
-        m = int((diff.total_seconds() % 3600) // 60)
-        return (f"{h}h {m}m" if h > 0 else f"{m}min"), pct, False
+        dt = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
     except Exception:
+        return None, "pai"
+    if t.get("sla1_prazo_dias") is not None:
+        return dt + timedelta(days=t.get("sla1_prazo_dias")), "pai"
+    return dt + timedelta(hours=t.get("horas_sla", 24)), "pai"
+
+def sla_label(t) -> str:
+    _, origem = deadline_ativo(t)
+    return "Prazo da etapa" if origem == "etapa" else "SLA"
+
+def sla_restante(t) -> tuple:
+    """Retorna (texto, pct_usado, vencido) considerando o prazo ATIVO."""
+    limite, origem = deadline_ativo(t)
+    if limite is None:
         return "—", 0, False
+    inicio_str = t.get("etapa_definida_em") if origem == "etapa" else t.get("criado_em")
+    try:
+        inicio = datetime.fromisoformat(str(inicio_str).replace(" ","T")).replace(tzinfo=BRT)
+    except Exception:
+        inicio = limite - timedelta(hours=24)
+    agora  = datetime.now(BRT)
+    total  = (limite - inicio).total_seconds() or 1
+    pct    = min(max((agora - inicio).total_seconds() / total * 100, 0), 100)
+    diff   = (limite - agora).total_seconds()
+    if diff <= 0:
+        return "Expirado", 100, True
+    h = int(diff // 3600); m = int((diff % 3600) // 60)
+    return (f"{h}h {m}m" if h > 0 else f"{m}min"), pct, False
 
 def pill(texto, bg, cor):
     return (f'<span style="background:{bg};color:{cor};padding:2px 10px;'
             f'border-radius:12px;font-size:0.72rem;font-weight:700;">{esc(texto)}</span>')
 
 def sla_estado(t) -> str:
-    """Retorna o estado do SLA: 'ok', 'warn' (faltam <=30min) ou 'venc' (estourou).
+    """Retorna o estado do SLA ATIVO: 'ok', 'warn' (<=30min) ou 'venc'.
     Só vale para tickets pendentes; resolvidos/cancelados sempre 'ok'."""
     if t.get("status") not in STATUS_ABERTOS:
         return "ok"
-    try:
-        dt = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
-        limite = dt + timedelta(hours=t.get("horas_sla", 24))
-        restante = (limite - datetime.now(BRT)).total_seconds()
-    except Exception:
+    limite, _ = deadline_ativo(t)
+    if limite is None:
         return "ok"
+    restante = (limite - datetime.now(BRT)).total_seconds()
     if restante <= 0:
         return "venc"
-    if restante <= 1800:      # 30 minutos
+    if restante <= 1800:
         return "warn"
     return "ok"
 
 def ticket_vencido_pendente(t) -> bool:
-    """True se o SLA estourou E o ticket ainda está pendente."""
+    """True se o prazo ATIVO estourou E o ticket ainda está pendente."""
     if t.get("status") not in STATUS_ABERTOS:
         return False
-    _, _, venc = sla_restante(t.get("criado_em",""), t.get("horas_sla", 24))
+    _, _, venc = sla_restante(t)
     return venc
+
+# ── Interação / alerta azul ─────────────────────────────────────────
+def tem_interacao_nao_vista(t, user) -> bool:
+    """True se houve uma interação de OUTRA pessoa que o(s) responsável(is)
+    ainda não 'atendeu' (a única forma de limpar é o próprio responsável
+    interagir de volta — comentário, mudança de status ou classificação)."""
+    uname = user.get("usuario","")
+    if uname not in t.get("atendentes", []):
+        return False
+    if t.get("ultima_interacao_autor") == uname:
+        return False
+    return bool(t.get("ultima_interacao_em"))
 
 # ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
 def _atribuido_a(t, user) -> bool:
@@ -197,22 +254,8 @@ def resolvido_em_validacao(t) -> bool:
     return t.get("status") == "resolvido" and _horas_desde_atualizacao(t) < JANELA_VALIDACAO_H
 
 def classificar_fila(t, user) -> str:
-    """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma).
-    O ticket nunca está em duas caixas — apenas caminha entre elas.
-
-    Precedência:
-      1) meus        → tickets ABERTOS pelo usuário logado.
-                       Se resolvido: fica em 'meus' por até 24h para o autor VALIDAR;
-                       depois disso (ou se finalizado/cancelado) sai de 'meus'.
-      2) (a partir daqui, só tickets que caíram para EU atender)
-      3) vencidos    → pendente e com SLA estourado.
-      4) aberto      → recém-nascido (status 'aberto'), sem interação.
-      5) urgente     → já em interação e prioridade urgente.
-      6) em_andamento→ já em interação, prioridade normal.
-      7) None        → resolvidos/finalizados/cancelados ou que não são meus.
-    """
+    """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma)."""
     uname = user.get("usuario","")
-    # 1) Tickets que EU abri (acompanhamento / validação)
     if t.get("aberto_por") == uname:
         status = t.get("status")
         if status in ("cancelado", "finalizado"):
@@ -220,19 +263,15 @@ def classificar_fila(t, user) -> str:
         if status == "resolvido":
             return "meus" if resolvido_em_validacao(t) else None
         return "meus"
-    # 2) Daqui pra frente, só o que caiu para eu atender
     if not _atribuido_a(t, user):
         return None
     status = t.get("status")
-    if status not in STATUS_ABERTOS:          # resolvido/finalizado/cancelado → fora
+    if status not in STATUS_ABERTOS:
         return None
-    # 3) SLA estourado tem prioridade
     if ticket_vencido_pendente(t):
         return "vencidos"
-    # 4) Recém-nascido, sem interação
     if status == "aberto":
         return "aberto"
-    # 5/6) Já em interação (em_andamento/aguardando)
     if t.get("prioridade") == "urgente":
         return "urgente"
     return "em_andamento"
@@ -250,20 +289,13 @@ def ticket_visivel(t, user, papel) -> bool:
         return True
     if papel == "supervisor":
         return t.get("departamento","") == (user.get("departamento","") or "—")
-    # operacional
     return _usuario_atende(t, user)
 
 # ── Histórico por CLIENTE (Regra nova) ─────────────────────────────
 def normalizar_codigo_cliente(cod) -> str:
-    """Normaliza o código do cliente para comparação (remove espaços)."""
     return str(cod or "").strip()
 
 def tickets_do_cliente(cliente_codigo: str, excluir_id: str = None) -> list:
-    """Busca, entre TODOS os tickets já existentes (qualquer departamento,
-    qualquer atendente, qualquer status), todos os que pertencem ao mesmo
-    código de cliente. É essa busca que 'amarra' vários chamados do mesmo
-    cliente — mesmo com assuntos diferentes — a um histórico único.
-    Ordenado do mais recente para o mais antigo."""
     cod = normalizar_codigo_cliente(cliente_codigo)
     if not cod:
         return []
@@ -276,8 +308,6 @@ def tickets_do_cliente(cliente_codigo: str, excluir_id: str = None) -> list:
     )
 
 def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
-    """Renderiza a lista de tickets de um cliente (assunto, status, data)
-    com o histórico de comentários de cada um, dentro de um expander."""
     for tc in lista_tickets:
         sv_tc = STATUS_CFG.get(tc.get("status","aberto"), (tc.get("status",""),))[0]
         st.markdown(_html(f"""
@@ -297,8 +327,6 @@ def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
 
 # ── Popup (modal) de detalhe ───────────────────────────────────────
 def abrir_ticket_popup(tid, user, papel):
-    """Abre o detalhe do ticket num POPUP (st.dialog). Se a versão do
-    Streamlit não suportar, cai no modo detalhe inline."""
     deco = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
     if deco is None:
         st.session_state.tk_detalhe = tid
@@ -311,7 +339,6 @@ def abrir_ticket_popup(tid, user, papel):
             _carregar_e_render_detalhe(tid, user, papel, modal=True)
         _popup()
     except TypeError:
-        # versões antigas sem o parâmetro width
         @deco("Detalhe do Ticket")
         def _popup2():
             _carregar_e_render_detalhe(tid, user, papel, modal=True)
@@ -320,14 +347,6 @@ def abrir_ticket_popup(tid, user, papel):
 # ── CRUD Firestore ─────────────────────────────────────────────────
 @st.cache_data(ttl=10, show_spinner=False)
 def listar_tickets() -> list:
-    """
-    OTIMIZADO: cacheada por 10s. Antes, essa função baixava a coleção
-    'tickets' INTEIRA do Firestore em todo rerun da tela (que acontece a
-    cada clique de responder/mudar status/abrir popup/paginar). O custo
-    crescia junto com o histórico de tickets (incluindo os importados do
-    Zendesk). Toda função de escrita abaixo chama listar_tickets.clear()
-    para não mostrar dado desatualizado por mais que alguns segundos.
-    """
     docs = get_db().collection(COLECAO).stream()
     return sorted(
         [d.to_dict() for d in docs],
@@ -340,32 +359,41 @@ def criar_ticket(dados: dict) -> str:
         "id": ref.id, "criado_em": agora_brt(),
         "atualizado_em": agora_brt(), "origem": "interno",
         "comentarios": [],
+        "historico_etapas": [],
+        "sla1_definido": False,
+        "sla1_cumprido": None,
+        "etapa_vermelha": False,
+        "etapa_travada": False,
     }
-    base.update(dados)                  # respeita status/horas_sla/prioridade enviados
+    base.update(dados)
     base.setdefault("status", "aberto")
     base.setdefault("horas_sla", 24)
     ref.set(base)
     listar_tickets.clear()
     return ref.id
 
-def atualizar_ticket(tid: str, dados: dict):
+def atualizar_ticket(tid: str, dados: dict, interacao_de: str = None):
+    dados = dict(dados)
     dados["atualizado_em"] = agora_brt()
+    if interacao_de:
+        dados["ultima_interacao_em"]     = agora_brt()
+        dados["ultima_interacao_autor"]  = interacao_de
     get_db().collection(COLECAO).document(tid).update(dados)
     listar_tickets.clear()
 
-def adicionar_comentario(tid: str, autor: str, texto: str):
+def adicionar_comentario(tid: str, autor_nome: str, autor_usuario: str, texto: str):
     from google.cloud.firestore import ArrayUnion
     get_db().collection(COLECAO).document(tid).update({
         "comentarios": ArrayUnion([{
-            "autor": autor, "texto": texto, "data": agora_brt()
+            "autor": autor_nome, "texto": texto, "data": agora_brt()
         }]),
         "atualizado_em": agora_brt(),
+        "ultima_interacao_em": agora_brt(),
+        "ultima_interacao_autor": autor_usuario,
     })
     listar_tickets.clear()
 
 def vincular_ticket_relacionado(tid: str, novo_id: str):
-    """Adiciona o id do novo chamado à lista 'tickets_relacionados' de um
-    ticket anterior do mesmo cliente (amarração bidirecional, best-effort)."""
     try:
         from google.cloud.firestore import ArrayUnion
         get_db().collection(COLECAO).document(tid).update({
@@ -400,7 +428,7 @@ def sync_zendesk() -> tuple:
                 "status":       mapa.get(t.get("status","open"),"aberto"),
                 "prioridade":   mprio.get(t.get("priority","normal"),"normal"),
                 "categoria":    "Zendesk/TERMOS",
-                "departamento": "",            # Zendesk não tem depto interno
+                "departamento": "",
                 "tabulacao":    "",
                 "criado_em":    t.get("created_at","")[:19].replace("T"," "),
                 "atualizado_em":t.get("updated_at","")[:19].replace("T"," "),
@@ -416,7 +444,6 @@ def sync_zendesk() -> tuple:
 
 # ── Exclusão total (ADM) ───────────────────────────────────────────
 def deletar_todos_tickets() -> int:
-    """Deleta TODOS os documentos da coleção de tickets. Retorna a quantidade."""
     db = get_db()
     total = 0
     while True:
@@ -439,10 +466,8 @@ def renderizar_tickets(papel: str, user: dict = None):
         user = {"role": papel, "nome": "Usuário", "usuario": "user", "departamento": ""}
 
     todos_geral = listar_tickets()
-    # Aplica visibilidade por papel (Regra 5)
     todos = [t for t in todos_geral if ticket_visivel(t, user, papel)]
 
-    # ── Contagens por fila (já com escopo do papel) ───────────────
     ct = {
         "todos":       len(todos),
         "aberto":      sum(1 for t in todos if t.get("status")=="aberto"),
@@ -454,7 +479,6 @@ def renderizar_tickets(papel: str, user: dict = None):
         "vencidos":    sum(1 for t in todos if ticket_vencido_pendente(t)),
     }
 
-    # ── CSS específico do módulo ──────────────────────────────────
     st.markdown(_html("""
     <style>
     .tk-badge { background:#e2e8f0; color:#475569; padding:2px 8px;
@@ -481,7 +505,6 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-top:4px solid #C9A84C; }
 
-    /* ── Card clicável (o título é um botão) ── */
     div[class*="st-key-tkcard_"] button {
         text-align:left !important; justify-content:flex-start !important;
         background:#fff !important; border:1px solid #e2e8f0 !important;
@@ -504,15 +527,20 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-cardbody.venc { border-left-color:#8A6D1F; }
     .tk-cardbody.warn { border-left-color:#D4A12C; }
     .tk-cardmeta { font-size:0.75rem; color:#64778d; margin:2px 0 6px; }
-    /* badges piscantes do SLA (paleta dourada) */
     .tk-blink-venc { animation:tkpiscar 1s infinite; background:#8A6D1F; color:#fff;
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:800; }
     .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FBF3D9; color:#7A5C12;
         border:1px solid #D4A12C; padding:1px 8px; border-radius:10px;
         font-size:0.7rem; font-weight:700; }
+    .tk-blink-info { animation:tkpiscar 1.3s infinite; background:#DBEAFE; color:#1D4ED8;
+        border:1px solid #60A5FA; padding:1px 8px; border-radius:10px;
+        font-size:0.7rem; font-weight:800; }
     .tk-badge-val { background:#F3ECD9; color:#6B5A2A; border:1px solid #A98C3D;
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
-    /* Botões "primary" e de formulário em dourado (some o vermelho do tema) */
+    .tk-badge-sla1-ok { background:#DCFCE7; color:#15803D; border:1px solid #16A34A;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
+    .tk-badge-sla1-perd { background:#F3ECD9; color:#8A6D1F; border:1px solid #A98C3D;
+        padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
     button[kind="primary"], button[kind="primaryFormSubmit"],
     button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
     [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
@@ -523,32 +551,26 @@ def renderizar_tickets(papel: str, user: dict = None):
     [data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover {
         background-color:#b8973f !important; border-color:#b8973f !important;
         color:#fff !important; }
-    /* TODO botão de formulário (Salvar/Enviar/Encerrar) em dourado — robusto p/ qualquer versão */
     [data-testid="stFormSubmitButton"] button {
         background-color:#C9A84C !important; border-color:#C9A84C !important; color:#fff !important; }
     [data-testid="stFormSubmitButton"] button:hover {
         background-color:#b8973f !important; border-color:#b8973f !important; color:#fff !important; }
-    /* Foco de campos em dourado (remove a borda vermelha do tema) */
     .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
         border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
     div[data-baseweb="select"] > div:focus-within,
     div[data-baseweb="select"] > div[aria-expanded="true"],
     div[data-baseweb="input"]:focus-within {
         border-color:#C9A84C !important; box-shadow:0 0 0 1px #C9A84C !important; }
-    /* cursor/realce do baseweb (caret) que fica vermelho */
     div[data-baseweb="base-input"] input { caret-color:#C9A84C !important; }
     </style>
     """), unsafe_allow_html=True)
 
-    # ── Estado ────────────────────────────────────────────────────
     if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "meus"
     if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
     if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
 
     uname = user.get("usuario","")
 
-    # ── Conjuntos das filas (MUTUAMENTE EXCLUSIVOS) ───────────────
-    # Cada ticket cai em no máximo uma caixa de trabalho (classificar_fila).
     buckets = {"meus": [], "aberto": [], "em_andamento": [], "urgente": [], "vencidos": []}
     for t in todos:
         f = classificar_fila(t, user)
@@ -559,15 +581,13 @@ def renderizar_tickets(papel: str, user: dict = None):
     f_andam   = buckets["em_andamento"]
     f_urg     = buckets["urgente"]
     f_venc    = buckets["vencidos"]
-    f_global  = todos_geral                                          # GLOBAL: de todos
+    f_global  = todos_geral
 
-    # ── Largura ajustável dos painéis ─────────────────────────────
     with st.expander("↔️ Ajustar largura dos painéis", expanded=False):
         st.slider("Largura da coluna de filas", 0.6, 2.4,
                   float(st.session_state.get("tk_larg", 1.0)), 0.1, key="tk_larg")
     larg = float(st.session_state.get("tk_larg", 1.0))
 
-    # ── Layout: filas + barra vertical + conteúdo ─────────────────
     col_filas, col_sep, col_main = st.columns([larg, 0.06, 4.0])
 
     with col_sep:
@@ -594,7 +614,6 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.session_state.tk_detalhe = None
                 st.rerun()
 
-        # Caixa separada — VISÃO GLOBAL (todos os tickets de todos)
         st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
                     unsafe_allow_html=True)
         st.caption("VISÃO GLOBAL")
@@ -619,19 +638,18 @@ def renderizar_tickets(papel: str, user: dict = None):
         if papel == "adm":
             if st.button("🔄 Sync Zendesk", use_container_width=True):
                 st.session_state.tk_modo = "sync"; st.rerun()
+            if st.button("🗂️ Motivos / Etapas", use_container_width=True):
+                st.session_state.tk_modo = "motivos"; st.rerun()
 
-    # ── Conteúdo principal ────────────────────────────────────────
     with col_main:
         modo = st.session_state.tk_modo
 
-        # Banner piscante de SLA vencido — em qualquer modo (paleta dourada)
         if f_venc:
             st.markdown(_html(
-                f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com SLA ESTOURADO '
+                f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
                 f'aguardando tratativa! Verifique a fila "SLA vencidos".</div>'
             ), unsafe_allow_html=True)
 
-        # ══ LISTA ════════════════════════════════════════════════
         if modo in ("lista", None):
             fila = st.session_state.tk_fila
             mapa_fila = {
@@ -655,15 +673,12 @@ def renderizar_tickets(papel: str, user: dict = None):
             else:
                 _render_lista_em_grid(filtrados, user, papel, fila)
 
-        # ══ DETALHE ══════════════════════════════════════════════
         elif modo == "detalhe":
             _render_detalhe(st.session_state.tk_detalhe, user, papel)
 
-        # ══ NOVO TICKET (Regras 2, 3, 4) ════════════════════════
         elif modo == "novo":
             _render_novo(user)
 
-        # ══ VISÃO GERAL DA OPERAÇÃO (só supervisor/adm) ══════════
         elif modo == "equipe":
             if papel not in ("supervisor", "adm"):
                 st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
@@ -671,9 +686,18 @@ def renderizar_tickets(papel: str, user: dict = None):
             else:
                 _render_visao_geral_operacao(user, papel, todos_geral)
 
-        # ══ SYNC ZENDESK ═════════════════════════════════════════
         elif modo == "sync":
             _render_sync()
+
+        elif modo == "motivos":
+            if papel != "adm":
+                st.warning("🔒 Acesso restrito a Administradores.")
+                st.session_state.tk_modo = "lista"
+            else:
+                if st.button("← Voltar"):
+                    st.session_state.tk_modo = "lista"; st.rerun()
+                from mod_motivos import renderizar_motivos
+                renderizar_motivos(papel, listar_usuarios())
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -682,8 +706,6 @@ def renderizar_tickets(papel: str, user: dict = None):
 PAGE_SIZE_CARDS = 9
 
 def _paginar(lista, chave_estado):
-    """Recorta a lista na página atual (guardada em session_state) e
-    retorna os itens da página + info de navegação."""
     total = len(lista)
     total_paginas = max(1, (total + PAGE_SIZE_CARDS - 1) // PAGE_SIZE_CARDS)
     pag_key = f"tk_pag_{chave_estado}"
@@ -695,7 +717,6 @@ def _paginar(lista, chave_estado):
     return lista[inicio:fim], pag_atual, total_paginas, pag_key, total
 
 def _nav_paginas(pag_atual, total_paginas, pag_key, total):
-    """Botões Anterior/Próxima + indicador 'Página X de Y'."""
     if total_paginas <= 1:
         return
     st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
@@ -721,16 +742,11 @@ def _nav_paginas(pag_atual, total_paginas, pag_key, total):
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
 def _render_lista_em_grid(filtrados, user, papel, fila):
-    """Mostra os tickets em CARDS lado a lado (grid de 3 ou 4 colunas),
-    com opção de organizar por Motivo (Tabulação), Departamento ou sem
-    agrupamento. Vale para qualquer fila e qualquer papel (atendente ou
-    supervisor) — não substitui nenhuma função existente, só a forma
-    de exibição da lista."""
     ctrl1, ctrl2 = st.columns([2, 1])
     with ctrl1:
         modo_agrupar = st.selectbox(
             "🗂️ Organizar por",
-            ["Motivo (Tabulação)", "Departamento", "Sem agrupamento"],
+            ["Motivo Pai", "Departamento", "Sem agrupamento"],
             index=0, key=f"tk_agrupar_{fila}"
         )
     with ctrl2:
@@ -743,9 +759,9 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
     if modo_agrupar == "Departamento":
         for t in filtrados:
             grupos[t.get("departamento") or t.get("categoria") or "—"].append(t)
-    elif modo_agrupar == "Motivo (Tabulação)":
+    elif modo_agrupar == "Motivo Pai":
         for t in filtrados:
-            grupos[t.get("tabulacao") or "Sem tabulação"].append(t)
+            grupos[t.get("motivo_pai") or t.get("tabulacao") or "Sem motivo"].append(t)
     else:
         grupos["__todos__"] = filtrados
 
@@ -756,7 +772,7 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
                  f'estourado</span>') if n_venc else ""
 
         if modo_agrupar != "Sem agrupamento":
-            icone = "📋" if modo_agrupar == "Motivo (Tabulação)" else "🏢"
+            icone = "📋" if modo_agrupar == "Motivo Pai" else "🏢"
             st.markdown(_html(
                 f'<div style="margin:14px 0 6px;font-weight:700;color:#2c3e50;">'
                 f'{icone} {esc(chave)} <span style="color:#64778d;font-weight:500;">— '
@@ -773,65 +789,68 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
         _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
+def _caminho_motivo(t) -> str:
+    partes = [p for p in [t.get("motivo_pai"), t.get("motivo_filho"), t.get("etapa_atual")] if p]
+    return " › ".join(partes) if partes else ""
+
+
 def _render_card_clicavel(t, user, papel):
-    """Card cujo título é um BOTÃO (clica em cima → abre o popup).
-    Borda/realce piscam conforme o SLA (suave a 30min, forte se vencido)
-    e a barra de tempo (verde/âmbar/vermelha) é mantida."""
     tid    = t.get("id","")
-    estado = sla_estado(t)                       # ok | warn | venc
-    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    estado = sla_estado(t)
+    sl, spct, svenc = sla_restante(t)
     sv = STATUS_CFG.get(t.get("status","aberto"), ("—",))[0]
     pv = PRIO_CFG.get(t.get("prioridade","normal"), ("—",))[0]
     icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
     idv  = t.get("id_zendesk", tid[:8])
     titulo = str(t.get("assunto","Sem título"))[:60]
     dep    = t.get("departamento") or t.get("categoria") or "—"
+    caminho_mot = _caminho_motivo(t)
     cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
     cli_cod = t.get("cliente_codigo")
     cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
     num_com = len(t.get("comentarios", []))
 
-    # Cor da barra de tempo (mantém o verde quando saudável)
     if   estado == "venc": barra = GOLD_VENC
     elif estado == "warn": barra = GOLD_WARN
     elif spct > 70:        barra = "#CA8A04"
     else:                  barra = "#16A34A"
 
-    # Badge piscante por estado
     if estado == "venc":
-        badge = '<span class="tk-blink-venc">⛔ SLA VENCIDO</span>'
+        badge = '<span class="tk-blink-venc">⛔ PRAZO VENCIDO</span>'
     elif estado == "warn":
         badge = '<span class="tk-blink-warn">⏰ Faltam &lt; 30min</span>'
     else:
         badge = ""
 
-    # Aguardando validação do autor (resolvido, dentro da janela de 24h)
     if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario") \
             and resolvido_em_validacao(t):
         badge += ' <span class="tk-badge-val">✔ valide este chamado</span>'
 
-    # Título clicável = abre o popup
+    if tem_interacao_nao_vista(t, user):
+        badge += ' <span class="tk-blink-info">🔵 Nova interação</span>'
+
     if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
                  use_container_width=True):
         abrir_ticket_popup(tid, user, papel)
 
     meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
+    meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
     st.markdown(_html(f"""
     <div class="tk-cardbody {estado if estado!='ok' else ''}">
         <div class="tk-cardmeta">
             🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)} &nbsp;·&nbsp;
-            <b>{esc(sv)}</b> / {esc(pv)}{meta_com} &nbsp; {badge}
+            <b>{esc(sv)}</b> / {esc(pv)}{meta_com}{meta_mot} &nbsp; {badge}
         </div>
         <div class="tk-sla-bar">
             <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{barra};"></div>
         </div>
-        <div class="tk-sla-text">SLA: <b style="color:{barra};">{esc(sl)}</b></div>
+        <div class="tk-sla-text">{esc(sla_label(t))}: <b style="color:{barra};">{esc(sl)}</b></div>
     </div>"""), unsafe_allow_html=True)
 
 
 def _render_card(t):
     tid   = t.get("id","")
-    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sl, spct, svenc = sla_restante(t)
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
     origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
@@ -840,7 +859,7 @@ def _render_card(t):
     pendente_vencido = ticket_vencido_pendente(t)
 
     dep    = esc(t.get("departamento") or t.get("categoria") or "—")
-    tabul  = esc(t.get("tabulacao") or "")
+    caminho_mot = esc(_caminho_motivo(t))
     titulo = esc(str(t.get("assunto","Sem título"))[:55])
     id_vis = esc(t.get("id_zendesk", tid[:8]))
     cliente = esc(t.get("cliente_nome") or t.get("solicitante_nome", t.get("solicitante","—")))
@@ -848,8 +867,8 @@ def _render_card(t):
     cliente_txt = f"{cliente}" + (f" ({esc(cli_cod)})" if cli_cod else "")
     criado = esc(t.get("criado_em","")[:16])
 
-    blink    = '<span class="tk-blink">SLA VENCIDO</span>' if pendente_vencido else ""
-    meta_tab = f"&nbsp;·&nbsp; 📋 {tabul}" if tabul else ""
+    blink    = '<span class="tk-blink">PRAZO VENCIDO</span>' if pendente_vencido else ""
+    meta_mot = f"&nbsp;·&nbsp; 📂 {caminho_mot}" if caminho_mot else ""
     meta_com = f"&nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
 
     st.markdown(_html(f"""
@@ -858,7 +877,7 @@ def _render_card(t):
             <div>
                 <div class="tk-card-title">{origem_icon} #{id_vis} — {titulo}</div>
                 <div class="tk-card-meta">
-                    🏢 {dep}{meta_tab} &nbsp;·&nbsp; 🧾 {cliente_txt} &nbsp;·&nbsp; {criado}{meta_com}
+                    🏢 {dep}{meta_mot} &nbsp;·&nbsp; 🧾 {cliente_txt} &nbsp;·&nbsp; {criado}{meta_com}
                 </div>
             </div>
             <div style="text-align:right;white-space:nowrap;">
@@ -868,12 +887,11 @@ def _render_card(t):
         <div class="tk-sla-bar">
             <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{sla_cor};"></div>
         </div>
-        <div class="tk-sla-text">SLA: <b style="color:{sla_cor};">{esc(sl)}</b></div>
+        <div class="tk-sla-text">{esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b></div>
     </div>"""), unsafe_allow_html=True)
 
 
 def _carregar_e_render_detalhe(tid, user, papel, modal=False):
-    """Carrega o ticket e renderiza o corpo. Usado pelo popup e pelo modo inline."""
     if not tid:
         if not modal:
             st.session_state.tk_modo = "lista"; st.rerun()
@@ -886,27 +904,149 @@ def _carregar_e_render_detalhe(tid, user, papel, modal=False):
 
 
 def _render_detalhe(tid, user, papel):
-    """Modo inline (fallback quando não há st.dialog)."""
     if st.button("← Voltar para a fila"):
         st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
     _carregar_e_render_detalhe(tid, user, papel, modal=False)
 
 
+# ── Classificação Motivo Filho / Etapa (SLA1 + SLA2) ───────────────
+def _bloco_classificacao(t, tid, user, papel, pode_agir):
+    motivo_pai_nome = t.get("motivo_pai")
+    if not motivo_pai_nome:
+        return  # ticket antigo/legado (sem árvore de motivos) — não se aplica
+
+    st.markdown("---")
+    st.markdown("#### 🗂️ Classificação (Motivo Filho / Etapa)")
+
+    if t.get("etapa_travada"):
+        st.markdown(_html(f"""
+        <div style="background:#F3ECD9;border:1px solid #A98C3D;border-radius:10px;
+                    padding:10px 14px;color:#6B5A2A;">
+            🔒 <b>{esc(motivo_pai_nome)} › {esc(t.get('motivo_filho',''))} › {esc(t.get('etapa_atual',''))}</b><br>
+            <span style="font-size:0.8rem;">Prazo desta etapa: <b>{esc(str(t.get('etapa_data_prevista','—')))}</b>
+            &nbsp;·&nbsp; Definido em {esc(str(t.get('etapa_definida_em',''))[:16])} por
+            {esc(t.get('etapa_definida_por',''))}. Esta trilha não pode mais ser alterada.</span>
+        </div>"""), unsafe_allow_html=True)
+        return
+
+    if not pode_agir:
+        if t.get("motivo_filho"):
+            st.caption(f"📂 {esc(motivo_pai_nome)} › {esc(t.get('motivo_filho'))} › {esc(t.get('etapa_atual',''))}")
+        else:
+            st.caption(f"📂 {esc(motivo_pai_nome)} — aguardando classificação do atendente.")
+        return
+
+    filhos = listar_motivos_filho_de(t.get("motivo_pai_id",""))
+    if not filhos:
+        st.caption("Nenhum Motivo Filho cadastrado para este Motivo Pai ainda "
+                   "(cadastre em 🗂️ Motivos / Etapas).")
+        return
+
+    filho_nomes = [f["nome"] for f in filhos]
+    idx_f = filho_nomes.index(t["motivo_filho"]) if t.get("motivo_filho") in filho_nomes else 0
+    filho_sel_nome = st.selectbox("Motivo Filho", filho_nomes, index=idx_f, key=f"mf_{tid}")
+    filho_obj = next(f for f in filhos if f["nome"] == filho_sel_nome)
+
+    caminho_salvo = t.get("etapa_atual","").split(" › ") if t.get("etapa_atual") else []
+    caminho = []
+    filho_atual = filho_obj
+    etapa_final = None
+    nivel = 0
+    while True:
+        etapas = listar_etapas_de(filho_atual["id"])
+        if not etapas:
+            break
+        etapa_nomes = [e["nome"] for e in etapas]
+        prev_nome = caminho_salvo[nivel] if nivel < len(caminho_salvo) else None
+        idx_e = etapa_nomes.index(prev_nome) if prev_nome in etapa_nomes else 0
+        label = "Etapa" if nivel == 0 else f"Etapa (nível {nivel+1})"
+        etapa_sel_nome = st.selectbox(label, etapa_nomes, index=idx_e, key=f"et_{tid}_{nivel}")
+        etapa_obj = next(e for e in etapas if e["nome"] == etapa_sel_nome)
+        caminho.append(etapa_obj["nome"])
+        if etapa_obj.get("reaproveita_motivo_filho_id"):
+            alvo = next((f for f in listar_motivos_filho() if f["id"] == etapa_obj["reaproveita_motivo_filho_id"]), None)
+            if not alvo:
+                etapa_final = etapa_obj
+                break
+            filho_atual = alvo
+            nivel += 1
+            continue
+        etapa_final = etapa_obj
+        break
+
+    if etapa_final is None:
+        st.caption("Este Motivo Filho ainda não tem Etapas cadastradas.")
+        return
+
+    vermelha = bool(etapa_final.get("requer_data"))
+    data_prevista = None
+    if vermelha:
+        st.markdown('<span class="tk-blink-warn">🔴 Esta etapa exige um prazo (2º SLA)</span>',
+                    unsafe_allow_html=True)
+        data_prevista = st.date_input(
+            "Data prevista (obrigatória, futura) *",
+            min_value=datetime.now(BRT).date() + timedelta(days=1),
+            key=f"dt_{tid}"
+        )
+        st.caption("⚠️ Após confirmar, esta trilha (Motivo Filho + Etapa + Data) fica "
+                   "TRAVADA — não será mais possível alterar. Só confirme se realmente "
+                   "precisa desse prazo; caso contrário, resolva o ticket normalmente.")
+
+    label_confirmar = "🔒 Confirmar etapa e travar prazo" if vermelha else "✅ Definir etapa"
+    if st.button(label_confirmar, key=f"confirmar_etapa_{tid}", type="primary"):
+        agora = agora_brt()
+        updates = {
+            "motivo_filho": filho_obj["nome"],
+            "etapa_atual": " › ".join(caminho),
+            "etapa_vermelha": vermelha,
+        }
+        if not t.get("sla1_definido"):
+            limite_pai, _ = deadline_ativo({**t, "etapa_vermelha": False, "etapa_data_prevista": None})
+            cumprido = (datetime.now(BRT) <= limite_pai) if limite_pai else True
+            updates["sla1_definido"]    = True
+            updates["sla1_cumprido"]    = cumprido
+            updates["sla1_definido_em"] = agora
+        if vermelha:
+            updates["etapa_data_prevista"] = data_prevista.isoformat()
+            updates["etapa_definida_em"]   = agora
+            updates["etapa_definida_por"]  = user.get("nome","")
+            updates["etapa_travada"]       = True
+        if etapa_final.get("atendentes_vinculados"):
+            updates["atendentes"]     = etapa_final["atendentes_vinculados"]
+            updates["atribuido_para"] = etapa_final["atendentes_vinculados"][0]
+
+        from google.cloud.firestore import ArrayUnion
+        updates["historico_etapas"] = ArrayUnion([{
+            "etapa": " › ".join(caminho), "quando": agora,
+            "por": user.get("nome",""), "vermelha": vermelha,
+            "data_prevista": data_prevista.isoformat() if vermelha else None,
+        }])
+        atualizar_ticket(tid, updates, interacao_de=user.get("usuario",""))
+        st.success("Classificação registrada!" + (" Prazo travado." if vermelha else ""))
+        time.sleep(.6); st.rerun()
+
+
 def _detalhe_corpo(t, tid, user, papel):
-    sl, spct, svenc = sla_restante(t.get("criado_em",""), t.get("horas_sla",24))
+    sl, spct, svenc = sla_restante(t)
     sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
     pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
     sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
     pendente_vencido = ticket_vencido_pendente(t)
 
     if pendente_vencido:
-        st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o SLA VENCIDO!</div>'),
+        st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o prazo VENCIDO!</div>'),
                     unsafe_allow_html=True)
+
+    if tem_interacao_nao_vista(t, user):
+        st.markdown(
+            '<span class="tk-blink-info">🔵 Houve uma nova interação neste ticket que você '
+            'ainda não respondeu</span>', unsafe_allow_html=True
+        )
 
     id_vis = esc(t.get("id_zendesk", tid[:8]))
     titulo = esc(t.get("assunto","—"))
     dep    = esc(t.get("departamento") or t.get("categoria") or "—")
-    tabul  = esc(t.get("tabulacao") or "—")
+    caminho_mot = esc(_caminho_motivo(t)) or esc(t.get("motivo_pai") or "—")
     criado = esc(t.get("criado_em","")[:16])
     atend  = t.get("atendentes", [])
     atend_str = esc(", ".join(atend)) if atend else "🌐 Todo o departamento"
@@ -914,14 +1054,21 @@ def _detalhe_corpo(t, tid, user, papel):
     cli_nome = esc(t.get("cliente_nome") or "—")
     solicit  = esc(t.get("solicitante_nome") or "—")
 
+    sla1_badge = ""
+    if t.get("sla1_definido"):
+        if t.get("sla1_cumprido"):
+            sla1_badge = '<span class="tk-badge-sla1-ok">🎯 Triagem: dentro do prazo</span>'
+        else:
+            sla1_badge = '<span class="tk-badge-sla1-perd">🎯 Triagem: prazo perdido</span>'
+
     st.markdown(_html(f"""
     <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};
                 border-radius:12px;padding:18px 20px;margin-bottom:16px;">
         <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
         <div style="margin-bottom:10px;">
-            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
+            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}
             <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
-                🏢 {dep} &nbsp;·&nbsp; 📋 {tabul} &nbsp;·&nbsp; {criado}
+                🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
             </span>
         </div>
         <div style="font-size:0.8rem;color:#2c3e50;margin-bottom:6px;">
@@ -929,13 +1076,10 @@ def _detalhe_corpo(t, tid, user, papel):
         </div>
         <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
             🙋 Solicitante: {solicit} &nbsp;·&nbsp; 👥 Atendentes: {atend_str}
-            &nbsp;·&nbsp; ⏱ SLA: <b style="color:{sla_cor};">{esc(sl)}</b>
+            &nbsp;·&nbsp; ⏱ {esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b>
         </div>
     </div>"""), unsafe_allow_html=True)
 
-    # ── Histórico do CLIENTE — outros chamados com o mesmo código ──
-    # Mesmo cliente pode ter vários tickets (assuntos diferentes); todos
-    # ficam amarrados aqui via cliente_codigo, sem misturar as conversas.
     relacionados = tickets_do_cliente(t.get("cliente_codigo"), excluir_id=tid)
     if relacionados:
         abertos_rel = sum(1 for x in relacionados if x.get("status") in STATUS_ABERTOS)
@@ -946,7 +1090,6 @@ def _detalhe_corpo(t, tid, user, papel):
         ):
             _render_bloco_historico_cliente(relacionados)
 
-    # Descrição — texto puro e seguro
     st.markdown("**📝 Descrição**")
     st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
                  height=140, disabled=True, label_visibility="collapsed",
@@ -956,14 +1099,12 @@ def _detalhe_corpo(t, tid, user, papel):
     terminal     = status_atual in ("finalizado", "cancelado")
     finalizado   = status_atual == "finalizado"
     pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
-    # Status editável só pelo atendente/supervisor/adm e enquanto não terminal.
-    # A PRIORIDADE nunca é editável aqui (vem do cadastro da tabulação).
     status_edit  = pode_agir and not terminal
-    # Status que o atendente pode definir (sem 'finalizado' — isso é da validação do autor)
     STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
 
-    # ── Tratativa: Status + Prioridade + resposta + Enviar (tudo junto) ──
-    # Ticket FINALIZADO é somente leitura: não pode comentar nem mudar status.
+    # ── Classificação Motivo Filho / Etapa (SLA1 congelado / SLA2 travado) ──
+    _bloco_classificacao(t, tid, user, papel, pode_agir and not terminal)
+
     st.markdown("---")
     if finalizado:
         st.info("🔒 Este chamado está **finalizado** e foi encerrado definitivamente. "
@@ -984,10 +1125,7 @@ def _detalhe_corpo(t, tid, user, papel):
                     st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
             with cs2:
                 st.markdown("**Prioridade**")
-                st.markdown(
-                    pill(pv, pbg, pc) +
-                    ' <span style="font-size:0.7rem;color:#94a3b8;">(definida na tabulação)</span>',
-                    unsafe_allow_html=True)
+                st.markdown(pill(pv, pbg, pc), unsafe_allow_html=True)
 
             novo_com = st.text_area("Escrever resposta / comentário", height=90,
                                     placeholder="Digite a tratativa...", key=f"com_{tid}")
@@ -999,9 +1137,10 @@ def _detalhe_corpo(t, tid, user, papel):
                     updates["status"] = novo_status
                 tem_com = bool(novo_com and novo_com.strip())
                 if tem_com:
-                    adicionar_comentario(tid, user.get("nome",""), novo_com.strip())
+                    adicionar_comentario(tid, user.get("nome",""), user.get("usuario",""),
+                                          novo_com.strip())
                 if updates:
-                    atualizar_ticket(tid, updates)
+                    atualizar_ticket(tid, updates, interacao_de=user.get("usuario",""))
                 if tem_com or updates:
                     msg = "Enviado!"
                     if updates.get("status") == "resolvido":
@@ -1014,7 +1153,21 @@ def _detalhe_corpo(t, tid, user, papel):
                 else:
                     st.warning("Escreva uma resposta ou altere o status antes de enviar.")
 
-    # ── Histórico dos comentários ──
+    # ── Registro de contato/observação avulsa (qualquer pessoa com acesso) ──
+    if not finalizado:
+        with st.expander("💬 Registrar um contato/observação (visível ao responsável)"):
+            st.caption("Use isto se você teve contato com o cliente sobre este caso mas "
+                       "não é o responsável formal pela tratativa. O responsável vai ver "
+                       "um alerta 🔵 de nova interação até responder.")
+            nota = st.text_area("O que você conversou ou observou?", key=f"nota_{tid}")
+            if st.button("Registrar observação", key=f"btnnota_{tid}"):
+                if nota.strip():
+                    adicionar_comentario(tid, user.get("nome",""), user.get("usuario",""),
+                                          f"📎 {nota.strip()}")
+                    st.success("Registrado!"); time.sleep(.5); st.rerun()
+                else:
+                    st.warning("Escreva algo antes de registrar.")
+
     st.markdown("#### 💬 Histórico")
     comentarios = t.get("comentarios", [])
     if not comentarios:
@@ -1034,9 +1187,14 @@ def _detalhe_corpo(t, tid, user, papel):
                 f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
                 f'</div></div>'), unsafe_allow_html=True)
 
-    # ── Validação do AUTOR (no FIM do layout) ──
-    # Quando resolvido, quem abriu valida (encerra) ou reabre.
-    # (Ticket já finalizado não passa por aqui — status_atual != "resolvido".)
+    if t.get("historico_etapas"):
+        with st.expander("🗂️ Histórico de classificação (Motivo Filho / Etapa)"):
+            for h in t["historico_etapas"]:
+                marca = "🔴" if h.get("vermelha") else "⚫"
+                prazo = f" · prazo: {h.get('data_prevista')}" if h.get("vermelha") else ""
+                st.caption(f"{marca} {h.get('etapa','')} — por {h.get('por','')} "
+                           f"em {str(h.get('quando',''))[:16]}{prazo}")
+
     if status_atual == "resolvido" and t.get("aberto_por") == user.get("usuario"):
         st.markdown("---")
         st.markdown(_html(
@@ -1049,11 +1207,11 @@ def _detalhe_corpo(t, tid, user, papel):
         cva, cvb = st.columns(2)
         if cva.button("✅ Validar e encerrar", key=f"val_{tid}", type="primary",
                       use_container_width=True):
-            atualizar_ticket(tid, {"status": "finalizado"})
+            atualizar_ticket(tid, {"status": "finalizado"}, interacao_de=user.get("usuario",""))
             st.success("Chamado encerrado!"); time.sleep(.5)
             st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
         if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
-            atualizar_ticket(tid, {"status": "em_andamento"})
+            atualizar_ticket(tid, {"status": "em_andamento"}, interacao_de=user.get("usuario",""))
             st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
 
 
@@ -1069,32 +1227,28 @@ def _render_novo(user):
                    "Configurações → Departamentos.")
         return
 
-    # Regra 2: escolher o DEPARTAMENTO (selectbox FORA do form p/ filtrar tabulações ao vivo)
     dep_sel = st.selectbox("Departamento *", dep_nomes, key="novo_dep")
 
-    # Regra 3: só tabulações do departamento escolhido
-    tabs_dep  = [t for t in listar_tabulacoes() if t.get("departamento") == dep_sel]
-    tab_nomes = [t["nome"] for t in tabs_dep]
-    if tab_nomes:
-        tab_sel = st.selectbox("Tabulação *", tab_nomes, key="novo_tab")
-        tab_obj = next((t for t in tabs_dep if t["nome"] == tab_sel), None)
+    pais_dep = motivos_pai_do_departamento(dep_sel)
+    if not pais_dep:
+        st.info("Este departamento ainda não tem Motivos cadastrados. Peça ao administrador "
+                "para cadastrar em 🗂️ Motivos / Etapas. Será usado um SLA padrão de 5 dias.")
+        motivo_obj = None
+        sla_dias = 5
     else:
-        st.info("Este departamento não tem tabulações. Cadastre em Configurações → Tabulação. "
-                "O ticket será aberto sem tabulação (SLA padrão 24h, para todo o departamento).")
-        tab_sel, tab_obj = None, None
+        pai_nomes = [m["nome"] for m in pais_dep]
+        pai_sel = st.selectbox("Motivo *", pai_nomes, key="novo_motivo_pai")
+        motivo_obj = next(m for m in pais_dep if m["nome"] == pai_sel)
+        sla_dias = int(motivo_obj.get("sla_dias", 5))
 
-    # Regra 4: SLA / prioridade derivados da tabulação
-    sla_h = int(tab_obj.get("sla_horas", 24)) if tab_obj else 24
-    prio_padrao = (tab_obj.get("prioridade","Normal").lower() if tab_obj else "normal")
-    if prio_padrao not in PRIO_CFG: prio_padrao = "normal"
+    prioridade_sel = st.selectbox(
+        "Prioridade *", list(PRIO_CFG.keys()),
+        format_func=lambda k: PRIO_CFG[k][0], index=2, key="novo_prioridade"
+    )
 
-    # Prévia do roteamento
-    dest = resolver_destinatario_ticket(dep_sel, tab_sel)
-    atend_prev = ", ".join(dest["atendentes"]) if dest["atendentes"] else f"todo o depto {dep_sel}"
-    st.caption(f"⏱ SLA: **{sla_h}h** · 🎯 Prioridade: **{prio_padrao}** · 👥 Vai para: **{atend_prev}**")
+    st.caption(f"⏱ Prazo para triagem (1º SLA): **{sla_dias} dia(s)**. O atendente que "
+               f"receber o chamado tem esse prazo para analisar e classificar a Etapa correta.")
 
-    # ── Regra nova: CÓDIGO DO CLIENTE fora do form, para validar/buscar
-    # histórico ao vivo (mesmo padrão do departamento/tabulação acima).
     st.markdown("**Dados do cliente**")
     cl1, cl2 = st.columns([1, 2])
     cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234", key="novo_cli_codigo")
@@ -1120,8 +1274,7 @@ def _render_novo(user):
         assunto = st.text_input("Assunto *", placeholder="Descreva o problema")
         descricao  = st.text_area("Descrição *", height=120)
 
-        st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**  ·  "
-                   f"🎯 Prioridade (definida pela tabulação): **{prio_padrao}**")
+        st.caption(f"🙋 Solicitante (automático): **{user.get('nome','—')}**")
 
         if st.form_submit_button("🚀 Abrir Chamado", type="primary", use_container_width=True):
             if not assunto.strip() or not descricao.strip():
@@ -1132,24 +1285,18 @@ def _render_novo(user):
                 novo_id = criar_ticket({
                     "assunto": assunto.strip(), "descricao": descricao.strip(),
                     "departamento": dep_sel,
-                    "tabulacao": tab_sel or "",
-                    "categoria": dep_sel,             # compat. com telas antigas
-                    "subcategoria": tab_sel or "",
-                    "prioridade": prio_padrao,        # vem da tabulação (Regra 4)
-                    "horas_sla": sla_h,
-                    "atendentes": dest["atendentes"], # Regra 2
+                    "categoria": dep_sel,
+                    "motivo_pai": motivo_obj["nome"] if motivo_obj else "",
+                    "motivo_pai_id": motivo_obj["id"] if motivo_obj else "",
+                    "sla1_prazo_dias": sla_dias,
+                    "prioridade": prioridade_sel,
+                    "atendentes": [],
                     "cliente_codigo": cod_norm,
                     "cliente_nome": cli_nome.strip(),
-                    "solicitante_nome": user.get("nome",""),   # sempre o logado
+                    "solicitante_nome": user.get("nome",""),
                     "aberto_por": user.get("usuario",""),
-                    # Amarração com o histórico do cliente (snapshot no momento
-                    # da abertura; a exibição em tela sempre recalcula ao vivo
-                    # via tickets_do_cliente, então continua correta mesmo se
-                    # novos tickets surgirem depois).
                     "tickets_relacionados": [x.get("id") for x in tickets_cliente],
                 })
-                # Amarra de volta: cada ticket anterior do cliente passa a
-                # referenciar este novo também (histórico bidirecional).
                 for tc in tickets_cliente:
                     if tc.get("id"):
                         vincular_ticket_relacionado(tc["id"], novo_id)
@@ -1157,59 +1304,53 @@ def _render_novo(user):
                               f"chamado(s) anterior(es) deste cliente."
                               if tickets_cliente else "")
                 st.success(f"✅ Chamado **#{novo_id[:8]}** aberto em **{dep_sel}**! "
-                           f"Roteado para: {atend_prev}.{aviso_hist}")
+                           f"Aguardando triagem.{aviso_hist}")
                 st.balloons(); time.sleep(1.5)
                 st.session_state.tk_modo = "lista"; st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════
 # VISÃO GERAL DA OPERAÇÃO — bloco exclusivo de Supervisor/ADM.
-# Código totalmente separado da experiência do atendente comum.
-# Estrutura em ABAS:
-#   📊 Dashboard       → KPIs gerais, top atendente, motivo mais acionado
-#   👥 Por Atendente   → produtividade individual + transferência de tickets
-#   📋 Por Motivo      → volume por tabulação + quem está com cada uma
-#   ⏳ SLA Perdido      → ranking de quem mais perdeu SLA e detalhe dos casos
-#   📥 Exportar         → relatório completo em Excel (.xlsx, 3 abas)
-# Filtros de Atendente e Motivo no topo valem para TODAS as abas.
 # ═══════════════════════════════════════════════════════════════════
 
 def sla_foi_perdido(t) -> bool:
-    """Define se o SLA deste ticket foi (ou está) estourado, mesmo que o
-    ticket já tenha sido resolvido/finalizado/cancelado:
-      - Pendente  → usa o relógio atual (ticket_vencido_pendente).
-      - Encerrado → compara o tempo entre abertura e a última atualização
-        registrada (proxy de quando foi tratado) contra o SLA da tabulação.
-    Isso permite contabilizar perdas de SLA HISTÓRICAS no relatório, não só
-    as que ainda estão pendentes agora."""
+    """SLA (ativo — pai ou etapa) foi/está estourado, mesmo se o ticket já
+    tiver sido resolvido/finalizado/cancelado (usa 'atualizado_em' como
+    proxy de quando foi tratado)."""
     if t.get("status") in STATUS_ABERTOS:
         return ticket_vencido_pendente(t)
+    limite, _ = deadline_ativo(t)
+    if limite is None:
+        return False
     try:
-        criado = datetime.fromisoformat(str(t.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
         atualz = datetime.fromisoformat(str(t.get("atualizado_em","")).replace(" ","T")).replace(tzinfo=BRT)
-        horas_decorridas = (atualz - criado).total_seconds() / 3600.0
-        return horas_decorridas > t.get("horas_sla", 24)
+        return atualz > limite
     except Exception:
         return False
 
 
 def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
-    """Gera o relatório completo em Excel com 3 abas: Por Atendente,
-    Por Motivo e Detalhe Completo."""
     import pandas as pd
     from io import BytesIO
     from collections import defaultdict
 
-    # ── Detalhe completo ──
     linhas = []
     for t in tickets:
         ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
         atend_nomes = ", ".join(nomes_users.get(a, a) for a in ats) if ats else "— ninguém —"
+        hist_txt = " | ".join(
+            f"{h.get('etapa','')} ({str(h.get('quando',''))[:16]} por {h.get('por','')})"
+            for h in t.get("historico_etapas", [])
+        )
+        sla1_txt = ("Cumprido" if t.get("sla1_cumprido") else "Perdido") \
+            if t.get("sla1_definido") else "Não classificado"
         linhas.append({
             "ID":                  t.get("id_zendesk", str(t.get("id",""))[:8]),
             "Assunto":             t.get("assunto",""),
             "Departamento":        t.get("departamento",""),
-            "Motivo (Tabulação)":  t.get("tabulacao") or "Sem tabulação",
+            "Motivo Pai":          t.get("motivo_pai",""),
+            "Motivo Filho":        t.get("motivo_filho",""),
+            "Etapa Atual":         t.get("etapa_atual",""),
             "Status":              STATUS_CFG.get(t.get("status",""), (t.get("status",""),))[0],
             "Prioridade":          PRIO_CFG.get(t.get("prioridade",""), (t.get("prioridade",""),))[0],
             "Atendente(s)":        atend_nomes,
@@ -1217,12 +1358,13 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
             "Cliente":             t.get("cliente_nome",""),
             "Criado em":           t.get("criado_em",""),
             "Atualizado em":       t.get("atualizado_em",""),
-            "SLA (h)":             t.get("horas_sla",24),
-            "SLA Perdido":         "Sim" if sla_foi_perdido(t) else "Não",
+            "SLA1 (Triagem)":      sla1_txt,
+            "Prazo Etapa (SLA2)":  t.get("etapa_data_prevista","") or "—",
+            "SLA Perdido (geral)": "Sim" if sla_foi_perdido(t) else "Não",
+            "Histórico de Etapas": hist_txt,
         })
     df_detalhe = pd.DataFrame(linhas)
 
-    # ── Resumo por atendente ──
     resumo_at = defaultdict(lambda: {"total":0, "pendentes":0, "sla_perdido":0})
     for t in tickets:
         ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
@@ -1241,10 +1383,9 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
         for k, v in sorted(resumo_at.items(), key=lambda x: -x[1]["total"])
     ])
 
-    # ── Resumo por motivo ──
     resumo_mot = defaultdict(lambda: {"total":0, "pendentes":0, "sla_perdido":0})
     for t in tickets:
-        mot = t.get("tabulacao") or "Sem tabulação"
+        mot = t.get("motivo_pai") or t.get("tabulacao") or "Sem motivo"
         resumo_mot[mot]["total"] += 1
         if t.get("status") in STATUS_ABERTOS:
             resumo_mot[mot]["pendentes"] += 1
@@ -1275,7 +1416,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
     if st.button("← Voltar"):
         st.session_state.tk_modo = "lista"; st.rerun()
 
-    # adm escolhe o depto; supervisor fica fixo no seu próprio departamento
     if papel == "adm":
         dep_nomes = [d["nome"] for d in listar_departamentos()]
         if not dep_nomes:
@@ -1293,7 +1433,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
         st.info("Nenhum atendente vinculado a este departamento.")
         return
 
-    # ── Filtros globais — valem para todas as abas abaixo ─────────
     st.markdown("---")
     fc1, fc2, fc3 = st.columns([1, 1, 1.2])
     with fc1:
@@ -1302,10 +1441,10 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             options=sorted(nomes_users.values()),
             key="vg_filtro_operador",
         )
-    motivos_disponiveis = sorted({(t.get("tabulacao") or "Sem tabulação") for t in tickets_dep})
+    motivos_disponiveis = sorted({(t.get("motivo_pai") or "Sem motivo") for t in tickets_dep})
     with fc2:
         mot_sel = st.multiselect(
-            "📋 Filtrar por motivo (tabulação)",
+            "📋 Filtrar por motivo",
             options=motivos_disponiveis,
             key="vg_filtro_motivo",
         )
@@ -1319,9 +1458,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             format="DD/MM/YYYY",
             key="vg_filtro_periodo",
         )
-    # st.date_input em modo intervalo só fecha o tuple (ini, fim) quando o
-    # usuário escolhe as DUAS datas; enquanto isso, mantém só uma — nesse
-    # caso ainda não filtramos por data.
     if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
         data_ini, data_fim = periodo
     else:
@@ -1336,7 +1472,7 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
             return None
 
     def _passa_filtro(t):
-        if mot_sel and (t.get("tabulacao") or "Sem tabulação") not in mot_sel:
+        if mot_sel and (t.get("motivo_pai") or "Sem motivo") not in mot_sel:
             return False
         if op_sel:
             ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
@@ -1377,7 +1513,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
         _aba_exportar(tickets_filtrados, nomes_users, dep_alvo, data_ini, data_fim)
 
 
-# ── ABA: 📊 Dashboard ───────────────────────────────────────────────
 def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
     from collections import Counter
 
@@ -1385,6 +1520,9 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
     pendentes  = sum(1 for t in tickets if t.get("status") in STATUS_ABERTOS)
     sla_perd   = sum(1 for t in tickets if sla_foi_perdido(t))
     pct_cumprido = ((total - sla_perd) / total * 100) if total else 100.0
+    com_sla1   = [t for t in tickets if t.get("sla1_definido")]
+    sla1_ok    = sum(1 for t in com_sla1 if t.get("sla1_cumprido"))
+    pct_sla1   = (sla1_ok / len(com_sla1) * 100) if com_sla1 else None
 
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Total de Tickets</div>'
@@ -1396,9 +1534,15 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
     k4.markdown(f'<div class="kpi-card green"><div class="kpi-label">SLA Cumprido</div>'
                 f'<div class="kpi-value">{pct_cumprido:.0f}%</div></div>', unsafe_allow_html=True)
 
+    if pct_sla1 is not None:
+        st.markdown(f'<div class="kpi-card gold" style="margin-top:8px;">'
+                    f'<div class="kpi-label">🎯 Triagem no prazo (SLA1)</div>'
+                    f'<div class="kpi-value">{pct_sla1:.0f}%</div>'
+                    f'<div class="kpi-sub">{sla1_ok} de {len(com_sla1)} classificados</div></div>',
+                    unsafe_allow_html=True)
+
     st.markdown("")
 
-    # Contagem por atendente (produtividade)
     cont_at = Counter()
     for t in tickets:
         ats = t.get("atendentes") or ([t.get("atribuido_para")] if t.get("atribuido_para") else [])
@@ -1406,8 +1550,7 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
         for a in ats:
             cont_at[nomes_users.get(a, a)] += 1
 
-    # Contagem por motivo
-    cont_mot = Counter(t.get("tabulacao") or "Sem tabulação" for t in tickets)
+    cont_mot = Counter(t.get("motivo_pai") or "Sem motivo" for t in tickets)
 
     cmc1, cmc2 = st.columns(2)
     with cmc1:
@@ -1436,7 +1579,6 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
             st.caption("Sem dados.")
 
 
-# ── ABA: 👥 Por Atendente (produtividade + transferência) ───────────
 def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
     for u in usuarios_dep:
         uname = u.get("usuario","")
@@ -1461,9 +1603,6 @@ def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
         if meus:
             meus_transferiveis = [t for t in meus if t.get("status") in STATUS_ABERTOS]
             with st.expander(f"Ver / Transferir tickets de {nome} ({len(meus)})"):
-                # ── Transferência de responsável (férias/falta) ──
-                # Só tickets ainda ABERTOS entram na transferência.
-                # Tickets finalizados/cancelados são histórico e não são tratativa.
                 dest_opts = {x["usuario"]: x.get("nome", x["usuario"])
                              for x in usuarios_dep if x.get("usuario") != uname}
                 ids_meus = [t.get("id") for t in meus_transferiveis]
@@ -1506,7 +1645,6 @@ def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
                         st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
 
                 st.markdown("---")
-                # ── Lista dos tickets (grid + paginação, igual à fila do atendente) ──
                 n_cols_eq = st.selectbox(
                     "🔳 Cards por linha", [3, 4], index=0, key=f"eq_ncols_{uname}"
                 )
@@ -1525,9 +1663,8 @@ def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
                 _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
-# ── ABA: 📋 Por Motivo (Tabulação) ───────────────────────────────────
 def _aba_por_motivo(tickets: list, dep_alvo: str, nomes_users: dict):
-    tabs_dep = [t for t in listar_tabulacoes() if t.get("departamento") == dep_alvo]
+    pais_dep = motivos_pai_do_departamento(dep_alvo)
 
     def _resumo_quem(lista_tickets):
         from collections import Counter
@@ -1542,22 +1679,22 @@ def _aba_por_motivo(tickets: list, dep_alvo: str, nomes_users: dict):
                 cont[nomes_users.get(a, a)] += 1
         return cont
 
-    if not tabs_dep:
-        st.caption("Nenhuma tabulação cadastrada para este departamento.")
+    if not pais_dep:
+        st.caption("Nenhum Motivo cadastrado para este departamento.")
     else:
-        for tb in tabs_dep:
-            nome_tab = tb.get("nome", "—")
-            tks_tab  = [t for t in tickets if t.get("tabulacao") == nome_tab]
-            n_total  = len(tks_tab)
-            n_pend   = sum(1 for t in tks_tab if t.get("status") in STATUS_ABERTOS)
-            n_perd   = sum(1 for t in tks_tab if sla_foi_perdido(t))
-            cont_at  = _resumo_quem(tks_tab)
+        for mp in pais_dep:
+            nome_mot = mp.get("nome", "—")
+            tks_mot  = [t for t in tickets if t.get("motivo_pai") == nome_mot]
+            n_total  = len(tks_mot)
+            n_pend   = sum(1 for t in tks_mot if t.get("status") in STATUS_ABERTOS)
+            n_perd   = sum(1 for t in tks_mot if sla_foi_perdido(t))
+            cont_at  = _resumo_quem(tks_mot)
             quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
             alerta   = f' <span class="tk-blink">⏳ {n_perd} c/ SLA perdido</span>' if n_perd else ""
 
             st.markdown(_html(
                 f'<div class="tk-equipe-card">'
-                f'<b style="color:#2c3e50;">📋 {esc(nome_tab)}</b>{alerta}<br>'
+                f'<b style="color:#2c3e50;">📋 {esc(nome_mot)}</b>{alerta}<br>'
                 f'<span style="font-size:0.8rem;color:#64778d;">'
                 f'Total: {n_total} &nbsp;·&nbsp; Pendentes: {n_pend} &nbsp;·&nbsp; '
                 f'SLA perdido: {n_perd}</span><br>'
@@ -1565,20 +1702,19 @@ def _aba_por_motivo(tickets: list, dep_alvo: str, nomes_users: dict):
                 f'👥 Com quem está: {esc(quem_str)}</span>'
                 f'</div>'), unsafe_allow_html=True)
 
-        sem_tab = [t for t in tickets if not t.get("tabulacao")]
-        if sem_tab:
-            cont_at  = _resumo_quem(sem_tab)
+        sem_mot = [t for t in tickets if not t.get("motivo_pai")]
+        if sem_mot:
+            cont_at  = _resumo_quem(sem_mot)
             quem_str = ", ".join(f"{nome} ({qtd})" for nome, qtd in cont_at.most_common()) or "—"
             st.markdown(_html(
                 f'<div class="tk-equipe-card">'
-                f'<b style="color:#64778d;">📋 Sem tabulação</b><br>'
-                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_tab)}</span><br>'
+                f'<b style="color:#64778d;">📋 Sem motivo (tickets legados/Zendesk)</b><br>'
+                f'<span style="font-size:0.8rem;color:#64778d;">Total: {len(sem_mot)}</span><br>'
                 f'<span style="font-size:0.78rem;color:#64778d;">'
                 f'👥 Com quem está: {esc(quem_str)}</span>'
                 f'</div>'), unsafe_allow_html=True)
 
 
-# ── ABA: ⏳ SLA Perdido (ranking + detalhe dos responsáveis) ─────────
 def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
     from collections import Counter
 
@@ -1611,11 +1747,10 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
         linhas.append({
             "ID": t.get("id_zendesk", str(t.get("id",""))[:8]),
             "Assunto": str(t.get("assunto",""))[:50],
-            "Motivo": t.get("tabulacao") or "Sem tabulação",
+            "Motivo": _caminho_motivo(t) or "Sem motivo",
             "Status": STATUS_CFG.get(t.get("status",""), (t.get("status",""),))[0],
             "Atendente(s)": atend_nomes,
             "Criado em": t.get("criado_em",""),
-            "SLA (h)": t.get("horas_sla",24),
         })
     df_det = pd.DataFrame(linhas)
     st.dataframe(df_det, use_container_width=True, hide_index=True)
@@ -1633,13 +1768,13 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
                     abrir_ticket_popup(t.get("id"), user, papel)
 
 
-# ── ABA: 📥 Exportar (relatório completo em Excel) ──────────────────
 def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str, data_ini=None, data_fim=None):
     st.markdown("##### 📥 Relatório Completo")
     st.caption(
         "Gera uma planilha .xlsx com 3 abas: **Por Atendente** (produtividade e SLA perdido), "
-        "**Por Motivo** (volume por tabulação) e **Detalhe Completo** (todos os tickets do "
-        "recorte filtrado acima, ticket a ticket)."
+        "**Por Motivo** (volume por Motivo Pai) e **Detalhe Completo** (todos os tickets do "
+        "recorte filtrado acima, com Motivo Pai/Filho/Etapa, SLA1, SLA2 e histórico completo "
+        "de classificação, ticket a ticket)."
     )
     periodo_txt = (f"{data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}"
                    if (data_ini and data_fim) else "todo o histórico")
@@ -1715,7 +1850,6 @@ def _render_sync():
             listar_tickets.clear()
             st.success(f"✅ {total} tickets importados para o Firestore!")
 
-    # ── Estatísticas ──────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Tickets no Firestore por origem")
     todos2 = listar_tickets()
@@ -1726,7 +1860,6 @@ def _render_sync():
     )
     st.dataframe(df_orig, use_container_width=True, hide_index=True)
 
-    # ── ⚠️ ZONA DE PERIGO — exclusão total (só ADM) ───────────────
     st.markdown("---")
     st.markdown(_html("""
     <div style="border:2px solid #8A6D1F;border-radius:12px;padding:16px 20px;
