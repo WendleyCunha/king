@@ -60,7 +60,7 @@ from database import (
     listar_departamentos, listar_tabulacoes, resolver_destinatario_ticket,
     listar_usuarios,
 )
-from mod_motivos import (
+from .mod_motivos import (
     listar_motivos_pai, motivos_pai_do_departamento,
     listar_motivos_filho, listar_motivos_filho_de,
     listar_etapas, listar_etapas_de, resolver_etapa_final,
@@ -638,8 +638,6 @@ def renderizar_tickets(papel: str, user: dict = None):
         if papel == "adm":
             if st.button("🔄 Sync Zendesk", use_container_width=True):
                 st.session_state.tk_modo = "sync"; st.rerun()
-            if st.button("🗂️ Motivos / Etapas", use_container_width=True):
-                st.session_state.tk_modo = "motivos"; st.rerun()
 
     with col_main:
         modo = st.session_state.tk_modo
@@ -688,16 +686,6 @@ def renderizar_tickets(papel: str, user: dict = None):
 
         elif modo == "sync":
             _render_sync()
-
-        elif modo == "motivos":
-            if papel != "adm":
-                st.warning("🔒 Acesso restrito a Administradores.")
-                st.session_state.tk_modo = "lista"
-            else:
-                if st.button("← Voltar"):
-                    st.session_state.tk_modo = "lista"; st.rerun()
-                from mod_motivos import renderizar_motivos
-                renderizar_motivos(papel, listar_usuarios())
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -939,7 +927,7 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
     filhos = listar_motivos_filho_de(t.get("motivo_pai_id",""))
     if not filhos:
         st.caption("Nenhum Motivo Filho cadastrado para este Motivo Pai ainda "
-                   "(cadastre em 🗂️ Motivos / Etapas).")
+                   "(cadastre em Configurações → Motivos).")
         return
 
     filho_nomes = [f["nome"] for f in filhos]
@@ -1232,7 +1220,7 @@ def _render_novo(user):
     pais_dep = motivos_pai_do_departamento(dep_sel)
     if not pais_dep:
         st.info("Este departamento ainda não tem Motivos cadastrados. Peça ao administrador "
-                "para cadastrar em 🗂️ Motivos / Etapas. Será usado um SLA padrão de 5 dias.")
+                "para cadastrar em Configurações → Motivos. Será usado um SLA padrão de 5 dias.")
         motivo_obj = None
         sla_dias = 5
     else:
