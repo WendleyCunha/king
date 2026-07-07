@@ -47,17 +47,18 @@ def motivos_pai_do_departamento(departamento: str) -> list:
     return [m for m in listar_motivos_pai() if m.get("departamento") == departamento]
 
 
-def criar_motivo_pai(nome: str, departamento: str, sla_dias: int) -> str:
+def criar_motivo_pai(nome: str, departamento: str, sla_dias: int, prioridade: str = "normal") -> str:
     ref = get_db().collection(COL_PAI).document()
     ref.set({"id": ref.id, "nome": nome, "departamento": departamento,
-              "sla_dias": int(sla_dias)})
+              "sla_dias": int(sla_dias), "prioridade": prioridade})
     listar_motivos_pai.clear()
     return ref.id
 
 
-def atualizar_motivo_pai(mid: str, nome: str, departamento: str, sla_dias: int):
+def atualizar_motivo_pai(mid: str, nome: str, departamento: str, sla_dias: int, prioridade: str = "normal"):
     get_db().collection(COL_PAI).document(mid).update(
-        {"nome": nome, "departamento": departamento, "sla_dias": int(sla_dias)}
+        {"nome": nome, "departamento": departamento, "sla_dias": int(sla_dias),
+         "prioridade": prioridade}
     )
     listar_motivos_pai.clear()
 
@@ -88,6 +89,11 @@ def criar_motivo_filho(nome: str, motivo_pai_id: str, motivo_pai_nome: str) -> s
               "motivo_pai_nome": motivo_pai_nome})
     listar_motivos_filho.clear()
     return ref.id
+
+
+def atualizar_motivo_filho(fid: str, nome: str):
+    get_db().collection(COL_FILHO).document(fid).update({"nome": nome})
+    listar_motivos_filho.clear()
 
 
 def excluir_motivo_filho(fid: str):
@@ -126,6 +132,17 @@ def criar_etapa(nome: str, motivo_filho_id: str, requer_data: bool,
     return ref.id
 
 
+def atualizar_etapa(eid: str, nome: str, requer_data: bool,
+                     reaproveita_motivo_filho_id: str, atendentes_vinculados: list):
+    get_db().collection(COL_ETAPA).document(eid).update({
+        "nome": nome,
+        "requer_data": bool(requer_data),
+        "reaproveita_motivo_filho_id": reaproveita_motivo_filho_id or "",
+        "atendentes_vinculados": atendentes_vinculados or [],
+    })
+    listar_etapas.clear()
+
+
 def excluir_etapa(eid: str):
     get_db().collection(COL_ETAPA).document(eid).delete()
     listar_etapas.clear()
@@ -158,9 +175,10 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
 
     st.markdown("## 🗂️ Motivos, Motivos Filho e Etapas")
     st.caption(
-        "Motivo Pai carrega o SLA de triagem (ex.: 5 dias). Motivo Filho e Etapa são "
-        "escolhidos pelo atendente durante o atendimento. Etapas em 🔴 exigem uma data "
-        "futura (2º SLA) e, ao serem confirmadas, travam a trilha do ticket."
+        "Motivo Pai carrega o SLA de triagem (ex.: 5 dias) e a Prioridade do chamado. "
+        "Motivo Filho e Etapa são escolhidos pelo atendente durante o atendimento. "
+        "Etapas em 🔴 exigem uma data futura (2º SLA) e, ao serem confirmadas, travam "
+        "a trilha do ticket."
     )
 
     aba_pai, aba_filho, aba_etapa = st.tabs(
@@ -168,6 +186,8 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
     )
 
     deps = [d["nome"] for d in listar_departamentos()]
+    prio_opts = ["urgente", "alta", "normal", "baixa"]
+    prio_labels = {"urgente": "Urgente", "alta": "Alta", "normal": "Normal", "baixa": "Baixa"}
 
     # ── Motivo Pai ──
     with aba_pai:
@@ -176,24 +196,45 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
             st.warning("Cadastre um Departamento antes.")
         else:
             with st.form("form_novo_pai", clear_on_submit=True):
-                c1, c2, c3 = st.columns([2, 1, 1])
+                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 nome = c1.text_input("Nome *", placeholder="Ex: Pedido")
                 dep = c2.selectbox("Departamento *", deps)
                 sla = c3.number_input("SLA (dias)", min_value=1, value=5)
+                prio = c4.selectbox("Prioridade", prio_opts, index=2,
+                                    format_func=lambda x: prio_labels[x])
                 if st.form_submit_button("➕ Adicionar", type="primary"):
                     if not nome.strip():
                         st.error("Informe o nome.")
                     else:
-                        criar_motivo_pai(nome.strip(), dep, sla)
+                        criar_motivo_pai(nome.strip(), dep, sla, prio)
                         st.success("Motivo Pai criado!"); st.rerun()
         st.markdown("---")
         for m in listar_motivos_pai():
-            c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-            c1.markdown(f"**{m['nome']}**")
-            c2.caption(f"🏢 {m.get('departamento', '—')}")
-            c3.caption(f"⏱ {m.get('sla_dias', 5)}d")
-            if c4.button("🗑️", key=f"delpai_{m['id']}"):
-                excluir_motivo_pai(m["id"]); st.rerun()
+            with st.expander(
+                f"**{m['nome']}** · 🏢 {m.get('departamento','—')} · "
+                f"⏱ {m.get('sla_dias', 5)}d · 🎯 {prio_labels.get(m.get('prioridade','normal'), 'Normal')}"
+            ):
+                with st.form(f"edit_pai_{m['id']}"):
+                    e1, e2, e3, e4 = st.columns([2, 1, 1, 1])
+                    novo_nome = e1.text_input("Nome", value=m["nome"], key=f"pnome_{m['id']}")
+                    novo_dep = e2.selectbox(
+                        "Departamento", deps,
+                        index=deps.index(m["departamento"]) if m.get("departamento") in deps else 0,
+                        key=f"pdep_{m['id']}"
+                    )
+                    novo_sla = e3.number_input("SLA (dias)", min_value=1,
+                                               value=int(m.get("sla_dias", 5)), key=f"psla_{m['id']}")
+                    novo_prio = e4.selectbox(
+                        "Prioridade", prio_opts,
+                        index=prio_opts.index(m.get("prioridade", "normal")) if m.get("prioridade") in prio_opts else 2,
+                        format_func=lambda x: prio_labels[x], key=f"pprio_{m['id']}"
+                    )
+                    b1, b2 = st.columns(2)
+                    if b1.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
+                        atualizar_motivo_pai(m["id"], novo_nome.strip(), novo_dep, novo_sla, novo_prio)
+                        st.success("Atualizado!"); st.rerun()
+                    if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
+                        excluir_motivo_pai(m["id"]); st.rerun()
 
     # ── Motivo Filho ──
     with aba_filho:
@@ -219,10 +260,15 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                 if filhos:
                     st.markdown(f"**{p['nome']}**")
                     for f in filhos:
-                        c1, c2 = st.columns([5, 1])
-                        c1.caption(f"↳ {f['nome']}")
-                        if c2.button("🗑️", key=f"delfilho_{f['id']}"):
-                            excluir_motivo_filho(f["id"]); st.rerun()
+                        with st.expander(f"↳ {f['nome']}"):
+                            with st.form(f"edit_filho_{f['id']}"):
+                                novo_nome_f = st.text_input("Nome", value=f["nome"], key=f"fnome_{f['id']}")
+                                b1, b2 = st.columns(2)
+                                if b1.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
+                                    atualizar_motivo_filho(f["id"], novo_nome_f.strip())
+                                    st.success("Atualizado!"); st.rerun()
+                                if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
+                                    excluir_motivo_filho(f["id"]); st.rerun()
 
     # ── Etapas ──
     with aba_etapa:
@@ -269,14 +315,41 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                     st.markdown(f"**{f['motivo_pai_nome']} → {f['nome']}**")
                     for e in etapas:
                         cor = "🔴" if e.get("requer_data") else "⚫"
-                        reap = ""
-                        if e.get("reaproveita_motivo_filho_id"):
-                            alvo = next((x for x in filhos if x["id"] == e["reaproveita_motivo_filho_id"]), None)
+                        reap_atual = e.get("reaproveita_motivo_filho_id") or ""
+                        reap_nome = ""
+                        if reap_atual:
+                            alvo = next((x for x in filhos if x["id"] == reap_atual), None)
                             if alvo:
-                                reap = f" ↪️ reaproveita **{alvo['nome']}**"
+                                reap_nome = f" ↪️ reaproveita **{alvo['nome']}**"
                         vinc = (f" · 👤 {', '.join(e['atendentes_vinculados'])}"
                                 if e.get("atendentes_vinculados") else "")
-                        c1, c2 = st.columns([6, 1])
-                        c1.caption(f"{cor} {e['nome']}{reap}{vinc}")
-                        if c2.button("🗑️", key=f"deletapa_{e['id']}"):
-                            excluir_etapa(e["id"]); st.rerun()
+                        with st.expander(f"{cor} {e['nome']}{reap_nome}{vinc}"):
+                            with st.form(f"edit_etapa_{e['id']}"):
+                                novo_nome_e = st.text_input("Nome", value=e["nome"], key=f"enome_{e['id']}")
+                                novo_requer = st.checkbox(
+                                    "🔴 Etapa vermelha (exige data futura / 2º SLA)",
+                                    value=bool(e.get("requer_data")), key=f"ereq_{e['id']}"
+                                )
+                                opcoes_reap_e = ["— nenhum —"] + [x["id"] for x in filhos if x["id"] != f["id"]]
+                                idx_reap = opcoes_reap_e.index(reap_atual) if reap_atual in opcoes_reap_e else 0
+                                novo_reap = st.selectbox(
+                                    "Reaproveitar árvore de outro Motivo Filho", opcoes_reap_e,
+                                    index=idx_reap,
+                                    format_func=lambda x: "— nenhum —" if x == "— nenhum —" else filho_labels.get(x, x),
+                                    key=f"ereap_{e['id']}"
+                                )
+                                novo_vinc = st.multiselect(
+                                    "Vincular a atendentes específicos (vazio = todo o departamento)",
+                                    atend_opts, default=e.get("atendentes_vinculados", []),
+                                    key=f"evinc_{e['id']}"
+                                )
+                                b1, b2 = st.columns(2)
+                                if b1.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
+                                    atualizar_etapa(
+                                        e["id"], novo_nome_e.strip(), novo_requer,
+                                        None if novo_reap == "— nenhum —" else novo_reap,
+                                        novo_vinc
+                                    )
+                                    st.success("Atualizado!"); st.rerun()
+                                if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
+                                    excluir_etapa(e["id"]); st.rerun()
