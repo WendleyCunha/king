@@ -1001,7 +1001,7 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
             cols_grid = st.columns(n_cols)
             for j, t in enumerate(pagina_itens[i:i + n_cols]):
                 with cols_grid[j]:
-                    _render_card_clicavel(t, user, papel)
+                    _render_card_clicavel(t, user, papel, fila)
         _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
@@ -1010,7 +1010,7 @@ def _caminho_motivo(t) -> str:
     return " › ".join(partes) if partes else ""
 
 
-def _render_card_clicavel(t, user, papel):
+def _render_card_clicavel(t, user, papel, fila="x"):
     tid    = t.get("id","")
     estado = sla_estado(t)
     sl, spct, svenc = sla_restante(t)
@@ -1051,7 +1051,7 @@ def _render_card_clicavel(t, user, papel):
         badge += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
                   f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
 
-    if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
+    if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}_{fila}",
                  use_container_width=True):
         abrir_ticket_popup(tid, user, papel)
 
