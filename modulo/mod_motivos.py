@@ -4,7 +4,11 @@ KingStar — Cadastro de Motivos (Motivo Pai → Motivo Filho → Etapa)
 Árvore de classificação usada pelo módulo de Tickets:
 
   Motivo Pai   → tem o SLA "de triagem" (ex.: 5 dias). Escolhido na ABERTURA
-                 do chamado.
+                 do chamado. Pode ter um DEPARTAMENTO VINCULADO: se
+                 diferente do departamento do próprio chamado, o módulo de
+                 Tickets cria automaticamente uma pendência entre setores
+                 assim que o ticket é aberto (sem o atendente precisar
+                 solicitar manualmente).
   Motivo Filho → agrupa Etapas. Escolhido pelo atendente durante a triagem.
   Etapa        → passo específico dentro do Motivo Filho.
                    - Etapa PRETA:    não exige data. Prazo continua sendo o
@@ -20,6 +24,10 @@ KingStar — Cadastro de Motivos (Motivo Pai → Motivo Filho → Etapa)
                    - Etapa pode vincular atendentes específicos; ao ser
                      escolhida, o ticket é reatribuído a eles. Sem vínculo,
                      o ticket continua aberto para todo o departamento.
+                   - Etapa também pode ter um DEPARTAMENTO VINCULADO (igual
+                     ao Motivo Pai): se diferente do departamento do ticket,
+                     cria uma pendência automática pra aquele setor assim
+                     que a classificação é confirmada.
 """
 import streamlit as st
 import sys
@@ -35,6 +43,8 @@ COL_PAI   = "motivos_pai"
 COL_FILHO = "motivos_filho"
 COL_ETAPA = "etapas"
 
+SEM_VINCULO = "— nenhum —"
+
 
 # ── Motivo Pai ──────────────────────────────────────────────────────
 @st.cache_data(ttl=30, show_spinner=False)
@@ -47,18 +57,21 @@ def motivos_pai_do_departamento(departamento: str) -> list:
     return [m for m in listar_motivos_pai() if m.get("departamento") == departamento]
 
 
-def criar_motivo_pai(nome: str, departamento: str, sla_dias: int, prioridade: str = "normal") -> str:
+def criar_motivo_pai(nome: str, departamento: str, sla_dias: int, prioridade: str = "normal",
+                       departamento_vinculado: str = "") -> str:
     ref = get_db().collection(COL_PAI).document()
     ref.set({"id": ref.id, "nome": nome, "departamento": departamento,
-              "sla_dias": int(sla_dias), "prioridade": prioridade})
+              "sla_dias": int(sla_dias), "prioridade": prioridade,
+              "departamento_vinculado": departamento_vinculado or ""})
     listar_motivos_pai.clear()
     return ref.id
 
 
-def atualizar_motivo_pai(mid: str, nome: str, departamento: str, sla_dias: int, prioridade: str = "normal"):
+def atualizar_motivo_pai(mid: str, nome: str, departamento: str, sla_dias: int, prioridade: str = "normal",
+                           departamento_vinculado: str = ""):
     get_db().collection(COL_PAI).document(mid).update(
         {"nome": nome, "departamento": departamento, "sla_dias": int(sla_dias),
-         "prioridade": prioridade}
+         "prioridade": prioridade, "departamento_vinculado": departamento_vinculado or ""}
     )
     listar_motivos_pai.clear()
 
@@ -119,13 +132,14 @@ def listar_etapas_de(motivo_filho_id: str) -> list:
 
 def criar_etapa(nome: str, motivo_filho_id: str, requer_data: bool,
                  reaproveita_motivo_filho_id: str, atendentes_vinculados: list,
-                 ordem: int) -> str:
+                 ordem: int, departamento_vinculado: str = "") -> str:
     ref = get_db().collection(COL_ETAPA).document()
     ref.set({
         "id": ref.id, "nome": nome, "motivo_filho_id": motivo_filho_id,
         "requer_data": bool(requer_data),
         "reaproveita_motivo_filho_id": reaproveita_motivo_filho_id or "",
         "atendentes_vinculados": atendentes_vinculados or [],
+        "departamento_vinculado": departamento_vinculado or "",
         "ordem": int(ordem),
     })
     listar_etapas.clear()
@@ -133,12 +147,14 @@ def criar_etapa(nome: str, motivo_filho_id: str, requer_data: bool,
 
 
 def atualizar_etapa(eid: str, nome: str, requer_data: bool,
-                     reaproveita_motivo_filho_id: str, atendentes_vinculados: list):
+                     reaproveita_motivo_filho_id: str, atendentes_vinculados: list,
+                     departamento_vinculado: str = ""):
     get_db().collection(COL_ETAPA).document(eid).update({
         "nome": nome,
         "requer_data": bool(requer_data),
         "reaproveita_motivo_filho_id": reaproveita_motivo_filho_id or "",
         "atendentes_vinculados": atendentes_vinculados or [],
+        "departamento_vinculado": departamento_vinculado or "",
     })
     listar_etapas.clear()
 
@@ -178,7 +194,9 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
         "Motivo Pai carrega o SLA de triagem (ex.: 5 dias) e a Prioridade do chamado. "
         "Motivo Filho e Etapa são escolhidos pelo atendente durante o atendimento. "
         "Etapas em 🔴 exigem uma data futura (2º SLA) e, ao serem confirmadas, travam "
-        "a trilha do ticket."
+        "a trilha do ticket. Motivo Pai e Etapa também podem ter um **Departamento "
+        "vinculado**: se for diferente do departamento do próprio chamado, o módulo "
+        "de Tickets cria uma pendência automática pra aquele setor."
     )
 
     aba_pai, aba_filho, aba_etapa = st.tabs(
@@ -202,17 +220,29 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                 sla = c3.number_input("SLA (dias)", min_value=1, value=5)
                 prio = c4.selectbox("Prioridade", prio_opts, index=2,
                                     format_func=lambda x: prio_labels[x])
+                opcoes_vinc_pai = [SEM_VINCULO] + deps
+                dep_vinc = st.selectbox(
+                    "📨 Departamento vinculado (opcional) — cria pendência automática "
+                    "pra esse setor ao abrir o chamado, se for diferente do Departamento acima",
+                    opcoes_vinc_pai
+                )
                 if st.form_submit_button("➕ Adicionar", type="primary"):
                     if not nome.strip():
                         st.error("Informe o nome.")
                     else:
-                        criar_motivo_pai(nome.strip(), dep, sla, prio)
+                        criar_motivo_pai(
+                            nome.strip(), dep, sla, prio,
+                            "" if dep_vinc == SEM_VINCULO else dep_vinc
+                        )
                         st.success("Motivo Pai criado!"); st.rerun()
         st.markdown("---")
         for m in listar_motivos_pai():
+            vinc_atual = m.get("departamento_vinculado") or ""
+            vinc_txt = f" · 📨 vinculado a {vinc_atual}" if vinc_atual else ""
             with st.expander(
                 f"**{m['nome']}** · 🏢 {m.get('departamento','—')} · "
                 f"⏱ {m.get('sla_dias', 5)}d · 🎯 {prio_labels.get(m.get('prioridade','normal'), 'Normal')}"
+                f"{vinc_txt}"
             ):
                 with st.form(f"edit_pai_{m['id']}"):
                     e1, e2, e3, e4 = st.columns([2, 1, 1, 1])
@@ -229,9 +259,18 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                         index=prio_opts.index(m.get("prioridade", "normal")) if m.get("prioridade") in prio_opts else 2,
                         format_func=lambda x: prio_labels[x], key=f"pprio_{m['id']}"
                     )
+                    opcoes_vinc_pai_e = [SEM_VINCULO] + deps
+                    idx_vinc = opcoes_vinc_pai_e.index(vinc_atual) if vinc_atual in opcoes_vinc_pai_e else 0
+                    novo_vinc_dep = st.selectbox(
+                        "📨 Departamento vinculado (opcional)",
+                        opcoes_vinc_pai_e, index=idx_vinc, key=f"pvinc_{m['id']}"
+                    )
                     b1, b2 = st.columns(2)
                     if b1.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
-                        atualizar_motivo_pai(m["id"], novo_nome.strip(), novo_dep, novo_sla, novo_prio)
+                        atualizar_motivo_pai(
+                            m["id"], novo_nome.strip(), novo_dep, novo_sla, novo_prio,
+                            "" if novo_vinc_dep == SEM_VINCULO else novo_vinc_dep
+                        )
                         st.success("Atualizado!"); st.rerun()
                     if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
                         excluir_motivo_pai(m["id"]); st.rerun()
@@ -287,16 +326,23 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                 requer_data = st.checkbox(
                     "🔴 Etapa vermelha (exige data futura / abre 2º SLA e trava o ticket)"
                 )
-                opcoes_reap = ["— nenhum —"] + [f["id"] for f in filhos if f["id"] != filho_sel]
+                opcoes_reap = [SEM_VINCULO] + [f["id"] for f in filhos if f["id"] != filho_sel]
                 reaproveita = st.selectbox(
                     "Reaproveitar a árvore de outro Motivo Filho (opcional)",
                     opcoes_reap,
-                    format_func=lambda x: "— nenhum —" if x == "— nenhum —" else filho_labels[x]
+                    format_func=lambda x: SEM_VINCULO if x == SEM_VINCULO else filho_labels[x]
                 )
                 atend_opts = [u.get("usuario", "") for u in (usuarios_disponiveis or [])]
                 atend_vinc = st.multiselect(
                     "Vincular a atendentes específicos (opcional — vazio = todo o departamento)",
                     atend_opts
+                )
+                opcoes_vinc_etapa = [SEM_VINCULO] + deps
+                dep_vinc_etapa = st.selectbox(
+                    "📨 Departamento vinculado (opcional) — cria pendência automática pra "
+                    "esse setor quando esta Etapa é confirmada, se for diferente do "
+                    "departamento do ticket",
+                    opcoes_vinc_etapa
                 )
                 if st.form_submit_button("➕ Adicionar", type="primary"):
                     if not nome_e.strip():
@@ -304,8 +350,9 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                     else:
                         criar_etapa(
                             nome_e.strip(), filho_sel, requer_data,
-                            None if reaproveita == "— nenhum —" else reaproveita,
-                            atend_vinc, ordem=len(listar_etapas_de(filho_sel))
+                            None if reaproveita == SEM_VINCULO else reaproveita,
+                            atend_vinc, ordem=len(listar_etapas_de(filho_sel)),
+                            departamento_vinculado="" if dep_vinc_etapa == SEM_VINCULO else dep_vinc_etapa
                         )
                         st.success("Etapa criada!"); st.rerun()
             st.markdown("---")
@@ -323,19 +370,21 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                                 reap_nome = f" ↪️ reaproveita **{alvo['nome']}**"
                         vinc = (f" · 👤 {', '.join(e['atendentes_vinculados'])}"
                                 if e.get("atendentes_vinculados") else "")
-                        with st.expander(f"{cor} {e['nome']}{reap_nome}{vinc}"):
+                        dep_vinc_atual_e = e.get("departamento_vinculado") or ""
+                        vinc_dep_txt = f" · 📨 {dep_vinc_atual_e}" if dep_vinc_atual_e else ""
+                        with st.expander(f"{cor} {e['nome']}{reap_nome}{vinc}{vinc_dep_txt}"):
                             with st.form(f"edit_etapa_{e['id']}"):
                                 novo_nome_e = st.text_input("Nome", value=e["nome"], key=f"enome_{e['id']}")
                                 novo_requer = st.checkbox(
                                     "🔴 Etapa vermelha (exige data futura / 2º SLA)",
                                     value=bool(e.get("requer_data")), key=f"ereq_{e['id']}"
                                 )
-                                opcoes_reap_e = ["— nenhum —"] + [x["id"] for x in filhos if x["id"] != f["id"]]
+                                opcoes_reap_e = [SEM_VINCULO] + [x["id"] for x in filhos if x["id"] != f["id"]]
                                 idx_reap = opcoes_reap_e.index(reap_atual) if reap_atual in opcoes_reap_e else 0
                                 novo_reap = st.selectbox(
                                     "Reaproveitar árvore de outro Motivo Filho", opcoes_reap_e,
                                     index=idx_reap,
-                                    format_func=lambda x: "— nenhum —" if x == "— nenhum —" else filho_labels.get(x, x),
+                                    format_func=lambda x: SEM_VINCULO if x == SEM_VINCULO else filho_labels.get(x, x),
                                     key=f"ereap_{e['id']}"
                                 )
                                 novo_vinc = st.multiselect(
@@ -343,12 +392,20 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                                     atend_opts, default=e.get("atendentes_vinculados", []),
                                     key=f"evinc_{e['id']}"
                                 )
+                                opcoes_vinc_etapa_e = [SEM_VINCULO] + deps
+                                idx_vinc_dep = (opcoes_vinc_etapa_e.index(dep_vinc_atual_e)
+                                                if dep_vinc_atual_e in opcoes_vinc_etapa_e else 0)
+                                novo_dep_vinc = st.selectbox(
+                                    "📨 Departamento vinculado (opcional)",
+                                    opcoes_vinc_etapa_e, index=idx_vinc_dep, key=f"evincdep_{e['id']}"
+                                )
                                 b1, b2 = st.columns(2)
                                 if b1.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
                                     atualizar_etapa(
                                         e["id"], novo_nome_e.strip(), novo_requer,
-                                        None if novo_reap == "— nenhum —" else novo_reap,
-                                        novo_vinc
+                                        None if novo_reap == SEM_VINCULO else novo_reap,
+                                        novo_vinc,
+                                        departamento_vinculado="" if novo_dep_vinc == SEM_VINCULO else novo_dep_vinc
                                     )
                                     st.success("Atualizado!"); st.rerun()
                                 if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
