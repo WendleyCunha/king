@@ -38,6 +38,23 @@ Novidades desta versão (mantém tudo da v3 + patch de performance):
        observação avulsa, que dispara o alerta de interação acima para o
        responsável.
 
+  [13] PENDÊNCIAS ENTRE SETORES (v4.1):
+       - Nasce AUTOMATICAMENTE: um Motivo Pai (na abertura) ou um Motivo Filho/
+         Etapa (na classificação) pode ter um "Departamento vinculado" (campo
+         cadastrado em Configurações → Motivos). Se esse setor for diferente
+         do setor dono do ticket, o sistema cria a pendência sozinho — o
+         atendente não precisa lembrar de solicitar nada.
+       - Também dá pra registrar manualmente ("📨 Solicitar retorno de um
+         setor") pra casos avulsos que não têm um Motivo/Etapa pré-cadastrado.
+       - Isso NÃO cria um ticket novo — fica tudo dentro do MESMO ticket,
+         preservando um único histórico por código de cliente.
+       - Cada setor tem uma COR própria (cadastrada em Departamentos ou
+         gerada automaticamente), usada nos badges/bordas pra facilitar
+         achar visualmente "de quem é a bola" no histórico do ticket.
+       - Aba extra por Departamento em "Filas de Trabalho": mostra, pra
+         QUALQUER atendente (não só do setor), quais tickets aquele setor
+         precisa responder — visão de transparência entre equipes.
+
   Tudo o mais (roteamento por departamento, tabulações legadas em tickets
   antigos/Zendesk, visibilidade por papel, ticket finalizado = somente
   leitura, histórico por cliente, performance com cache, Sync Zendesk,
@@ -48,6 +65,7 @@ import pandas as pd
 import time
 import sys
 import os
+import uuid
 import html as _htmlmod
 from datetime import datetime, timezone, timedelta
 
@@ -100,6 +118,13 @@ GOLD_VENC  = "#8A6D1F"   # SLA vencido      (ouro escuro / bronze)
 GREEN_OK   = "#16A34A"   # barra saudável
 BLUE_INFO  = "#60A5FA"   # interação nova (azul-claro)
 
+# ── Paleta de cores por Departamento (setor) ───────────────────────
+DEPT_PALETTE = [
+    "#2563EB", "#16A34A", "#DB2777", "#7C3AED", "#EA580C",
+    "#0EA5E9", "#CA8A04", "#059669", "#D946EF", "#0D9488",
+    "#DC2626", "#4F46E5", "#65A30D", "#C2410C", "#0891B2",
+]
+
 # ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
     return datetime.now(BRT).strftime("%Y-%m-%d %H:%M:%S")
@@ -128,6 +153,11 @@ def texto_busca(t) -> str:
     for c in t.get("comentarios", []):
         partes.append(c.get("texto",""))
         partes.append(c.get("autor",""))
+    for s in t.get("solicitacoes_setor", []):
+        partes.append(s.get("setor_destino",""))
+        partes.append(s.get("setor_origem",""))
+        partes.append(s.get("mensagem",""))
+        partes.append(s.get("resposta",""))
     return " ".join(str(p) for p in partes if p).lower()
 
 def transferir_tickets(tids: list, novo_responsavel: str):
@@ -232,6 +262,117 @@ def tem_interacao_nao_vista(t, user) -> bool:
         return False
     return bool(t.get("ultima_interacao_em"))
 
+# ── Pendências entre Setores (cor por setor + solicitação/resposta) ────
+def cor_departamento(nome_dep: str) -> str:
+    """Cor do setor: usa o campo 'cor' cadastrado em Departamentos
+    (Configurações → Departamentos) se existir; senão gera uma cor estável
+    via hash do nome (sempre a mesma cor pro mesmo setor, mesmo sem cadastro)."""
+    nome_dep = nome_dep or "—"
+    try:
+        for d in listar_departamentos():
+            if d.get("nome") == nome_dep and d.get("cor"):
+                return d["cor"]
+    except Exception:
+        pass
+    idx = sum(ord(c) for c in str(nome_dep)) % len(DEPT_PALETTE)
+    return DEPT_PALETTE[idx]
+
+def _swatch_dept(nome_dep: str) -> str:
+    """Emoji quadradinho aproximando a cor do setor — só pra dar uma pista
+    visual no rótulo da aba (abas do Streamlit não aceitam HTML/CSS)."""
+    cor = cor_departamento(nome_dep).lstrip("#")
+    try:
+        r, g, b = int(cor[0:2], 16), int(cor[2:4], 16), int(cor[4:6], 16)
+    except Exception:
+        return "🏢"
+    if r > 190 and g < 100 and b < 130:  return "🟥"
+    if r > 190 and 100 <= g < 180 and b < 100: return "🟧"
+    if r > 190 and g > 190 and b < 120:  return "🟨"
+    if g > 130 and r < 110 and b < 150:  return "🟩"
+    if b > 170 and r < 130:               return "🟦"
+    if r > 110 and b > 170 and g < 110:  return "🟪"
+    if r > 130 and g > 60 and b < 90:    return "🟫"
+    return "🏢"
+
+def _novo_id_curto() -> str:
+    return uuid.uuid4().hex[:10]
+
+def solicitacoes_abertas(t) -> list:
+    """Lista de pedidos (a outro setor) que ainda NÃO têm resposta registrada."""
+    sols = t.get("solicitacoes_setor", []) or []
+    respondidos = {s.get("pedido_id") for s in sols if s.get("tipo") == "resposta"}
+    return [s for s in sols if s.get("tipo") == "pedido" and s.get("id") not in respondidos]
+
+def solicitacoes_abertas_para_setor(t, setor: str) -> list:
+    return [s for s in solicitacoes_abertas(t) if s.get("setor_destino") == setor]
+
+def ticket_tem_pendencia_para_setor(t, setor: str) -> bool:
+    return bool(solicitacoes_abertas_para_setor(t, setor))
+
+def registrar_solicitacao_setor(tid: str, t: dict, setor_destino: str, mensagem: str, user: dict):
+    """Cria uma pendência para outro setor DENTRO do mesmo ticket (não cria
+    ticket novo — preserva o histórico único por cliente)."""
+    from google.cloud.firestore import ArrayUnion
+    pedido = {
+        "id": _novo_id_curto(),
+        "tipo": "pedido",
+        "setor_origem": t.get("departamento") or t.get("categoria") or "—",
+        "setor_destino": setor_destino,
+        "mensagem": mensagem,
+        "solicitado_por": user.get("usuario", ""),
+        "solicitado_por_nome": user.get("nome", ""),
+        "solicitado_em": agora_brt(),
+    }
+    get_db().collection(COLECAO).document(tid).update({
+        "solicitacoes_setor": ArrayUnion([pedido]),
+        "atualizado_em": agora_brt(),
+        "ultima_interacao_em": agora_brt(),
+        "ultima_interacao_autor": user.get("usuario", ""),
+    })
+    # também entra no chat unificado do ticket, pra quem só olha comentários
+    adicionar_comentario(
+        tid, user.get("nome", ""), user.get("usuario", ""),
+        f"📨 Solicitação para o setor **{setor_destino}**: {mensagem}"
+    )
+    listar_tickets.clear()
+
+def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, user: dict):
+    """Fecha uma pendência de setor, registrando a resposta (sem apagar o
+    pedido original — o histórico completo fica sempre visível)."""
+    from google.cloud.firestore import ArrayUnion
+    resposta = {
+        "id": _novo_id_curto(),
+        "tipo": "resposta",
+        "pedido_id": pedido.get("id"),
+        "setor_origem": pedido.get("setor_destino"),
+        "setor_destino": pedido.get("setor_origem"),
+        "resposta": resposta_texto,
+        "respondido_por": user.get("usuario", ""),
+        "respondido_por_nome": user.get("nome", ""),
+        "respondido_em": agora_brt(),
+    }
+    get_db().collection(COLECAO).document(tid).update({
+        "solicitacoes_setor": ArrayUnion([resposta]),
+        "atualizado_em": agora_brt(),
+        "ultima_interacao_em": agora_brt(),
+        "ultima_interacao_autor": user.get("usuario", ""),
+    })
+    adicionar_comentario(
+        tid, user.get("nome", ""), user.get("usuario", ""),
+        f"✅ Setor **{pedido.get('setor_destino')}** respondeu a solicitação "
+        f"de **{pedido.get('setor_origem')}**: {resposta_texto}"
+    )
+    listar_tickets.clear()
+
+def departamentos_com_pendencia(tickets: list) -> dict:
+    """{nome_setor: qtd_pendencias_abertas} pra montar as abas por setor."""
+    from collections import defaultdict
+    cont = defaultdict(int)
+    for t in tickets:
+        for s in solicitacoes_abertas(t):
+            cont[s.get("setor_destino", "—")] += 1
+    return dict(cont)
+
 # ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
 def _atribuido_a(t, user) -> bool:
     """O ticket caiu para o usuário logado atender (atendente/atribuído)?"""
@@ -280,9 +421,17 @@ def classificar_fila(t, user) -> str:
 def _usuario_atende(t, user) -> bool:
     uname = user.get("usuario","")
     nome  = user.get("nome","")
-    return (uname in t.get("atendentes", [])
+    if (uname in t.get("atendentes", [])
             or t.get("atribuido_para") in (uname, nome)
-            or t.get("aberto_por") == uname)
+            or t.get("aberto_por") == uname):
+        return True
+    # participou de alguma pendência entre setores (pediu ou foi solicitado)
+    dep_user = user.get("departamento")
+    if dep_user:
+        for s in t.get("solicitacoes_setor", []):
+            if s.get("tipo") == "pedido" and dep_user in (s.get("setor_destino"), s.get("setor_origem")):
+                return True
+    return False
 
 def ticket_visivel(t, user, papel) -> bool:
     if papel == "adm":
@@ -360,6 +509,7 @@ def criar_ticket(dados: dict) -> str:
         "atualizado_em": agora_brt(), "origem": "interno",
         "comentarios": [],
         "historico_etapas": [],
+        "solicitacoes_setor": [],
         "sla1_definido": False,
         "sla1_cumprido": None,
         "etapa_vermelha": False,
@@ -541,6 +691,10 @@ def renderizar_tickets(papel: str, user: dict = None):
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
     .tk-badge-sla1-perd { background:#F3ECD9; color:#8A6D1F; border:1px solid #A98C3D;
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:700; }
+    .tk-setor-pill { padding:1px 9px; border-radius:10px; font-size:0.7rem;
+        font-weight:800; color:#fff; display:inline-block; }
+    .tk-setor-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
+        padding:12px 14px; margin-bottom:10px; }
     button[kind="primary"], button[kind="primaryFormSubmit"],
     button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
     [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
@@ -597,35 +751,6 @@ def renderizar_tickets(papel: str, user: dict = None):
         ), unsafe_allow_html=True)
 
     with col_filas:
-        st.markdown("**Filas de Trabalho**")
-        caixa1 = [
-            ("meus",         "📌 Meus tickets", len(meus)),
-            ("aberto",       "Abertos",         len(f_abertos)),
-            ("em_andamento", "Em andamento",    len(f_andam)),
-            ("urgente",      "Urgentes",        len(f_urg)),
-            ("vencidos",     "SLA vencidos",    len(f_venc)),
-        ]
-        for key, label, qtd in caixa1:
-            if st.button(f"{label}  ({qtd})", key=f"fila_{key}",
-                         use_container_width=True,
-                         type="primary" if st.session_state.tk_fila == key else "secondary"):
-                st.session_state.tk_fila    = key
-                st.session_state.tk_modo    = "lista"
-                st.session_state.tk_detalhe = None
-                st.rerun()
-
-        st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
-                    unsafe_allow_html=True)
-        st.caption("VISÃO GLOBAL")
-        if st.button(f"🌐 Todos os tickets  ({len(f_global)})", key="fila_global",
-                     use_container_width=True,
-                     type="primary" if st.session_state.tk_fila == "global" else "secondary"):
-            st.session_state.tk_fila    = "global"
-            st.session_state.tk_modo    = "lista"
-            st.session_state.tk_detalhe = None
-            st.rerun()
-
-        st.markdown("---")
         st.markdown("**Ações**")
         if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
             st.session_state.tk_modo = "novo"; st.rerun()
@@ -639,37 +764,23 @@ def renderizar_tickets(papel: str, user: dict = None):
             if st.button("🔄 Sync Zendesk", use_container_width=True):
                 st.session_state.tk_modo = "sync"; st.rerun()
 
+        st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
+                    unsafe_allow_html=True)
+        if st.button("📋 Ver Filas de Trabalho", use_container_width=True,
+                     type="primary" if st.session_state.tk_modo in ("lista", None) else "secondary"):
+            st.session_state.tk_modo = "lista"; st.rerun()
+
     with col_main:
         modo = st.session_state.tk_modo
 
         if f_venc:
             st.markdown(_html(
                 f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
-                f'aguardando tratativa! Verifique a fila "SLA vencidos".</div>'
+                f'aguardando tratativa! Verifique a aba "SLA vencidos".</div>'
             ), unsafe_allow_html=True)
 
         if modo in ("lista", None):
-            fila = st.session_state.tk_fila
-            mapa_fila = {
-                "meus": meus, "aberto": f_abertos, "em_andamento": f_andam,
-                "urgente": f_urg, "vencidos": f_venc, "global": f_global,
-            }
-            filtrados = mapa_fila.get(fila, todos)
-
-            busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
-                                  label_visibility="collapsed", key="tk_busca")
-            if busca:
-                b = busca.strip().lower()
-                filtrados = [t for t in filtrados if b in texto_busca(t)]
-
-            nomes_fila = {k: l for k, l, _ in caixa1}
-            nomes_fila["global"] = "🌐 Todos os tickets"
-            st.markdown(f"**{nomes_fila.get(fila, fila)} — {len(filtrados)} ticket(s)**")
-
-            if not filtrados:
-                st.info("Nenhum ticket nesta fila.")
-            else:
-                _render_lista_em_grid(filtrados, user, papel, fila)
+            _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
 
         elif modo == "detalhe":
             _render_detalhe(st.session_state.tk_detalhe, user, papel)
@@ -727,6 +838,120 @@ def _nav_paginas(pag_atual, total_paginas, pag_key, total):
 
 
 # ───────────────────────────────────────────────────────────────────
+# FILAS DE TRABALHO EM ABAS (queues próprias + abas de pendência por setor)
+# ───────────────────────────────────────────────────────────────────
+def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
+    busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
+                          label_visibility="collapsed", key="tk_busca")
+    b = busca.strip().lower() if busca else ""
+
+    def _filtra(lista):
+        return [t for t in lista if b in texto_busca(t)] if b else lista
+
+    tab_defs = [
+        ("meus",         "📌 Meus tickets", meus),
+        ("aberto",       "Abertos",         f_abertos),
+        ("em_andamento", "Em andamento",    f_andam),
+        ("urgente",      "Urgentes",        f_urg),
+        ("vencidos",     "SLA vencidos",    f_venc),
+        ("global",       "🌐 Todos",        f_global),
+    ]
+
+    # Abas extras: uma por Departamento cadastrado, mostrando pendências
+    # abertas direcionadas àquele setor — visível a QUALQUER atendente,
+    # não só de quem é dono do ticket (transparência entre equipes).
+    deps_cadastrados = [d.get("nome") for d in listar_departamentos() if d.get("nome")]
+    pend_por_setor = departamentos_com_pendencia(f_global)
+    dept_tab_defs = []
+    for nome_dep in deps_cadastrados:
+        pend_lista = [t for t in f_global if ticket_tem_pendencia_para_setor(t, nome_dep)]
+        qtd = pend_por_setor.get(nome_dep, 0)
+        label = f"{_swatch_dept(nome_dep)} {nome_dep} ({qtd})"
+        dept_tab_defs.append((f"setor::{nome_dep}", label, pend_lista, nome_dep))
+
+    labels = [lbl for _, lbl, _ in tab_defs] + [lbl for _, lbl, _, _ in dept_tab_defs]
+    tabs = st.tabs(labels)
+
+    for (chave, _lbl, lista), tab in zip(tab_defs, tabs[:len(tab_defs)]):
+        with tab:
+            filtrados = _filtra(lista)
+            st.markdown(f"**{len(filtrados)} ticket(s)**")
+            if not filtrados:
+                st.info("Nenhum ticket nesta fila.")
+            else:
+                _render_lista_em_grid(filtrados, user, papel, chave)
+
+    for (chave, _lbl, lista, nome_dep), tab in zip(dept_tab_defs, tabs[len(tab_defs):]):
+        with tab:
+            filtrados = _filtra(lista)
+            cor = cor_departamento(nome_dep)
+            st.markdown(_html(f"""
+            <div style="font-size:0.82rem;color:#64778d;margin-bottom:8px;">
+                Tickets com pendência aberta aguardando resposta do setor
+                <span class="tk-setor-pill" style="background:{cor};">{esc(nome_dep)}</span>.
+                Qualquer atendente pode ver esta fila — é uma visão de transparência
+                entre equipes, o ticket continua único.
+            </div>"""), unsafe_allow_html=True)
+            st.markdown(f"**{len(filtrados)} ticket(s) pendente(s) com {nome_dep}**")
+            if not filtrados:
+                st.info(f"Nenhuma pendência aberta para {nome_dep} no momento.")
+            else:
+                _render_lista_pendencias_setor(filtrados, nome_dep, user, papel, chave)
+
+
+def _render_lista_pendencias_setor(lista, nome_dep, user, papel, chave):
+    pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(lista, f"pend_{chave}")
+    for t in pagina_itens:
+        tid = t.get("id","")
+        cor = cor_departamento(nome_dep)
+        idv = t.get("id_zendesk", tid[:8])
+        titulo = str(t.get("assunto","Sem título"))[:60]
+        dep_origem = t.get("departamento") or t.get("categoria") or "—"
+        cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
+
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.markdown(_html(f"""
+                <div>
+                    <b style="color:#2c3e50;">#{esc(idv)} — {esc(titulo)}</b><br>
+                    <span style="font-size:0.78rem;color:#64778d;">
+                        🏢 Aberto em {esc(dep_origem)} &nbsp;·&nbsp; 🧾 {esc(cliente)}
+                    </span>
+                </div>"""), unsafe_allow_html=True)
+            with c2:
+                if st.button("🔍 Abrir", key=f"pendopen_{chave}_{tid}", use_container_width=True):
+                    abrir_ticket_popup(tid, user, papel)
+
+            for pedido in solicitacoes_abertas_para_setor(t, nome_dep):
+                st.markdown(_html(f"""
+                <div style="border-left:3px solid {cor};background:#fafafa;border-radius:6px;
+                            padding:8px 10px;margin:6px 0;">
+                    <span class="tk-setor-pill" style="background:{cor_departamento(pedido.get('setor_origem',''))};">
+                        {esc(pedido.get('setor_origem',''))}
+                    </span>
+                    <span style="font-size:0.78rem;color:#64778d;"> pediu em
+                    {esc(str(pedido.get('solicitado_em',''))[:16])} ({esc(pedido.get('solicitado_por_nome',''))}):</span>
+                    <div style="font-size:0.85rem;color:#2c3e50;margin-top:2px;">{esc(pedido.get('mensagem',''))}</div>
+                </div>"""), unsafe_allow_html=True)
+
+                dep_user = user.get("departamento")
+                pode_responder = (papel in ("supervisor", "adm")) or (dep_user == nome_dep)
+                if pode_responder:
+                    with st.form(f"form_resp_{chave}_{tid}_{pedido.get('id')}", clear_on_submit=True):
+                        resp_txt = st.text_area("Resposta", height=70, key=f"resp_txt_{tid}_{pedido.get('id')}",
+                                                placeholder="Escreva a resposta pro setor solicitante...")
+                        if st.form_submit_button(f"✅ Responder e concluir pendência ({nome_dep})",
+                                                 type="primary", use_container_width=True):
+                            if resp_txt.strip():
+                                responder_solicitacao_setor(tid, pedido, resp_txt.strip(), user)
+                                st.success("Pendência respondida!"); time.sleep(.6); st.rerun()
+                            else:
+                                st.warning("Escreva uma resposta antes de concluir.")
+    _nav_paginas(pag_atual, total_paginas, pag_key, total)
+
+
+# ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
 def _render_lista_em_grid(filtrados, user, papel, fila):
@@ -756,8 +981,11 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
     for chave in sorted(grupos.keys()):
         lst = grupos[chave]
         n_venc = sum(1 for t in lst if ticket_vencido_pendente(t))
+        n_pend_setor = sum(1 for t in lst if solicitacoes_abertas(t))
         extra = (f' · <span style="color:#8A6D1F;font-weight:700;">⏳ {n_venc} com prazo '
                  f'estourado</span>') if n_venc else ""
+        extra += (f' · <span style="color:#2563EB;font-weight:700;">📨 {n_pend_setor} com '
+                  f'pendência de setor</span>') if n_pend_setor else ""
 
         if modo_agrupar != "Sem agrupamento":
             icone = "📋" if modo_agrupar == "Motivo Pai" else "🏢"
@@ -797,6 +1025,7 @@ def _render_card_clicavel(t, user, papel):
     cli_cod = t.get("cliente_codigo")
     cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
     num_com = len(t.get("comentarios", []))
+    pendencias_abertas = solicitacoes_abertas(t)
 
     if   estado == "venc": barra = GOLD_VENC
     elif estado == "warn": barra = GOLD_WARN
@@ -816,6 +1045,11 @@ def _render_card_clicavel(t, user, papel):
 
     if tem_interacao_nao_vista(t, user):
         badge += ' <span class="tk-blink-info">🔵 Nova interação</span>'
+
+    for pend in pendencias_abertas:
+        cor_pend = cor_departamento(pend.get("setor_destino",""))
+        badge += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
+                  f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
 
     if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}",
                  use_container_width=True):
@@ -966,6 +1200,16 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
         st.caption("Este Motivo Filho ainda não tem Etapas cadastradas.")
         return
 
+    dep_proprio = t.get("departamento") or t.get("categoria") or ""
+    dep_vinc_classificacao = etapa_final.get("departamento_vinculado") or filho_obj.get("departamento_vinculado")
+    if dep_vinc_classificacao and dep_vinc_classificacao != dep_proprio \
+            and not ticket_tem_pendencia_para_setor(t, dep_vinc_classificacao):
+        st.markdown(_html(f"""
+        <div class="tk-banner" style="animation:none;background:#EFF6FF;color:#1D4ED8;border-color:#60A5FA;">
+            📨 Esta classificação é vinculada ao setor <b>{esc(dep_vinc_classificacao)}</b> —
+            ao confirmar, uma pendência será criada automaticamente para eles.
+        </div>"""), unsafe_allow_html=True)
+
     vermelha = bool(etapa_final.get("requer_data"))
     data_prevista = None
     if vermelha:
@@ -1010,8 +1254,96 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
             "data_prevista": data_prevista.isoformat() if vermelha else None,
         }])
         atualizar_ticket(tid, updates, interacao_de=user.get("usuario",""))
-        st.success("Classificação registrada!" + (" Prazo travado." if vermelha else ""))
+
+        msg_extra = ""
+        if dep_vinc_classificacao and dep_vinc_classificacao != dep_proprio \
+                and not ticket_tem_pendencia_para_setor(t, dep_vinc_classificacao):
+            registrar_solicitacao_setor(
+                tid, t, dep_vinc_classificacao,
+                f"Pendência automática: a classificação '{' › '.join(caminho)}' exige "
+                f"retorno do setor {dep_vinc_classificacao} para este chamado ser concluído.",
+                user,
+            )
+            msg_extra = f" 📨 Pendência automática registrada para o setor **{dep_vinc_classificacao}**."
+
+        st.success("Classificação registrada!" + (" Prazo travado." if vermelha else "") + msg_extra)
         time.sleep(.6); st.rerun()
+
+
+# ── Pendências entre Setores (dentro do ticket) ────────────────────
+def _bloco_pendencias_setor(t, tid, user, papel):
+    st.markdown("---")
+    st.markdown("#### 📨 Pendências entre Setores")
+    st.caption("Peça pra outro setor resolver algo sem abrir um chamado novo — fica "
+               "tudo registrado aqui, dentro deste mesmo ticket.")
+
+    todas = t.get("solicitacoes_setor", []) or []
+    pedidos = {s["id"]: s for s in todas if s.get("tipo") == "pedido"}
+    respostas_por_pedido = {}
+    for s in todas:
+        if s.get("tipo") == "resposta":
+            respostas_por_pedido.setdefault(s.get("pedido_id"), []).append(s)
+
+    if pedidos:
+        for pid, pedido in sorted(pedidos.items(), key=lambda kv: kv[1].get("solicitado_em","")):
+            cor_o = cor_departamento(pedido.get("setor_origem",""))
+            cor_d = cor_departamento(pedido.get("setor_destino",""))
+            aberto = pid not in respostas_por_pedido
+            st.markdown(_html(f"""
+            <div class="tk-setor-card" style="border-left:4px solid {cor_d};">
+                <span class="tk-setor-pill" style="background:{cor_o};">{esc(pedido.get('setor_origem',''))}</span>
+                ➜
+                <span class="tk-setor-pill" style="background:{cor_d};">{esc(pedido.get('setor_destino',''))}</span>
+                {"<span class='tk-blink-warn' style='margin-left:6px;'>⏳ aguardando resposta</span>" if aberto else ""}
+                <div style="font-size:0.78rem;color:#64778d;margin-top:6px;">
+                    Solicitado por {esc(pedido.get('solicitado_por_nome',''))} em
+                    {esc(str(pedido.get('solicitado_em',''))[:16])}
+                </div>
+                <div style="font-size:0.88rem;color:#2c3e50;margin-top:4px;">{esc(pedido.get('mensagem',''))}</div>
+            </div>"""), unsafe_allow_html=True)
+
+            for resp in respostas_por_pedido.get(pid, []):
+                cor_r = cor_departamento(resp.get("setor_origem",""))
+                st.markdown(_html(f"""
+                <div class="tk-setor-card" style="border-left:4px solid {cor_r};margin-left:22px;background:#fafafa;">
+                    <span class="tk-setor-pill" style="background:{cor_r};">✅ {esc(resp.get('setor_origem',''))} respondeu</span>
+                    <div style="font-size:0.78rem;color:#64778d;margin-top:6px;">
+                        Por {esc(resp.get('respondido_por_nome',''))} em {esc(str(resp.get('respondido_em',''))[:16])}
+                    </div>
+                    <div style="font-size:0.88rem;color:#2c3e50;margin-top:4px;">{esc(resp.get('resposta',''))}</div>
+                </div>"""), unsafe_allow_html=True)
+
+            dep_user = user.get("departamento")
+            pode_responder = aberto and ((papel in ("supervisor", "adm")) or (dep_user == pedido.get("setor_destino")))
+            if pode_responder:
+                with st.form(f"form_resp_det_{tid}_{pid}", clear_on_submit=True):
+                    resp_txt = st.text_area("Responder esta pendência", height=70, key=f"respdet_{tid}_{pid}")
+                    if st.form_submit_button(f"✅ Responder ({pedido.get('setor_destino')})",
+                                             type="primary", use_container_width=True):
+                        if resp_txt.strip():
+                            responder_solicitacao_setor(tid, pedido, resp_txt.strip(), user)
+                            st.success("Pendência respondida!"); time.sleep(.6); st.rerun()
+                        else:
+                            st.warning("Escreva uma resposta antes de concluir.")
+    else:
+        st.caption("Nenhuma pendência de setor registrada neste ticket ainda.")
+
+    with st.expander("📨 Solicitar retorno de um setor"):
+        deps_nomes = [d.get("nome") for d in listar_departamentos() if d.get("nome")]
+        dep_proprio = t.get("departamento") or t.get("categoria") or ""
+        opcoes = [d for d in deps_nomes if d != dep_proprio] or deps_nomes
+        if not opcoes:
+            st.caption("Cadastre Departamentos em Configurações para poder solicitar.")
+        else:
+            with st.form(f"form_solic_{tid}", clear_on_submit=True):
+                setor_dest = st.selectbox("Setor que precisa responder", opcoes, key=f"setordest_{tid}")
+                msg = st.text_area("O que você precisa deste setor?", height=80, key=f"msgsolic_{tid}")
+                if st.form_submit_button("📨 Enviar solicitação", type="primary", use_container_width=True):
+                    if msg.strip():
+                        registrar_solicitacao_setor(tid, t, setor_dest, msg.strip(), user)
+                        st.success(f"Solicitação enviada para {setor_dest}!"); time.sleep(.6); st.rerun()
+                    else:
+                        st.warning("Escreva o que você precisa antes de enviar.")
 
 
 def _detalhe_corpo(t, tid, user, papel):
@@ -1049,12 +1381,18 @@ def _detalhe_corpo(t, tid, user, papel):
         else:
             sla1_badge = '<span class="tk-badge-sla1-perd">🎯 Triagem: prazo perdido</span>'
 
+    pendencias_badges = ""
+    for pend in solicitacoes_abertas(t):
+        cor_pend = cor_departamento(pend.get("setor_destino",""))
+        pendencias_badges += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
+                              f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
+
     st.markdown(_html(f"""
     <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};
                 border-radius:12px;padding:18px 20px;margin-bottom:16px;">
         <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
         <div style="margin-bottom:10px;">
-            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}
+            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}{pendencias_badges}
             <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
                 🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
             </span>
@@ -1092,6 +1430,10 @@ def _detalhe_corpo(t, tid, user, papel):
 
     # ── Classificação Motivo Filho / Etapa (SLA1 congelado / SLA2 travado) ──
     _bloco_classificacao(t, tid, user, papel, pode_agir and not terminal)
+
+    # ── Pendências entre Setores (não cria ticket novo, mesmo histórico) ──
+    if not terminal:
+        _bloco_pendencias_setor(t, tid, user, papel)
 
     st.markdown("---")
     if finalizado:
@@ -1232,6 +1574,15 @@ def _render_novo(user):
     st.caption(f"⏱ Prazo para triagem (1º SLA): **{sla_dias} dia(s)**. O atendente que "
                f"receber o chamado tem esse prazo para analisar e classificar a Etapa correta.")
 
+    dep_vinculado_pai = motivo_obj.get("departamento_vinculado") if motivo_obj else None
+    if dep_vinculado_pai and dep_vinculado_pai != dep_sel:
+        st.markdown(_html(f"""
+        <div class="tk-banner" style="animation:none;background:#EFF6FF;color:#1D4ED8;border-color:#60A5FA;">
+            📨 Este motivo é vinculado ao setor <b>{esc(dep_vinculado_pai)}</b> — uma pendência
+            será criada automaticamente para eles assim que o chamado for aberto (sem precisar
+            solicitar manualmente).
+        </div>"""), unsafe_allow_html=True)
+
     st.markdown("**Dados do cliente**")
     cl1, cl2 = st.columns([1, 2])
     cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234", key="novo_cli_codigo")
@@ -1283,11 +1634,23 @@ def _render_novo(user):
                 for tc in tickets_cliente:
                     if tc.get("id"):
                         vincular_ticket_relacionado(tc["id"], novo_id)
+
+                aviso_pend = ""
+                dep_vinc = motivo_obj.get("departamento_vinculado") if motivo_obj else None
+                if dep_vinc and dep_vinc != dep_sel:
+                    registrar_solicitacao_setor(
+                        novo_id, {"departamento": dep_sel}, dep_vinc,
+                        f"Pendência automática: o motivo '{motivo_obj['nome']}' exige retorno "
+                        f"do setor {dep_vinc} para este chamado ser concluído.",
+                        user,
+                    )
+                    aviso_pend = f" 📨 Pendência automática registrada para o setor **{dep_vinc}**."
+
                 aviso_hist = (f" 🗂 Amarrado ao histórico de {len(tickets_cliente)} "
                               f"chamado(s) anterior(es) deste cliente."
                               if tickets_cliente else "")
                 st.success(f"✅ Chamado **#{novo_id[:8]}** aberto em **{dep_sel}**! "
-                           f"Aguardando triagem.{aviso_hist}")
+                           f"Aguardando triagem.{aviso_hist}{aviso_pend}")
                 st.balloons(); time.sleep(1.5)
                 st.session_state.tk_modo = "lista"; st.rerun()
 
@@ -1327,6 +1690,10 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
         )
         sla1_txt = ("Cumprido" if t.get("sla1_cumprido") else "Perdido") \
             if t.get("sla1_definido") else "Não classificado"
+        pend_setor_txt = " | ".join(
+            f"{s.get('setor_origem','')}→{s.get('setor_destino','')}: {s.get('mensagem','')}"
+            for s in t.get("solicitacoes_setor", []) if s.get("tipo") == "pedido"
+        )
         linhas.append({
             "ID":                  t.get("id_zendesk", str(t.get("id",""))[:8]),
             "Assunto":             t.get("assunto",""),
@@ -1344,6 +1711,7 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
             "SLA1 (Triagem)":      sla1_txt,
             "Prazo Etapa (SLA2)":  t.get("etapa_data_prevista","") or "—",
             "SLA Perdido (geral)": "Sim" if sla_foi_perdido(t) else "Não",
+            "Pendências de Setor": pend_setor_txt or "—",
             "Histórico de Etapas": hist_txt,
         })
     df_detalhe = pd.DataFrame(linhas)
@@ -1756,8 +2124,8 @@ def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str, data_ini=None
     st.caption(
         "Gera uma planilha .xlsx com 3 abas: **Por Atendente** (produtividade e SLA perdido), "
         "**Por Motivo** (volume por Motivo Pai) e **Detalhe Completo** (todos os tickets do "
-        "recorte filtrado acima, com Motivo Pai/Filho/Etapa, SLA1, SLA2 e histórico completo "
-        "de classificação, ticket a ticket)."
+        "recorte filtrado acima, com Motivo Pai/Filho/Etapa, SLA1, SLA2, pendências entre "
+        "setores e histórico completo de classificação, ticket a ticket)."
     )
     periodo_txt = (f"{data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}"
                    if (data_ini and data_fim) else "todo o histórico")
