@@ -364,13 +364,42 @@ def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, use
     )
     listar_tickets.clear()
 
+def tickets_pendentes_do_setor(tickets: list, setor: str) -> list:
+    """Tickets que o SETOR precisa tratar, pra alimentar a aba dele em
+    'Filas de Trabalho'. Isso inclui DOIS casos, não só um:
+      1) Tickets abertos DIRETAMENTE para esse setor (departamento == setor)
+         e ainda pendentes — é o caso mais comum (ex.: abri um chamado pra
+         TI, ele precisa aparecer na aba da TI).
+      2) Tickets de QUALQUER outro setor que tenham uma solicitação aberta
+         (pendência entre setores) direcionada a esse setor.
+    Sem isso, um ticket aberto direto pro setor nunca aparecia na aba dele
+    (só apareceria se alguém tivesse criado uma solicitação manual/automática
+    — o que é um caso à parte, não o principal)."""
+    out = []
+    for t in tickets:
+        if t.get("status") not in STATUS_ABERTOS:
+            continue
+        dono = (t.get("departamento") or t.get("categoria") or "") == setor
+        solicitado = ticket_tem_pendencia_para_setor(t, setor)
+        if dono or solicitado:
+            out.append(t)
+    return out
+
 def departamentos_com_pendencia(tickets: list) -> dict:
-    """{nome_setor: qtd_pendencias_abertas} pra montar as abas por setor."""
+    """{nome_setor: qtd_tickets_pendentes} pra montar o contador nas abas por setor."""
     from collections import defaultdict
     cont = defaultdict(int)
+    setores = set()
     for t in tickets:
+        setores.add(t.get("departamento") or t.get("categoria") or "")
         for s in solicitacoes_abertas(t):
-            cont[s.get("setor_destino", "—")] += 1
+            setores.add(s.get("setor_destino", "—"))
+    for setor in setores:
+        if not setor:
+            continue
+        qtd = len(tickets_pendentes_do_setor(tickets, setor))
+        if qtd:
+            cont[setor] = qtd
     return dict(cont)
 
 # ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
@@ -857,15 +886,15 @@ def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, 
         ("global",       "🌐 Todos",        f_global),
     ]
 
-    # Abas extras: uma por Departamento cadastrado, mostrando pendências
-    # abertas direcionadas àquele setor — visível a QUALQUER atendente,
-    # não só de quem é dono do ticket (transparência entre equipes).
+    # Abas extras: uma por Departamento cadastrado. Mostra os tickets que
+    # aquele setor precisa tratar: os abertos DIRETO pra ele (o caso comum)
+    # + os que outro setor pediu pendência (transparência entre equipes).
+    # Visível a QUALQUER atendente, não só de quem é dono do ticket.
     deps_cadastrados = [d.get("nome") for d in listar_departamentos() if d.get("nome")]
-    pend_por_setor = departamentos_com_pendencia(f_global)
     dept_tab_defs = []
     for nome_dep in deps_cadastrados:
-        pend_lista = [t for t in f_global if ticket_tem_pendencia_para_setor(t, nome_dep)]
-        qtd = pend_por_setor.get(nome_dep, 0)
+        pend_lista = tickets_pendentes_do_setor(f_global, nome_dep)
+        qtd = len(pend_lista)
         label = f"{_swatch_dept(nome_dep)} {nome_dep} ({qtd})"
         dept_tab_defs.append((f"setor::{nome_dep}", label, pend_lista, nome_dep))
 
@@ -887,10 +916,10 @@ def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, 
             cor = cor_departamento(nome_dep)
             st.markdown(_html(f"""
             <div style="font-size:0.82rem;color:#64778d;margin-bottom:8px;">
-                Tickets com pendência aberta aguardando resposta do setor
-                <span class="tk-setor-pill" style="background:{cor};">{esc(nome_dep)}</span>.
-                Qualquer atendente pode ver esta fila — é uma visão de transparência
-                entre equipes, o ticket continua único.
+                Tickets que o setor <span class="tk-setor-pill" style="background:{cor};">{esc(nome_dep)}</span>
+                precisa tratar: os abertos diretamente para ele + os que outro setor pediu
+                retorno. Qualquer atendente pode ver esta fila — é uma visão de
+                transparência entre equipes, o ticket continua único.
             </div>"""), unsafe_allow_html=True)
             st.markdown(f"**{len(filtrados)} ticket(s) pendente(s) com {nome_dep}**")
             if not filtrados:
@@ -908,22 +937,33 @@ def _render_lista_pendencias_setor(lista, nome_dep, user, papel, chave):
         titulo = str(t.get("assunto","Sem título"))[:60]
         dep_origem = t.get("departamento") or t.get("categoria") or "—"
         cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
+        eh_dono = dep_origem == nome_dep
+        pedidos_abertos = solicitacoes_abertas_para_setor(t, nome_dep)
 
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
             with c1:
+                tag_origem = (
+                    f'<span class="tk-setor-pill" style="background:{cor};">🏠 aberto aqui</span>'
+                    if eh_dono else
+                    f'<span class="tk-setor-pill" style="background:{cor_departamento(dep_origem)};">'
+                    f'↩ vindo de {esc(dep_origem)}</span>'
+                )
                 st.markdown(_html(f"""
                 <div>
-                    <b style="color:#2c3e50;">#{esc(idv)} — {esc(titulo)}</b><br>
+                    <b style="color:#2c3e50;">#{esc(idv)} — {esc(titulo)}</b> {tag_origem}<br>
                     <span style="font-size:0.78rem;color:#64778d;">
-                        🏢 Aberto em {esc(dep_origem)} &nbsp;·&nbsp; 🧾 {esc(cliente)}
+                        🏢 {esc(dep_origem)} &nbsp;·&nbsp; 🧾 {esc(cliente)}
                     </span>
                 </div>"""), unsafe_allow_html=True)
             with c2:
                 if st.button("🔍 Abrir", key=f"pendopen_{chave}_{tid}", use_container_width=True):
                     abrir_ticket_popup(tid, user, papel)
 
-            for pedido in solicitacoes_abertas_para_setor(t, nome_dep):
+            if eh_dono and not pedidos_abertos:
+                st.caption("🏠 Chamado aberto diretamente neste setor — aguardando tratativa/classificação.")
+
+            for pedido in pedidos_abertos:
                 st.markdown(_html(f"""
                 <div style="border-left:3px solid {cor};background:#fafafa;border-radius:6px;
                             padding:8px 10px;margin:6px 0;">
