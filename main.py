@@ -329,6 +329,13 @@ with st.sidebar:
             st.session_state.modulo_ativo = "home"
             st.rerun()
 
+    # ── Grupo "Sistema" — Rastreio / Tickets / Cartas / Diagnóstico N2 ──
+    # Apenas reagrupados visualmente sob um cabeçalho comum. O roteamento
+    # continua idêntico (cadeia de elif mais abaixo), então cada módulo
+    # só executa suas queries no Firestore quando está de fato ativo —
+    # nada muda em termos de custo/performance, só a organização da sidebar.
+    st.markdown('<span class="nav-section">Sistema</span>', unsafe_allow_html=True)
+
     for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
         if key not in mods: continue
         lbl = label
@@ -342,17 +349,18 @@ with st.sidebar:
             if _pend_nav:
                 lbl = f"{label} 💬 🔴 {_pend_nav}"
         ativo = st.session_state.modulo_ativo == key
-        if st.button(lbl, key=f"nav_{key}", use_container_width=True,
+        if st.button(f"　{lbl}", key=f"nav_{key}", use_container_width=True,
                      type="primary" if ativo else "secondary"):
             st.session_state.modulo_ativo = key
             st.rerun()
 
-    # Diagnóstico N2 — visível para adm/supervisor, igual às Configurações
+    # Diagnóstico N2 — visível para adm/supervisor, agora agrupado
+    # visualmente dentro de "Sistema" junto com Rastreio/Tickets/Cartas.
     # (não depende de 'modulos' do usuário no Firestore, então nenhum
     # usuário existente precisa ser editado pra esse botão aparecer).
     if papel in ("adm", "supervisor"):
         ativo = st.session_state.modulo_ativo == "diagnostico"
-        if st.button("🗺️ Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
+        if st.button("　🗺️ Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
                      type="primary" if ativo else "secondary"):
             st.session_state.modulo_ativo = "diagnostico"
             st.rerun()
