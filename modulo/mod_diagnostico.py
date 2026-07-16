@@ -237,6 +237,25 @@ def listar_todas_atividades(inventario, matriz, diario):
     return sorted(nomes)
 
 
+def sugerir_atividades_do_inventario(inventario, ja_existentes_normalizados):
+    """Retorna os nomes de atividade do Inventário que ainda não aparecem em
+    `ja_existentes_normalizados` (um set de nomes já normalizados via
+    normalizar_texto). Usado para "carregar" atividades do Inventário em
+    outras seções (RACI preliminar, Matriz RACI) sem duplicar nem sobrescrever
+    o que já foi cadastrado manualmente ali."""
+    nomes, vistos = [], set()
+    for item in inventario:
+        nome = (item.get("atividade") or "").strip()
+        if not nome:
+            continue
+        norm = normalizar_texto(nome)
+        if norm in ja_existentes_normalizados or norm in vistos:
+            continue
+        vistos.add(norm)
+        nomes.append(nome)
+    return nomes
+
+
 # ─────────────────────────────────────────────────────────────
 # Constantes (categorias, cores das etapas, indicadores)
 # ─────────────────────────────────────────────────────────────
@@ -430,6 +449,21 @@ def _tab_organograma(pode_edit):
     st.markdown("##### 🧩 RACI preliminar (por tipo de demanda)")
     st.caption("Visão rápida por tipo de demanda, recomendada na Etapa 2 do documento. "
                "Para a matriz completa (fases/atividades x pessoas, no modelo da planilha), use a aba **🧩 Matriz RACI**.")
+
+    if pode_edit:
+        raci_atual = _ler("raci", [])
+        existentes = {normalizar_texto(r.get("tipo_demanda", "")) for r in raci_atual}
+        novas = sugerir_atividades_do_inventario(_ler("inventario", []), existentes)
+        if st.button("🔄 Carregar atividades do Inventário", key="diag_btn_raci_do_inventario"):
+            if novas:
+                linhas_novas = [{"tipo_demanda": n, "responsavel": "", "aprovador": "",
+                                 "consultado": "", "informado": ""} for n in novas]
+                _salvar("raci", raci_atual + linhas_novas)
+                st.success(f"{len(linhas_novas)} atividade(s) carregada(s) do Inventário como tipo de demanda.")
+                st.rerun()
+            else:
+                st.info("Nenhuma atividade nova encontrada no Inventário (ou já estão todas cadastradas aqui).")
+
     _editor_tabela_simples(
         "raci",
         {
@@ -533,6 +567,20 @@ def _tab_raci_matriz(pode_edit):
                "ajuste a matriz em seguida se isso acontecer.")
 
     matriz_raci = _ler("raci_matriz", [])
+
+    if pode_edit:
+        existentes = {normalizar_texto(r.get("atividade", "")) for r in matriz_raci}
+        novas = sugerir_atividades_do_inventario(_ler("inventario", []), existentes)
+        if st.button("🔄 Carregar atividades do Inventário", key="diag_btn_raci_matriz_do_inventario"):
+            if novas:
+                linhas_novas = [{"atividade": n, **{nome: "-" for nome in nomes}} for n in novas]
+                _salvar("raci_matriz", matriz_raci + linhas_novas)
+                st.success(f"{len(linhas_novas)} atividade(s) carregada(s) do Inventário como linha da matriz.")
+                st.rerun()
+            else:
+                st.info("Nenhuma atividade nova encontrada no Inventário (ou já estão todas na matriz).")
+        matriz_raci = _ler("raci_matriz", [])  # relê (pode ter mudado pelo botão acima)
+
     colunas = ["atividade"] + nomes
     df_m = pd.DataFrame(matriz_raci) if matriz_raci else pd.DataFrame([{}])
     for c in colunas:
