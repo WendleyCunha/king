@@ -250,6 +250,18 @@ ORIGENS = ["N1", "Cliente direto", "Outra área", "E-mail", "Sistema", "Interno 
 FREQUENCIAS = ["Diária", "Semanal", "Quinzenal", "Mensal", "Eventual"]
 VISIBILIDADES = ["Visível (mapeada)", "Invisível (não mapeada)"]
 
+# Matriz RACI "modelo planilha" (Fases/Atividades x Funções/Nomes) — mesma
+# lista de opções e mesma lógica de grupos (Time Avaliado / Stakeholders)
+# do arquivo de referência "Matriz de RACI - Diagnóstico.xlsx".
+RACI_OPCOES = ["-", "R/C", "A/C", "I/A", "R/A", "I", "C", "A", "R"]
+RACI_LEGENDA = [
+    ("R", "Responsável", "#E53935"),
+    ("A", "Aprovador", "#1E3A8A"),
+    ("C", "Consultado", "#F2C230"),
+    ("I", "Informado", "#2E7D32"),
+]
+GRUPOS_RACI = ["Time Avaliado", "Stakeholder"]
+
 ETAPAS_JORNADA = [
     {"id": "e1", "nome": "1. RECEBER E ENTENDER A DEMANDA", "icone": "💬", "cor": "#1B2A4A"},
     {"id": "e2", "nome": "2. ANÁLISE E TRIAGEM",             "icone": "🔍", "cor": "#2F6FA8"},
@@ -395,7 +407,7 @@ def _tab_inventario(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 03 · Organograma + RACI
+# 03 · Organograma + RACI preliminar (por tipo de demanda)
 # ─────────────────────────────────────────────────────────────
 def _tab_organograma(pode_edit):
     st.markdown("#### 🧭 Organograma funcional real")
@@ -415,8 +427,9 @@ def _tab_organograma(pode_edit):
     )
 
     st.markdown("---")
-    st.markdown("##### 🧩 Matriz RACI preliminar (por tipo de demanda)")
-    st.caption("Responsável (executa) / Aprovador / Consultado / Informado — recomendada na Etapa 2 do documento.")
+    st.markdown("##### 🧩 RACI preliminar (por tipo de demanda)")
+    st.caption("Visão rápida por tipo de demanda, recomendada na Etapa 2 do documento. "
+               "Para a matriz completa (fases/atividades x pessoas, no modelo da planilha), use a aba **🧩 Matriz RACI**.")
     _editor_tabela_simples(
         "raci",
         {
@@ -432,7 +445,128 @@ def _tab_organograma(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 04 · Diário de Bordo
+# 04 · Matriz RACI (modelo da planilha) — Fases/Atividades x Funções/Nomes
+# ─────────────────────────────────────────────────────────────
+def resumo_raci_por_pessoa(matriz_raci, nomes):
+    """Conta ocorrências de cada papel (R/A/C/I) por pessoa, considerando
+    também combinações tipo 'R/C' (conta para os dois lados da combinação)."""
+    linhas = []
+    for nome in nomes:
+        contagem = {"R": 0, "A": 0, "C": 0, "I": 0}
+        for registro in matriz_raci:
+            valor = str(registro.get(nome, "") or "").strip()
+            if not valor or valor == "-":
+                continue
+            for letra in valor.split("/"):
+                letra = letra.strip()
+                if letra in contagem:
+                    contagem[letra] += 1
+        linhas.append({"Pessoa / Função": nome, **contagem})
+    return linhas
+
+
+def _tab_raci_matriz(pode_edit):
+    st.markdown("#### 🧩 Matriz RACI — Fases/Atividades x Funções")
+    st.caption('Reproduz o modelo da planilha de referência: cabeçalho com projeto e data, '
+               'colunas dinâmicas para "Time Avaliado" e "Stakeholders", e uma célula por '
+               "cruzamento com as mesmas opções (-, R/C, A/C, I/A, R/A, I, C, A, R).")
+
+    info = _ler("raci_matriz_info", {})
+    c1, c2 = st.columns([2, 1])
+    projeto = c1.text_input("Nome do projeto", value=info.get("projeto") or "Diagnóstico N2",
+                             disabled=not pode_edit, key="diag_raci_projeto")
+    data_ref = c2.date_input("Data", value=_to_date(info.get("data")) or date.today(),
+                              disabled=not pode_edit, key="diag_raci_data")
+    if pode_edit and (projeto != info.get("projeto") or _date_to_str(data_ref) != info.get("data")):
+        _salvar("raci_matriz_info", {"projeto": projeto, "data": _date_to_str(data_ref)})
+
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+    cols_legenda = st.columns(4)
+    for c, (letra, desc, cor) in zip(cols_legenda, RACI_LEGENDA):
+        c.markdown(
+            f"<div style='background:{cor};color:#fff;border-radius:6px;padding:10px 6px;"
+            f"text-align:center;font-weight:700;font-size:16px;'>{letra}"
+            f"<div style='font-size:11px;font-weight:400;'>{desc}</div></div>",
+            unsafe_allow_html=True,
+        )
+    st.caption("Combinações como **R/C**, **A/C**, **I/A**, **R/A** também são aceitas, "
+               "como no modelo original, para casos em que o papel varia por sub-etapa.")
+
+    st.markdown("---")
+    st.markdown("##### 👥 Funções / Nomes (colunas da matriz)")
+    st.caption('Cadastre aqui quem entra na matriz — separado em "Time Avaliado" (a própria '
+               'célula N2) e "Stakeholders" (áreas/pessoas fora da célula).')
+    pessoas = _ler("raci_pessoas", [])
+    df_p = pd.DataFrame(pessoas) if pessoas else pd.DataFrame([{}])
+    for c in ["nome", "grupo"]:
+        if c not in df_p.columns:
+            df_p[c] = ""
+    df_p = df_p[["nome", "grupo"]].fillna("")
+
+    editado_p = st.data_editor(
+        df_p, num_rows="dynamic", use_container_width=True, hide_index=True,
+        key="diag_editor_raci_pessoas",
+        column_config={
+            "nome": st.column_config.TextColumn("Nome / Função"),
+            "grupo": st.column_config.SelectboxColumn("Grupo", options=GRUPOS_RACI),
+        },
+        disabled=not pode_edit,
+    ).fillna("")
+
+    if pode_edit and not editado_p.equals(df_p):
+        _salvar("raci_pessoas", editado_p.to_dict("records"))
+        st.rerun()  # garante que as colunas da matriz abaixo já reflitam nomes novos/renomeados
+
+    pessoas = _ler("raci_pessoas", [])
+    nomes = [p.get("nome", "").strip() for p in pessoas if (p.get("nome") or "").strip()]
+    if not nomes:
+        st.info("Cadastre ao menos uma pessoa/função acima para liberar a matriz de cruzamento.")
+        return
+
+    st.markdown("---")
+    st.markdown("##### 📐 Matriz — Fases/Atividades x Funções")
+    st.caption("Cada linha é uma fase ou atividade; cada coluna, uma pessoa/função cadastrada acima. "
+               "Renomear ou remover uma pessoa não migra os valores já preenchidos para ela — "
+               "ajuste a matriz em seguida se isso acontecer.")
+
+    matriz_raci = _ler("raci_matriz", [])
+    colunas = ["atividade"] + nomes
+    df_m = pd.DataFrame(matriz_raci) if matriz_raci else pd.DataFrame([{}])
+    for c in colunas:
+        if c not in df_m.columns:
+            df_m[c] = "-"
+    df_m = df_m[colunas].fillna("-")
+
+    col_config = {"atividade": st.column_config.TextColumn("Fase / Atividade", width="large")}
+    grupo_por_nome = {p.get("nome", "").strip(): p.get("grupo", "") for p in pessoas}
+    for nome in nomes:
+        grupo = grupo_por_nome.get(nome, "")
+        icone = "🧑‍💼" if grupo == "Time Avaliado" else ("🤝" if grupo == "Stakeholder" else "")
+        rotulo = f"{icone} {nome}".strip()
+        col_config[nome] = st.column_config.SelectboxColumn(rotulo, options=RACI_OPCOES)
+
+    editado_m = st.data_editor(
+        df_m, num_rows="dynamic", use_container_width=True, hide_index=True,
+        key="diag_editor_raci_matriz", column_config=col_config, disabled=not pode_edit,
+    ).fillna("-")
+
+    if pode_edit and not editado_m.equals(df_m):
+        _salvar("raci_matriz", editado_m.to_dict("records"))
+
+    with st.expander("📊 Resumo por pessoa/função"):
+        resumo = resumo_raci_por_pessoa(editado_m.to_dict("records"), nomes)
+        st.dataframe(pd.DataFrame(resumo), use_container_width=True, hide_index=True)
+        st.caption("Contagem de quantas fases/atividades cada pessoa aparece como R, A, C ou I "
+                   "(combinações como \"R/C\" contam para ambos os papéis).")
+
+    st.download_button(
+        "⬇️ Baixar Matriz RACI (CSV)", data=editado_m.to_csv(index=False).encode("utf-8-sig"),
+        file_name="matriz_raci_diagnostico_n2.csv", mime="text/csv", key="diag_download_raci_csv",
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 05 · Diário de Bordo
 # ─────────────────────────────────────────────────────────────
 def _tab_diario(pode_edit):
     st.markdown("#### 📓 Diário de Bordo")
@@ -494,7 +628,7 @@ def _tab_diario(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 05 · Entrevistas
+# 06 · Entrevistas
 # ─────────────────────────────────────────────────────────────
 def _tab_entrevistas(pode_edit):
     st.markdown("#### 🎙️ Entrevista individual estruturada")
@@ -539,7 +673,7 @@ def _tab_entrevistas(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 06 · Gemba
+# 07 · Gemba
 # ─────────────────────────────────────────────────────────────
 def _tab_gemba(pode_edit):
     st.markdown("#### 👣 Observação direta (Gemba)")
@@ -563,7 +697,7 @@ def _tab_gemba(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 07 · Matriz de Atividades x Responsabilidades x Tempo
+# 08 · Matriz de Atividades x Responsabilidades x Tempo
 # ─────────────────────────────────────────────────────────────
 def _tab_matriz(pode_edit):
     st.markdown("#### 📐 Matriz de Atividades x Responsabilidades x Tempo")
@@ -626,7 +760,7 @@ def _tab_matriz(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 08 · Mapa de Jornada de Trabalho por Atividade
+# 09 · Mapa de Jornada de Trabalho por Atividade
 # ─────────────────────────────────────────────────────────────
 def _etapa_vazia():
     campos = {c["campo"]: "" for c in LINHAS_JORNADA}
@@ -846,7 +980,7 @@ def _tab_jornada(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 09 · As 6 perguntas finais
+# 10 · As 6 perguntas finais
 # ─────────────────────────────────────────────────────────────
 def _tab_respostas(pode_edit):
     st.markdown("#### ❓ As 6 perguntas que a entrega precisa responder")
@@ -882,7 +1016,7 @@ def _tab_respostas(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 10 · Resumo com IA (opcional)
+# 11 · Resumo com IA (opcional)
 # ─────────────────────────────────────────────────────────────
 def _gerar_resumo_ia():
     import requests
@@ -893,7 +1027,8 @@ def _gerar_resumo_ia():
 
     dados = {
         "inventario": _ler("inventario", []), "organograma": _ler("organograma", []),
-        "raci": _ler("raci", []), "diario": _ler("diario", []),
+        "raci": _ler("raci", []), "raci_pessoas": _ler("raci_pessoas", []),
+        "raci_matriz": _ler("raci_matriz", []), "diario": _ler("diario", []),
         "entrevistas": _ler("entrevistas", []), "gemba": _ler("gemba", []),
         "matriz": _ler("matriz", []), "jornadas": _ler("jornadas", {}),
         "respostas": _ler("respostas", {}),
@@ -955,6 +1090,210 @@ def _tab_resumo_ia(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
+# 12 · Relatório Consolidado — extrai e organiza tudo que foi coletado
+# ─────────────────────────────────────────────────────────────
+def gerar_relatorio_consolidado(checklist, inventario, organograma, raci_simples, raci_info,
+                                 raci_pessoas, raci_matriz, diario, entrevistas, gemba,
+                                 matriz, jornadas, respostas, resumo_ia) -> str:
+    """Percorre TODAS as seções na mesma ordem lógica da metodologia (Etapas 1 a 8) e
+    monta um único documento — pensado para a validação (Etapa 8) e para a entrega final,
+    sem depender da IA (a IA, quando usada, entra como seção extra ao final)."""
+    linhas = ["# Diagnóstico N2 — Relatório Consolidado\n"]
+    linhas.append(f"**Projeto:** {raci_info.get('projeto') or 'Diagnóstico N2'}  ")
+    linhas.append(f"**Data de referência:** {raci_info.get('data') or '—'}\n")
+
+    linhas.append("## 1. Andamento da metodologia\n")
+    concluidas = sum(1 for id_, *_ in ETAPAS_CHECKLIST if checklist.get(id_))
+    linhas.append(f"_{concluidas} de {len(ETAPAS_CHECKLIST)} etapas concluídas._\n")
+    for id_, titulo, datas in ETAPAS_CHECKLIST:
+        marcado = "✅" if checklist.get(id_) else "⬜"
+        linhas.append(f"- {marcado} {titulo} (`{datas}`)")
+    linhas.append("")
+
+    linhas.append("## 2. Inventário de atividades\n")
+    itens = [i for i in inventario if (i.get("atividade") or "").strip()]
+    if itens:
+        for i in itens:
+            linhas.append(f"- **{i['atividade']}** ({i.get('categoria') or '—'}) "
+                           f"— registrada oficialmente: {i.get('registrada') or '—'}")
+    else:
+        linhas.append("_Nenhuma atividade cadastrada ainda._")
+    linhas.append("")
+
+    linhas.append("## 3. Organograma funcional real\n")
+    pessoas_org = [o for o in organograma if (o.get("pessoa") or "").strip()]
+    if pessoas_org:
+        for o in pessoas_org:
+            linha = f"- **{o['pessoa']}** — {o.get('papel') or '—'}"
+            if o.get("especialista"):
+                linha += f"; especialista em {o['especialista']}"
+            if o.get("cobre"):
+                linha += f"; cobre/é coberto por {o['cobre']}"
+            linhas.append(linha)
+    else:
+        linhas.append("_Organograma real ainda não levantado._")
+    linhas.append("")
+
+    linhas.append("## 4. RACI preliminar por tipo de demanda\n")
+    raci_itens = [r for r in raci_simples if (r.get("tipo_demanda") or "").strip()]
+    if raci_itens:
+        for r in raci_itens:
+            linhas.append(f"- **{r['tipo_demanda']}** — R: {r.get('responsavel') or '—'} | "
+                           f"A: {r.get('aprovador') or '—'} | C: {r.get('consultado') or '—'} | "
+                           f"I: {r.get('informado') or '—'}")
+    else:
+        linhas.append("_RACI preliminar ainda não preenchido._")
+    linhas.append("")
+
+    linhas.append("## 5. Matriz RACI (Fases/Atividades x Funções)\n")
+    nomes = [p.get("nome", "").strip() for p in raci_pessoas if (p.get("nome") or "").strip()]
+    linhas_matriz_raci = [m for m in raci_matriz if (m.get("atividade") or "").strip()]
+    if nomes and linhas_matriz_raci:
+        linhas.append("| Atividade | " + " | ".join(nomes) + " |")
+        linhas.append("|" + "---|" * (len(nomes) + 1))
+        for r in linhas_matriz_raci:
+            linhas.append(f"| {r['atividade']} | " + " | ".join(str(r.get(n) or "-") for n in nomes) + " |")
+    else:
+        linhas.append("_Matriz RACI ainda não preenchida._")
+    linhas.append("")
+
+    linhas.append("## 6. Diário de Bordo — visão agregada\n")
+    diario_valido = [d for d in diario if (d.get("atividade") or "").strip()]
+    if diario_valido:
+        linhas.append(f"- Total de registros: **{len(diario_valido)}**")
+        minutos_por_categoria = {}
+        for d in diario_valido:
+            cat = d.get("categoria") or "Sem categoria"
+            dur = d.get("duracao")
+            if dur and str(dur).isdigit():
+                minutos_por_categoria[cat] = minutos_por_categoria.get(cat, 0) + int(dur)
+        for cat, mins in sorted(minutos_por_categoria.items(), key=lambda kv: -kv[1]):
+            linhas.append(f"- {cat}: {mins} min (~{round(mins / 60, 1)}h)")
+    else:
+        linhas.append("_Diário de bordo ainda não preenchido._")
+    linhas.append("")
+
+    linhas.append("## 7. Entrevistas realizadas\n")
+    feitas = [e for e in entrevistas if (e.get("nome") or "").strip()]
+    if feitas:
+        for e in feitas:
+            linhas.append(f"- {e['nome']} — {e.get('data') or '—'}")
+    else:
+        linhas.append("_Nenhuma entrevista registrada ainda._")
+    linhas.append("")
+
+    linhas.append("## 8. Observações de campo (Gemba)\n")
+    gemba_validos = [g for g in gemba if (g.get("observado") or "").strip()]
+    if gemba_validos:
+        for g in gemba_validos:
+            linha = f"- {g.get('data') or ''} {g.get('horario') or ''} — {g.get('pessoa') or '—'}: {g['observado']}"
+            if g.get("insight"):
+                linha += f" _(insight: {g['insight']})_"
+            linhas.append(linha)
+    else:
+        linhas.append("_Nenhuma observação de campo registrada ainda._")
+    linhas.append("")
+
+    linhas.append("## 9. Matriz de Atividades x Responsabilidades x Tempo\n")
+    matriz_valida = [m for m in matriz if (m.get("atividade") or "").strip()]
+    if matriz_valida:
+        for m in matriz_valida:
+            linhas.append(f"- **{m['atividade']}** — {m.get('quemfaz') or '—'} | "
+                           f"{m.get('frequencia') or '—'} | {m.get('tempo') or '—'} | "
+                           f"{m.get('percentual') or '—'} do tempo total")
+    else:
+        linhas.append("_Matriz de Atividades ainda não consolidada._")
+    linhas.append("")
+
+    linhas.append("## 10. Mapas de Jornada por atividade\n")
+    if jornadas:
+        for norm, j in jornadas.items():
+            linhas.append(f"- **{j.get('atividade', norm)}** — mapa de jornada preenchido")
+    else:
+        linhas.append("_Nenhum mapa de jornada criado ainda._")
+    linhas.append("")
+
+    linhas.append("## 11. Respostas às 6 perguntas-chave\n")
+    for pid, texto in PERGUNTAS:
+        resposta = (respostas.get(pid) or "").strip()
+        linhas.append(f"**{texto}**\n\n{resposta or '_(em aberto)_'}\n")
+
+    if (resumo_ia or "").strip():
+        linhas.append("## 12. Resumo executivo (gerado com IA)\n")
+        linhas.append(resumo_ia.strip())
+
+    return "\n".join(linhas)
+
+
+def _exportar_relatorio_pdf(md_texto: str) -> bytes:
+    """Conversão best-effort de Markdown simples para PDF (títulos, tabelas
+    e listas), no mesmo espírito de _exportar_jornada_pdf: robusto e legível,
+    não uma renderização Markdown completa."""
+    from fpdf import FPDF, XPos, YPos
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    for linha in md_texto.split("\n"):
+        texto = _pdf_safe(linha)
+        if texto.startswith("# "):
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.multi_cell(0, 10, texto[2:], new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif texto.startswith("## "):
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.multi_cell(0, 8, texto[3:], new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif texto.strip().startswith("|"):
+            pdf.set_font("Courier", "", 7)
+            pdf.multi_cell(0, 4, texto, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif texto.strip().startswith("**") and texto.strip().endswith("**"):
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.multi_cell(0, 5, texto.replace("**", ""), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif texto.strip().startswith("-"):
+            pdf.set_font("Helvetica", "", 9)
+            pdf.multi_cell(0, 5, texto, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif texto.strip() == "":
+            pdf.ln(2)
+        else:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.multi_cell(0, 5, texto.replace("**", ""), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    return bytes(pdf.output())
+
+
+def _tab_relatorio_final(pode_edit):
+    st.markdown("#### 📄 Relatório Consolidado")
+    st.caption("Reúne, na mesma ordem lógica da metodologia, tudo o que foi coletado em todas as "
+               "abas — pronto para a validação com a equipe/liderança (Etapa 8) e para a entrega final.")
+
+    md = gerar_relatorio_consolidado(
+        _ler("checklist", {}), _ler("inventario", []), _ler("organograma", []),
+        _ler("raci", []), _ler("raci_matriz_info", {}), _ler("raci_pessoas", []),
+        _ler("raci_matriz", []), _ler("diario", []), _ler("entrevistas", []),
+        _ler("gemba", []), _ler("matriz", []), _ler("jornadas", {}),
+        _ler("respostas", {}), _ler("resumo_ia", ""),
+    )
+
+    with st.expander("👁️ Pré-visualização", expanded=True):
+        st.markdown(md)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("⬇️ Baixar Relatório (Markdown)", data=md,
+                            file_name="relatorio_consolidado_diagnostico_n2.md", mime="text/markdown",
+                            key="diag_download_relatorio_md", use_container_width=True)
+    with c2:
+        try:
+            pdf_bytes = _exportar_relatorio_pdf(md)
+            st.download_button("⬇️ Baixar Relatório (PDF)", data=pdf_bytes,
+                                file_name="relatorio_consolidado_diagnostico_n2.pdf", mime="application/pdf",
+                                key="diag_download_relatorio_pdf", use_container_width=True)
+        except ImportError:
+            st.caption("💡 Instale `fpdf2` (`pip install fpdf2`) para habilitar a exportação em PDF.")
+
+
+# ─────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────
 def renderizar_diagnostico(papel, user=None):
@@ -966,9 +1305,9 @@ def renderizar_diagnostico(papel, user=None):
         st.info("Modo somente leitura — peça a um supervisor ou administrador para editar.")
 
     abas = st.tabs([
-        "✅ Checklist", "📋 Inventário", "🧭 Organograma", "📓 Diário de Bordo",
+        "✅ Checklist", "📋 Inventário", "🧭 Organograma", "🧩 Matriz RACI", "📓 Diário de Bordo",
         "🎙️ Entrevistas", "👣 Gemba", "📐 Matriz", "🗺️ Mapa de Jornada",
-        "❓ 6 Perguntas", "🤖 Resumo IA",
+        "❓ 6 Perguntas", "🤖 Resumo IA", "📄 Relatório Final",
     ])
     with abas[0]:
         _tab_checklist()
@@ -977,16 +1316,20 @@ def renderizar_diagnostico(papel, user=None):
     with abas[2]:
         _tab_organograma(editar)
     with abas[3]:
-        _tab_diario(editar)
+        _tab_raci_matriz(editar)
     with abas[4]:
-        _tab_entrevistas(editar)
+        _tab_diario(editar)
     with abas[5]:
-        _tab_gemba(editar)
+        _tab_entrevistas(editar)
     with abas[6]:
-        _tab_matriz(editar)
+        _tab_gemba(editar)
     with abas[7]:
-        _tab_jornada(editar)
+        _tab_matriz(editar)
     with abas[8]:
-        _tab_respostas(editar)
+        _tab_jornada(editar)
     with abas[9]:
+        _tab_respostas(editar)
+    with abas[10]:
         _tab_resumo_ia(editar)
+    with abas[11]:
+        _tab_relatorio_final(editar)
