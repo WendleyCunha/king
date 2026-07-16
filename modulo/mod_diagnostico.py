@@ -515,9 +515,12 @@ def _tab_raci_matriz(pode_edit):
 
     if pode_edit and not editado_p.equals(df_p):
         _salvar("raci_pessoas", editado_p.to_dict("records"))
-        st.rerun()  # garante que as colunas da matriz abaixo já reflitam nomes novos/renomeados
 
-    pessoas = _ler("raci_pessoas", [])
+    # Usa o resultado já disponível em memória (editado_p) para montar as colunas da
+    # matriz abaixo, em vez de reler do Firestore + forçar st.rerun(). Isso evita o
+    # "piscar" de tela: um rerun forçado a cada edição, empilhado sobre o rerun que o
+    # Streamlit já dispara sozinho sempre que um data_editor muda.
+    pessoas = editado_p.to_dict("records")
     nomes = [p.get("nome", "").strip() for p in pessoas if (p.get("nome") or "").strip()]
     if not nomes:
         st.info("Cadastre ao menos uma pessoa/função acima para liberar a matriz de cruzamento.")
@@ -618,9 +621,19 @@ def _tab_diario(pode_edit):
             "sistemas": r["sistemas"] or "", "depende_terceiros": r["depende_terceiros"] or "",
             "quem": r["quem"] or "", "obs": r["obs"] or "",
         } for _, r in editado.iterrows()]
-        if registros_novos != registros:
+
+        # Precisamos de UM rerun por edição real para a coluna "Duração" (calculada)
+        # aparecer atualizada em tela. Sem a "assinatura" abaixo, uma pequena instabilidade
+        # de tipo entre o que acabamos de montar e o que está salvo (ex.: data/hora indo e
+        # voltando de string para objeto a cada execução) pode fazer essa comparação nunca
+        # "estabilizar", disparando st.rerun() sem parar — daí a tela ficar piscando.
+        # Guardando a assinatura do que já foi salvo NESTA sessão, o rerun só acontece
+        # uma vez por alteração de verdade, mesmo que a comparação abaixo seja instável.
+        assinatura = json.dumps(registros_novos, sort_keys=True, ensure_ascii=False)
+        if registros_novos != registros and st.session_state.get("_diag_diario_assinatura") != assinatura:
             _salvar("diario", registros_novos)
-            st.rerun()  # garante que a coluna Duração mostrada já reflita o recálculo
+            st.session_state["_diag_diario_assinatura"] = assinatura
+            st.rerun()
 
     st.caption('💡 Registre **tudo**: reuniões, e-mails, retrabalho, espera por resposta de outra área, '
                'e atividades "não oficiais" (ajudar N1, apagar incêndio, planilha paralela). '
