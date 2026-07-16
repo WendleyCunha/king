@@ -42,6 +42,13 @@ except Exception as _erro_import_chat:
         st.exception(_erro)
 
 try:
+    from modulo.mod_diagnostico import renderizar_diagnostico
+except Exception as _erro_import_diagnostico:
+    def renderizar_diagnostico(papel, user=None, _erro=_erro_import_diagnostico):
+        st.error("⚠️ Falha ao carregar o módulo de Diagnóstico N2. Detalhe técnico abaixo:")
+        st.exception(_erro)
+
+try:
     from database_chat import listar_conversas_com_nao_lidas
 except Exception:
     def listar_conversas_com_nao_lidas(_lista):
@@ -340,6 +347,16 @@ with st.sidebar:
             st.session_state.modulo_ativo = key
             st.rerun()
 
+    # Diagnóstico N2 — visível para adm/supervisor, igual às Configurações
+    # (não depende de 'modulos' do usuário no Firestore, então nenhum
+    # usuário existente precisa ser editado pra esse botão aparecer).
+    if papel in ("adm", "supervisor"):
+        ativo = st.session_state.modulo_ativo == "diagnostico"
+        if st.button("🗺️ Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
+                     type="primary" if ativo else "secondary"):
+            st.session_state.modulo_ativo = "diagnostico"
+            st.rerun()
+
     if papel == "adm":
         ativo = st.session_state.modulo_ativo == "config"
         if st.button("Configuracoes", key="nav_config", use_container_width=True,
@@ -457,6 +474,9 @@ elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
 
 elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
     renderizar_cartas(papel, user)
+
+elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
+    renderizar_diagnostico(papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     st.subheader("⚙️ Configurações")
