@@ -20,6 +20,7 @@
 import json
 import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -499,6 +500,122 @@ def resumo_raci_por_pessoa(matriz_raci, nomes):
     return linhas
 
 
+def _exportar_raci_matriz_xlsx(projeto, data_str, pessoas, nomes, matriz_raci) -> bytes:
+    """Gera o .xlsx no mesmo layout visual da planilha de referência: cabeçalho
+    Data/Projeto, legenda R/A/C/I colorida, "Fases" à esquerda, colunas de
+    pessoas agrupadas em "Time Avaliado" e "Stakeholders", e dropdown nas
+    células de cruzamento com as mesmas opções do modelo original."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    # Mesma ordem visual do modelo: todo o bloco "Time Avaliado" primeiro,
+    # depois todo o bloco "Stakeholders" — por isso reordena em vez de manter
+    # a ordem de cadastro (que pode intercalar os dois grupos).
+    grupo_por_nome = {p.get("nome", "").strip(): p.get("grupo", "") for p in pessoas}
+    nomes_time = [n for n in nomes if grupo_por_nome.get(n) != "Stakeholder"]
+    nomes_stake = [n for n in nomes if grupo_por_nome.get(n) == "Stakeholder"]
+    nomes_ordenados = nomes_time + nomes_stake
+
+    linhas_dados = [m for m in matriz_raci if (m.get("atividade") or "").strip()]
+    total_linhas = max(len(linhas_dados), 10)  # mantém ao menos 10 linhas, como no modelo
+    total_cols = 2 + max(len(nomes_ordenados), 1)
+    ultima_col_letra = get_column_letter(total_cols)
+    primeira_linha_dados, ultima_linha_dados = 6, 6 + total_linhas - 1
+
+    COR_VERMELHO, COR_AZUL, COR_AMARELO, COR_VERDE = "FFE53935", "FF1E3A8A", "FFF2C230", "FF2E7D32"
+    COR_PRETO, COR_LAVANDA, COR_AZUL_CLARO, COR_CINZA, COR_CINZA_CLARO = (
+        "FF000000", "FFD9D9FF", "FF6699FF", "FFBFBFBF", "FFE7E6E6")
+    branco_bold = Font(color="FFFFFFFF", bold=True)
+    preto_bold = Font(color="FF000000", bold=True)
+    centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    borda_fina = Border(*(Side(style="thin", color="FFBFBFBF"),) * 4)
+
+    def preencher(coord, valor, fill=None, fonte=None, alinhar=True):
+        celula = ws[coord]
+        celula.value = valor
+        if fill:
+            celula.fill = PatternFill("solid", fgColor=fill)
+        if fonte:
+            celula.font = fonte
+        if alinhar:
+            celula.alignment = centro
+        celula.border = borda_fina
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Matriz RACI"
+
+    # Linha 1 — Data / Nome do projeto
+    ws.merge_cells("A1:B1")
+    preencher("A1", f"Data: {data_str or '—'}", fill=COR_CINZA_CLARO, fonte=preto_bold)
+    ws.merge_cells(f"C1:{ultima_col_letra}1")
+    preencher("C1", f"Nome do Projeto:  {projeto or 'Diagnóstico N2'}", fonte=Font(bold=True, size=13), alinhar=False)
+    ws["C1"].alignment = Alignment(horizontal="left", vertical="center")
+
+    # Linhas 2-3 — legenda R/A/C/I + "Funções / Nome"
+    preencher("A2", "R\n(Responsável)", fill=COR_VERMELHO, fonte=branco_bold)
+    preencher("B2", "A\n(Aprovador)", fill=COR_AZUL, fonte=branco_bold)
+    preencher("A3", "C\n(Consultado)", fill=COR_AMARELO, fonte=preto_bold)
+    preencher("B3", "I\n(Informado)", fill=COR_VERDE, fonte=branco_bold)
+    ws.merge_cells(f"C2:{ultima_col_letra}3")
+    preencher("C2", "Funções / Nome", fill=COR_PRETO, fonte=Font(color="FFFFFFFF", bold=True, size=16))
+
+    # Linha 4 — "Fases" + nome de cada pessoa/função (coluna a coluna)
+    ws.merge_cells("A4:B4")
+    preencher("A4", "Fases", fill=COR_LAVANDA, fonte=Font(bold=True, size=14))
+    for idx, nome in enumerate(nomes_ordenados):
+        col = get_column_letter(3 + idx)
+        preencher(f"{col}4", nome, fill=COR_AZUL_CLARO, fonte=preto_bold)
+
+    # Linha 5 — "Atividade" + "Time Avaliado" / "Stakeholders"
+    ws.merge_cells("A5:B5")
+    preencher("A5", "Atividade", fill=COR_PRETO, fonte=branco_bold)
+    if nomes_time:
+        c1, c2 = get_column_letter(3), get_column_letter(2 + len(nomes_time))
+        if c1 != c2:
+            ws.merge_cells(f"{c1}5:{c2}5")
+        preencher(f"{c1}5", "Time Avaliado", fill=COR_AZUL, fonte=branco_bold)
+    if nomes_stake:
+        c1 = get_column_letter(3 + len(nomes_time))
+        c2 = get_column_letter(2 + len(nomes_time) + len(nomes_stake))
+        if c1 != c2:
+            ws.merge_cells(f"{c1}5:{c2}5")
+        preencher(f"{c1}5", "Stakeholders", fill=COR_AZUL, fonte=branco_bold)
+
+    # Linhas 6+ — dados (ou linhas em branco prontas para preencher, como no modelo)
+    for i in range(total_linhas):
+        r = primeira_linha_dados + i
+        ws.merge_cells(f"A{r}:B{r}")
+        atividade = linhas_dados[i]["atividade"] if i < len(linhas_dados) else ""
+        preencher(f"A{r}", atividade, fill=COR_LAVANDA if not atividade else None, alinhar=False)
+        ws[f"A{r}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        for idx, nome in enumerate(nomes_ordenados):
+            col = get_column_letter(3 + idx)
+            valor = (linhas_dados[i].get(nome, "-") or "-") if i < len(linhas_dados) else "-"
+            preencher(f"{col}{r}", valor, fill=COR_CINZA)
+
+    # Dropdown nas células de cruzamento — mesmas opções do modelo original
+    dv = DataValidation(type="list", formula1='"-,R/C,A/C,I/A,R/A,I,C,A,R"', allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add(f"C{primeira_linha_dados}:{ultima_col_letra}{ultima_linha_dados}")
+
+    # Larguras/alturas para ficar legível
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 18
+    for idx in range(len(nomes_ordenados)):
+        ws.column_dimensions[get_column_letter(3 + idx)].width = 12
+    for r in (2, 3):
+        ws.row_dimensions[r].height = 30
+    ws.row_dimensions[4].height = 22
+    ws.freeze_panes = f"C{primeira_linha_dados}"
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def _tab_raci_matriz(pode_edit):
     st.markdown("#### 🧩 Matriz RACI — Fases/Atividades x Funções")
     st.caption('Reproduz o modelo da planilha de referência: cabeçalho com projeto e data, '
@@ -610,10 +727,25 @@ def _tab_raci_matriz(pode_edit):
         st.caption("Contagem de quantas fases/atividades cada pessoa aparece como R, A, C ou I "
                    "(combinações como \"R/C\" contam para ambos os papéis).")
 
-    st.download_button(
-        "⬇️ Baixar Matriz RACI (CSV)", data=editado_m.to_csv(index=False).encode("utf-8-sig"),
-        file_name="matriz_raci_diagnostico_n2.csv", mime="text/csv", key="diag_download_raci_csv",
-    )
+    c1, c2 = st.columns(2)
+    with c1:
+        try:
+            xlsx_bytes = _exportar_raci_matriz_xlsx(projeto, _date_to_str(data_ref), pessoas, nomes,
+                                                     editado_m.to_dict("records"))
+            st.download_button(
+                "⬇️ Baixar Matriz RACI (Excel, no modelo da planilha)", data=xlsx_bytes,
+                file_name="matriz_raci_diagnostico_n2.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="diag_download_raci_xlsx", use_container_width=True,
+            )
+        except ImportError:
+            st.caption("💡 Instale `openpyxl` (`pip install openpyxl`) para habilitar a exportação em Excel.")
+    with c2:
+        st.download_button(
+            "⬇️ Baixar Matriz RACI (CSV)", data=editado_m.to_csv(index=False).encode("utf-8-sig"),
+            file_name="matriz_raci_diagnostico_n2.csv", mime="text/csv", key="diag_download_raci_csv",
+            use_container_width=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────
