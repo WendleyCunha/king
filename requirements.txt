@@ -7,3 +7,4 @@ python-docx>=1.1.0
 xlsxwriter>=3.2.0
 plotly>=5.20.0
 streamlit-autorefresh
+fpdf2
