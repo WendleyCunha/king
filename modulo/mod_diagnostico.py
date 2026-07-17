@@ -29,6 +29,14 @@ from database import get_db, pode_editar
 
 BRT = timezone(timedelta(hours=-3))
 
+# Altura fixa (em pixels) aplicada a TODAS as tabelas editáveis (st.data_editor)
+# do módulo. Sem uma altura fixa, o data_editor "cresce" pra caber todas as
+# linhas de uma vez e só aparece a barra de rolagem horizontal — com a altura
+# fixa, o Streamlit passa a mostrar também a barra vertical quando o número de
+# linhas ultrapassa esse espaço, dando a sensação de "planilha emoldurada na
+# tela" em vez de a página inteira esticar pra baixo.
+_ALTURA_TABELA_PADRAO = 380
+
 
 # ─────────────────────────────────────────────────────────────
 # Persistência (Firestore) — coleção "diagnostico", 1 doc por seção
@@ -586,6 +594,7 @@ def _editor_tabela_simples(chave, colunas_config, campos_ordem, pode_edit, edito
     editado = st.data_editor(
         df, num_rows="dynamic", use_container_width=True, hide_index=True,
         key=editor_key, column_config=colunas_config, disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     ).fillna("")
 
     if pode_edit and not editado.equals(df):
@@ -916,6 +925,7 @@ def _tab_raci_matriz(pode_edit):
             "grupo": st.column_config.SelectboxColumn("Grupo", options=GRUPOS_RACI),
         },
         disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     ).fillna("")
 
     if pode_edit and not editado_p.equals(df_p):
@@ -970,6 +980,7 @@ def _tab_raci_matriz(pode_edit):
     editado_m = st.data_editor(
         df_m, num_rows="dynamic", use_container_width=True, hide_index=True,
         key="diag_editor_raci_matriz", column_config=col_config, disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     ).fillna("-")
 
     if pode_edit and not editado_m.equals(df_m):
@@ -1042,6 +1053,7 @@ def _tab_diario(pode_edit):
             "obs": st.column_config.TextColumn("Observações", width="large"),
         },
         disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     )
 
     editado = editado.copy()
@@ -1118,6 +1130,7 @@ def _tab_entrevistas(pode_edit):
             "respostas": st.column_config.TextColumn("Anotações / respostas", width="large"),
         },
         disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     )
     registros_novos = [{"nome": r["nome"] or "", "data": _date_to_str(r["data"]), "respostas": r["respostas"] or ""}
                         for _, r in editado.iterrows()]
@@ -1212,6 +1225,7 @@ def _tab_matriz(pode_edit):
             "percentual": st.column_config.TextColumn("% do tempo total", disabled=True),
         },
         disabled=not pode_edit,
+        height=_ALTURA_TABELA_PADRAO,
     ).fillna("")
 
     if pode_edit and not editado.equals(df):
