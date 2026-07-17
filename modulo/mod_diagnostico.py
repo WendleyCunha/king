@@ -49,6 +49,94 @@ def _salvar(chave: str, valor):
 
 
 # ─────────────────────────────────────────────────────────────
+# Exportação em Excel — helper genérico usado por TODAS as abas
+# ─────────────────────────────────────────────────────────────
+def _xlsx_bytes(nome_aba, cabecalho, linhas):
+    """Gera um .xlsx de uma aba só, a partir de um cabeçalho (lista de nomes
+    de coluna) e linhas (lista de listas, na mesma ordem do cabeçalho)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (nome_aba or "Dados")[:31]  # limite do Excel p/ nome de aba
+
+    ws.append(list(cabecalho))
+    for celula in ws[1]:
+        celula.font = Font(bold=True, color="FFFFFFFF")
+        celula.fill = PatternFill("solid", fgColor="FF444441")
+
+    for linha in linhas:
+        ws.append(list(linha))
+
+    for i, titulo in enumerate(cabecalho, 1):
+        maior = max([len(str(titulo))] + [len(str(l[i - 1])) for l in linhas if i - 1 < len(l)] or [0])
+        ws.column_dimensions[get_column_letter(i)].width = max(12, min(50, maior + 3))
+    if linhas:
+        ws.freeze_panes = "A2"
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _xlsx_de_registros(nome_aba, registros, colunas=None):
+    """Converte uma lista de dicts (formato usado por quase toda seção do
+    diagnóstico) direto para bytes de .xlsx."""
+    registros = [r for r in (registros or []) if any(str(v).strip() for v in r.values())]
+    if not registros:
+        return _xlsx_bytes(nome_aba, colunas or ["sem dados"], [])
+    colunas = colunas or list(registros[0].keys())
+    linhas = [[r.get(c, "") for c in colunas] for r in registros]
+    return _xlsx_bytes(nome_aba, colunas, linhas)
+
+
+def _botao_excel(label, nome_arquivo, nome_aba, registros, colunas=None, key=None):
+    """Botão padrão de download em Excel — usado em todas as abas do diagnóstico."""
+    try:
+        dados = _xlsx_de_registros(nome_aba, registros, colunas)
+    except ImportError:
+        st.caption("💡 Instale `openpyxl` (`pip install openpyxl`) para habilitar a exportação em Excel.")
+        return
+    st.download_button(
+        label, data=dados, file_name=f"{nome_arquivo}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=key or f"dl_xlsx_{nome_arquivo}", use_container_width=True,
+    )
+
+
+def _checklist_para_registros(checklist):
+    return [{"etapa": titulo, "prazo": datas, "concluida": "Sim" if checklist.get(id_) else "Não"}
+            for id_, titulo, datas in ETAPAS_CHECKLIST]
+
+
+def _respostas_para_registros(respostas):
+    return [{"pergunta": texto, "resposta": respostas.get(pid, "")} for pid, texto in PERGUNTAS]
+
+
+def _jornadas_para_registros(jornadas):
+    """Achata todos os mapas de jornada (todas as atividades, todas as etapas)
+    em linhas — uma linha por etapa de cada atividade, colunas = campos da
+    etapa. Usado no botão "Baixar todas as Jornadas (Excel)"."""
+    linhas = []
+    for norm, j in (jornadas or {}).items():
+        atividade = j.get("atividade", norm)
+        for etapa in ETAPAS_JORNADA:
+            et = (j.get("etapas") or {}).get(etapa["id"], {})
+            linha = {"atividade": atividade, "etapa": etapa["nome"]}
+            for cfg in LINHAS_JORNADA:
+                campo = cfg["campo"]
+                if campo == "experiencia":
+                    linha["experiencia_emoji"] = et.get("emoji", "")
+                    linha["experiencia_frase"] = et.get("experiencia", "")
+                else:
+                    linha[campo] = et.get(campo, "")
+            linhas.append(linha)
+    return linhas
+
+
+# ─────────────────────────────────────────────────────────────
 # Lógica pura de consolidação automática (sem Streamlit/Firestore —
 # fácil de testar isoladamente e reaproveitar).
 # ─────────────────────────────────────────────────────────────
@@ -258,6 +346,127 @@ def sugerir_atividades_do_inventario(inventario, ja_existentes_normalizados):
 
 
 # ─────────────────────────────────────────────────────────────
+# Organograma visual — a partir da coluna "responde_para" cadastrada na
+# aba Organograma. Suporta responsabilidade compartilhada (ex: duas
+# auxiliares respondendo para as duas assistentes ao mesmo tempo).
+# ─────────────────────────────────────────────────────────────
+def _calcular_niveis_organograma(pessoas):
+    """Calcula o nível hierárquico de cada pessoa a partir de 'responde_para'
+    (nomes separados por vírgula — pode ter mais de um). Nível 0 = topo (não
+    responde para ninguém, ou responde para alguém não cadastrado). Evita
+    loop infinito em caso de ciclo (ex: A responde para B e B para A)."""
+    nomes = [p.get("pessoa", "").strip() for p in pessoas if (p.get("pessoa") or "").strip()]
+    nomes_set = set(nomes)
+    pais = {}
+    for p in pessoas:
+        nome = (p.get("pessoa") or "").strip()
+        if not nome:
+            continue
+        respostas = [r.strip() for r in (p.get("responde_para") or "").split(",") if r.strip()]
+        pais[nome] = [r for r in respostas if r in nomes_set and r != nome]
+
+    niveis = {}
+
+    def nivel(nome, caminho):
+        if nome in niveis:
+            return niveis[nome]
+        if nome in caminho:
+            niveis[nome] = 0  # ciclo — trata como topo pra não travar
+            return 0
+        lista_pais = pais.get(nome, [])
+        if not lista_pais:
+            niveis[nome] = 0
+        else:
+            niveis[nome] = 1 + max(nivel(p, caminho | {nome}) for p in lista_pais)
+        return niveis[nome]
+
+    for nome in nomes:
+        nivel(nome, set())
+    return niveis, pais
+
+
+def gerar_organograma_png(pessoas) -> bytes:
+    """Desenha o organograma (níveis + conexões, inclusive muitos-para-muitos)
+    em PNG com matplotlib. Levanta ImportError se matplotlib não estiver
+    instalado — o chamador deve tratar isso (mesmo padrão do fpdf2/openpyxl)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+
+    niveis, pais = _calcular_niveis_organograma(pessoas)
+    if not niveis:
+        raise ValueError("Nenhuma pessoa com nome preenchido.")
+
+    por_nivel = {}
+    for nome, niv in niveis.items():
+        por_nivel.setdefault(niv, []).append(nome)
+
+    largura_caixa, altura_caixa = 2.6, 1.0
+    espaco_x, espaco_y = 0.7, 1.8
+
+    posicoes = {}
+    for niv, nomes_nivel in por_nivel.items():
+        nomes_nivel = sorted(nomes_nivel)
+        n = len(nomes_nivel)
+        largura_total = n * largura_caixa + (n - 1) * espaco_x
+        x_inicio = -largura_total / 2 + largura_caixa / 2
+        for i, nome in enumerate(nomes_nivel):
+            x = x_inicio + i * (largura_caixa + espaco_x)
+            y = -niv * (altura_caixa + espaco_y)
+            posicoes[nome] = (x, y)
+
+    max_nivel = max(por_nivel)
+    maior_linha = max(len(v) for v in por_nivel.values())
+    fig, ax = plt.subplots(figsize=(max(8, maior_linha * 2.6), max(4, (max_nivel + 1) * 2.4)))
+
+    papel_por_nome = {(p.get("pessoa") or "").strip(): (p.get("papel") or "").strip() for p in pessoas}
+
+    # conexões primeiro (ficam atrás das caixas)
+    for nome, lista_pais in pais.items():
+        if nome not in posicoes:
+            continue
+        x1, y1 = posicoes[nome]
+        for pai in lista_pais:
+            if pai not in posicoes:
+                continue
+            x2, y2 = posicoes[pai]
+            ax.plot([x2, x1], [y2 - altura_caixa / 2, y1 + altura_caixa / 2],
+                    color="#9a9a92", linewidth=1, zorder=1, solid_capstyle="round")
+
+    cores_fill = ["#EEEDFE", "#E1F5EE", "#FAECE7", "#F1EFE8", "#E6F1FB", "#FBEAF0"]
+    cores_borda = ["#534AB7", "#0F6E56", "#993C1D", "#5F5E5A", "#185FA5", "#993556"]
+    cores_texto = ["#26215C", "#04342C", "#4A1B0C", "#2C2C2A", "#042C53", "#4B1528"]
+
+    for nome, (x, y) in posicoes.items():
+        niv = niveis[nome]
+        cor = cores_fill[niv % len(cores_fill)]
+        borda = cores_borda[niv % len(cores_borda)]
+        texto_cor = cores_texto[niv % len(cores_texto)]
+        caixa = FancyBboxPatch((x - largura_caixa / 2, y - altura_caixa / 2), largura_caixa, altura_caixa,
+                                boxstyle="round,pad=0.02,rounding_size=0.09",
+                                linewidth=1.3, edgecolor=borda, facecolor=cor, zorder=2)
+        ax.add_patch(caixa)
+        papel = papel_por_nome.get(nome, "")
+        ax.text(x, y + 0.14, nome, ha="center", va="center", fontsize=11,
+                fontweight="bold", color=texto_cor, zorder=3)
+        if papel:
+            ax.text(x, y - 0.2, papel, ha="center", va="center", fontsize=9, color=texto_cor, zorder=3)
+
+    xs = [p[0] for p in posicoes.values()]
+    ys = [p[1] for p in posicoes.values()]
+    ax.set_xlim(min(xs) - largura_caixa, max(xs) + largura_caixa)
+    ax.set_ylim(min(ys) - altura_caixa, max(ys) + altura_caixa)
+    ax.axis("off")
+    fig.tight_layout()
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=170, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────
 # Constantes (categorias, cores das etapas, indicadores)
 # ─────────────────────────────────────────────────────────────
 CATEGORIAS_INVENTARIO = ["Chamado oficial", "Apoio a outra área", "Retrabalho", "Reunião",
@@ -405,6 +614,10 @@ def _tab_checklist():
             "- As informações são usadas só para melhoria contínua e otimização operacional."
         )
 
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Checklist (Excel)", "checklist_diagnostico", "Checklist",
+                 _checklist_para_registros(marcados))
+
 
 # ─────────────────────────────────────────────────────────────
 # 02 · Inventário
@@ -413,7 +626,7 @@ def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
                "(tickets, tags do sistema, controles paralelos por fora do oficial).")
-    _editor_tabela_simples(
+    editado = _editor_tabela_simples(
         "inventario",
         {
             "atividade": st.column_config.TextColumn("Atividade", width="large"),
@@ -425,6 +638,10 @@ def _tab_inventario(pode_edit):
         pode_edit, "diag_editor_inventario",
     )
 
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Inventário (Excel)", "inventario_atividades", "Inventario",
+                 editado.to_dict("records"))
+
 
 # ─────────────────────────────────────────────────────────────
 # 03 · Organograma + RACI preliminar (por tipo de demanda)
@@ -433,18 +650,51 @@ def _tab_organograma(pode_edit):
     st.markdown("#### 🧭 Organograma funcional real")
     st.caption("O organograma oficial nem sempre reflete quem faz o quê. Registre a divisão real: "
                "individuais x coletivas, especialistas x generalistas, hierarquia informal.")
-    _editor_tabela_simples(
+    organograma_editado = _editor_tabela_simples(
         "organograma",
         {
             "pessoa": st.column_config.TextColumn("Pessoa"),
             "papel": st.column_config.TextColumn("Papel real (não o cargo)"),
+            "responde_para": st.column_config.TextColumn(
+                "Responde para",
+                help='Nome(s) exatamente como cadastrados na coluna "Pessoa", separados por vírgula. '
+                     'Mais de um nome = responde para todos ao mesmo tempo (ex: duas assistentes em '
+                     'conjunto). Deixe em branco se a pessoa é o topo do organograma.',
+                width="medium",
+            ),
             "especialista": st.column_config.TextColumn("Especialista em"),
             "cobre": st.column_config.TextColumn("Cobre / é coberto por"),
             "obs": st.column_config.TextColumn("Observações", width="large"),
         },
-        ["pessoa", "papel", "especialista", "cobre", "obs"],
+        ["pessoa", "papel", "responde_para", "especialista", "cobre", "obs"],
         pode_edit, "diag_editor_organograma",
     )
+
+    st.markdown("---")
+    st.markdown("##### 🌳 Organograma visual")
+    st.caption('Montado automaticamente a partir da coluna **"Responde para"** acima — inclusive '
+               "quando mais de uma pessoa responde para o mesmo grupo, ou uma pessoa responde para "
+               "duas ao mesmo tempo.")
+
+    registros_org = [r for r in organograma_editado.to_dict("records") if (r.get("pessoa") or "").strip()]
+    if not registros_org:
+        st.info("Cadastre ao menos uma pessoa acima para gerar o organograma visual.")
+    else:
+        try:
+            png_bytes = gerar_organograma_png(registros_org)
+            st.image(png_bytes, use_container_width=True)
+            st.download_button(
+                "⬇️ Baixar organograma (PNG)", data=png_bytes, file_name="organograma_cx.png",
+                mime="image/png", key="diag_download_organograma_png", use_container_width=True,
+            )
+        except ImportError:
+            st.caption("💡 Instale `matplotlib` (`pip install matplotlib`) para habilitar o organograma visual.")
+        except Exception as e:
+            st.warning(f"Não foi possível desenhar o organograma agora ({e}). Confira se os nomes em "
+                       '"Responde para" batem exatamente com o texto da coluna "Pessoa".')
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Organograma (Excel)", "organograma_funcional", "Organograma", registros_org)
 
     st.markdown("---")
     st.markdown("##### 🧩 RACI preliminar (por tipo de demanda)")
@@ -465,7 +715,7 @@ def _tab_organograma(pode_edit):
             else:
                 st.info("Nenhuma atividade nova encontrada no Inventário (ou já estão todas cadastradas aqui).")
 
-    _editor_tabela_simples(
+    raci_editado = _editor_tabela_simples(
         "raci",
         {
             "tipo_demanda": st.column_config.TextColumn("Tipo de demanda", width="medium"),
@@ -477,6 +727,10 @@ def _tab_organograma(pode_edit):
         ["tipo_demanda", "responsavel", "aprovador", "consultado", "informado"],
         pode_edit, "diag_editor_raci",
     )
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar RACI preliminar (Excel)", "raci_preliminar", "RACI",
+                 raci_editado.to_dict("records"))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -727,13 +981,13 @@ def _tab_raci_matriz(pode_edit):
         st.caption("Contagem de quantas fases/atividades cada pessoa aparece como R, A, C ou I "
                    "(combinações como \"R/C\" contam para ambos os papéis).")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         try:
             xlsx_bytes = _exportar_raci_matriz_xlsx(projeto, _date_to_str(data_ref), pessoas, nomes,
                                                      editado_m.to_dict("records"))
             st.download_button(
-                "⬇️ Baixar Matriz RACI (Excel, no modelo da planilha)", data=xlsx_bytes,
+                "⬇️ Baixar Matriz RACI (modelo da planilha)", data=xlsx_bytes,
                 file_name="matriz_raci_diagnostico_n2.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="diag_download_raci_xlsx", use_container_width=True,
@@ -741,6 +995,9 @@ def _tab_raci_matriz(pode_edit):
         except ImportError:
             st.caption("💡 Instale `openpyxl` (`pip install openpyxl`) para habilitar a exportação em Excel.")
     with c2:
+        _botao_excel("⬇️ Baixar Matriz RACI (simples)", "matriz_raci_simples", "MatrizRACI",
+                     editado_m.to_dict("records"), colunas=colunas, key="diag_download_raci_xlsx_simples")
+    with c3:
         st.download_button(
             "⬇️ Baixar Matriz RACI (CSV)", data=editado_m.to_csv(index=False).encode("utf-8-sig"),
             file_name="matriz_raci_diagnostico_n2.csv", mime="text/csv", key="diag_download_raci_csv",
@@ -792,16 +1049,16 @@ def _tab_diario(pode_edit):
         lambda r: calcular_duracao_min(_time_to_str(r["hora_inicio"]), _time_to_str(r["hora_fim"])), axis=1
     )
 
-    if pode_edit:
-        registros_novos = [{
-            "data": _date_to_str(r["data"]), "analista": r["analista"] or "",
-            "hora_inicio": _time_to_str(r["hora_inicio"]), "hora_fim": _time_to_str(r["hora_fim"]),
-            "duracao": r["duracao"] or "", "atividade": r["atividade"] or "",
-            "categoria": r["categoria"] or "", "origem": r["origem"] or "",
-            "sistemas": r["sistemas"] or "", "depende_terceiros": r["depende_terceiros"] or "",
-            "quem": r["quem"] or "", "obs": r["obs"] or "",
-        } for _, r in editado.iterrows()]
+    registros_novos = [{
+        "data": _date_to_str(r["data"]), "analista": r["analista"] or "",
+        "hora_inicio": _time_to_str(r["hora_inicio"]), "hora_fim": _time_to_str(r["hora_fim"]),
+        "duracao": r["duracao"] or "", "atividade": r["atividade"] or "",
+        "categoria": r["categoria"] or "", "origem": r["origem"] or "",
+        "sistemas": r["sistemas"] or "", "depende_terceiros": r["depende_terceiros"] or "",
+        "quem": r["quem"] or "", "obs": r["obs"] or "",
+    } for _, r in editado.iterrows()]
 
+    if pode_edit:
         # Precisamos de UM rerun por edição real para a coluna "Duração" (calculada)
         # aparecer atualizada em tela. Sem a "assinatura" abaixo, uma pequena instabilidade
         # de tipo entre o que acabamos de montar e o que está salvo (ex.: data/hora indo e
@@ -818,6 +1075,10 @@ def _tab_diario(pode_edit):
     st.caption('💡 Registre **tudo**: reuniões, e-mails, retrabalho, espera por resposta de outra área, '
                'e atividades "não oficiais" (ajudar N1, apagar incêndio, planilha paralela). '
                "O objetivo é entender o processo, não avaliar desempenho individual.")
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Diário de Bordo (Excel)", "diario_de_bordo", "Diario",
+                 registros_novos, colunas=colunas)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -858,11 +1119,13 @@ def _tab_entrevistas(pode_edit):
         },
         disabled=not pode_edit,
     )
-    if pode_edit:
-        registros_novos = [{"nome": r["nome"] or "", "data": _date_to_str(r["data"]), "respostas": r["respostas"] or ""}
-                           for _, r in editado.iterrows()]
-        if registros_novos != registros:
-            _salvar("entrevistas", registros_novos)
+    registros_novos = [{"nome": r["nome"] or "", "data": _date_to_str(r["data"]), "respostas": r["respostas"] or ""}
+                        for _, r in editado.iterrows()]
+    if pode_edit and registros_novos != registros:
+        _salvar("entrevistas", registros_novos)
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Entrevistas (Excel)", "entrevistas_estruturadas", "Entrevistas", registros_novos)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -875,7 +1138,7 @@ def _tab_gemba(pode_edit):
         "fato acontece. Observe ao vivo, sem interromper e sem corrigir nada durante a observação — "
         "o objetivo é ver o real, não o ideal."
     )
-    _editor_tabela_simples(
+    editado = _editor_tabela_simples(
         "gemba",
         {
             "data": st.column_config.TextColumn("Data"),
@@ -887,6 +1150,9 @@ def _tab_gemba(pode_edit):
         ["data", "horario", "pessoa", "observado", "insight"],
         pode_edit, "diag_editor_gemba",
     )
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Gemba (Excel)", "observacoes_gemba", "Gemba", editado.to_dict("records"))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -950,6 +1216,10 @@ def _tab_matriz(pode_edit):
 
     if pode_edit and not editado.equals(df):
         _salvar("matriz", editado.to_dict("records"))
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Matriz de Atividades (Excel)", "matriz_atividades_tempo", "Matriz",
+                 editado.to_dict("records"), colunas=colunas)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1082,6 +1352,9 @@ def _tab_jornada(pode_edit):
     if not atividade:
         st.info("Escolha ou digite uma atividade para ver/editar o mapa de jornada dela. "
                  "Cada atividade tem seu próprio mapa salvo.")
+        st.markdown("---")
+        _botao_excel("⬇️ Baixar todas as Jornadas (Excel)", "mapas_de_jornada", "Jornadas",
+                     _jornadas_para_registros(jornadas))
         return
 
     norm = normalizar_texto(atividade)
@@ -1159,17 +1432,21 @@ def _tab_jornada(pode_edit):
 
     st.markdown("---")
     md = _exportar_jornada_markdown(atividade, jornada)
-    st.download_button("⬇️ Baixar Mapa de Jornada (Markdown)", data=md,
+    st.download_button("⬇️ Baixar Mapa de Jornada desta atividade (Markdown)", data=md,
                         file_name=f"mapa_jornada_{norm.replace(' ', '_')}.md", mime="text/markdown",
                         key="diag_download_jornada_md")
     try:
         pdf_bytes = _exportar_jornada_pdf(atividade, jornada)
-        st.download_button("⬇️ Baixar Mapa de Jornada (PDF)", data=pdf_bytes,
+        st.download_button("⬇️ Baixar Mapa de Jornada desta atividade (PDF)", data=pdf_bytes,
                             file_name=f"mapa_jornada_{norm.replace(' ', '_')}.pdf", mime="application/pdf",
                             key="diag_download_jornada_pdf")
     except ImportError:
         st.caption("💡 Instale `fpdf2` (`pip install fpdf2`) para habilitar exportação em PDF "
                    "além do Markdown (o PDF sai em blocos empilhados, não lado a lado como o modelo visual).")
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar todas as Jornadas (Excel)", "mapas_de_jornada", "Jornadas",
+                 _jornadas_para_registros(_ler("jornadas", {})))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1206,6 +1483,10 @@ def _tab_respostas(pode_edit):
         if pode_edit and valor != respostas.get(pid, ""):
             respostas[pid] = valor
             _salvar("respostas", respostas)
+
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar as 6 Perguntas (Excel)", "seis_perguntas_diagnostico", "Perguntas",
+                 _respostas_para_registros(_ler("respostas", {})))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1281,6 +1562,10 @@ def _tab_resumo_ia(pode_edit):
     if pode_edit and resumo != valor_salvo:
         _salvar("resumo_ia", resumo)
 
+    st.markdown("---")
+    _botao_excel("⬇️ Baixar Resumo IA (Excel)", "resumo_executivo_ia", "Resumo",
+                 [{"resumo_executivo": resumo}] if resumo.strip() else [])
+
 
 # ─────────────────────────────────────────────────────────────
 # 12 · Relatório Consolidado — extrai e organiza tudo que foi coletado
@@ -1318,6 +1603,8 @@ def gerar_relatorio_consolidado(checklist, inventario, organograma, raci_simples
     if pessoas_org:
         for o in pessoas_org:
             linha = f"- **{o['pessoa']}** — {o.get('papel') or '—'}"
+            if o.get("responde_para"):
+                linha += f"; responde para {o['responde_para']}"
             if o.get("especialista"):
                 linha += f"; especialista em {o['especialista']}"
             if o.get("cobre"):
@@ -1471,7 +1758,7 @@ def _tab_relatorio_final(pode_edit):
     with st.expander("👁️ Pré-visualização", expanded=True):
         st.markdown(md)
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.download_button("⬇️ Baixar Relatório (Markdown)", data=md,
                             file_name="relatorio_consolidado_diagnostico_n2.md", mime="text/markdown",
@@ -1484,6 +1771,10 @@ def _tab_relatorio_final(pode_edit):
                                 key="diag_download_relatorio_pdf", use_container_width=True)
         except ImportError:
             st.caption("💡 Instale `fpdf2` (`pip install fpdf2`) para habilitar a exportação em PDF.")
+    with c3:
+        linhas_excel = [{"linha": l} for l in md.split("\n")]
+        _botao_excel("⬇️ Baixar Relatório (Excel)", "relatorio_consolidado_diagnostico_n2", "Relatorio",
+                     linhas_excel, key="diag_download_relatorio_xlsx")
 
 
 # ─────────────────────────────────────────────────────────────
