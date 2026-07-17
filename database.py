@@ -18,23 +18,6 @@ def get_db():
 def hash_senha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
-def _normalizar_login(usuario: str) -> str:
-    """
-    Deixa o login sempre em minúsculas e sem espaços nas pontas antes de
-    usar como ID do documento no Firestore. Corrige o bug clássico de
-    'motorista cadastrado não consegue logar': o ID do documento é
-    comparado de forma EXATA (maiúscula/minúscula e espaço importam), e é
-    muito comum o admin digitar "Joao123 " (com espaço, ou com maiúscula)
-    na hora do cadastro e o motorista digitar "joao123" na hora de logar —
-    sem essa normalização, são dois logins "diferentes" pro Firestore.
-    """
-    return (usuario or "").strip().lower()
-
-def _normalizar_senha(senha: str) -> str:
-    """Remove espaços acidentais nas pontas (comum em teclado de celular
-    com autocorretor) antes de gerar/comparar o hash da senha."""
-    return (senha or "").strip()
-
 MODULOS_PADRAO = {
     "adm":         ["rastreio","tickets","cartas","exportar"],
     "supervisor":  ["rastreio","tickets","cartas","exportar"],
@@ -59,8 +42,6 @@ def pode_deletar(user: dict) -> bool:
 
 # ── Auth ──────────────────────────────────────────────────────────
 def verificar_login(usuario: str, senha: str):
-    usuario = _normalizar_login(usuario)
-    senha   = _normalizar_senha(senha)
     if usuario == "admin" and senha == "admin123":
         return {"nome":"Administrador Master","usuario":"admin",
                 "role":"adm","modulos":["rastreio","tickets","cartas","exportar"],
@@ -73,16 +54,7 @@ def verificar_login(usuario: str, senha: str):
     return None
 
 def criar_usuario(nome, usuario, senha, role, modulos=None, departamento="", placa=""):
-    """
-    Cria usuário. Aceita 'departamento' (Regra 1) e 'placa' (motoristas).
-    Retorna o login FINAL (normalizado — minúsculo e sem espaços) que ficou
-    de fato salvo no Firestore; use esse valor de volta (não o que foi
-    digitado no formulário) para qualquer coisa que precise bater com o
-    documento certo depois (ex: vincular nome de exibição, mostrar pro
-    admin qual login o motorista deve usar).
-    """
-    usuario = _normalizar_login(usuario)
-    senha   = _normalizar_senha(senha)
+    """Cria usuário. Aceita 'departamento' (Regra 1) e 'placa' (motoristas)."""
     if modulos is None:
         modulos = MODULOS_PADRAO.get(role, ["rastreio"])
     get_db().collection("usuarios").document(usuario).set({
@@ -93,7 +65,6 @@ def criar_usuario(nome, usuario, senha, role, modulos=None, departamento="", pla
         "placa": placa,
     })
     listar_usuarios.clear()
-    return usuario
 
 def atualizar_dados_usuario(usuario: str, nome: str = None, placa: str = None):
     """Edita nome e/ou placa de um usuário (usado na edição de motoristas)."""
@@ -110,8 +81,6 @@ def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
     """Retorna (True, msg_sucesso) ou (False, msg_erro)."""
     if usuario == "admin":
         return False, "A senha do admin master não pode ser alterada aqui."
-    senha_atual = _normalizar_senha(senha_atual)
-    nova_senha  = _normalizar_senha(nova_senha)
     doc = get_db().collection("usuarios").document(usuario).get()
     if not doc.exists:
         return False, "Usuário não encontrado."
@@ -132,7 +101,6 @@ def redefinir_senha_usuario(usuario: str, nova_senha: str):
     """Reset de senha pelo admin — não exige a senha atual."""
     if usuario == "admin":
         return False, "A senha do admin master não pode ser alterada aqui."
-    nova_senha = _normalizar_senha(nova_senha)
     doc = get_db().collection("usuarios").document(usuario).get()
     if not doc.exists:
         return False, "Usuário não encontrado."
@@ -303,20 +271,11 @@ def resolver_destinatario_ticket(departamento, tabulacao_nome=None):
     return res
 
 # ── Entregas ──────────────────────────────────────────────────────
-# TTL curto (8s): rápido o bastante pra não bater no Firestore a cada
-# tecla digitada na busca ou troca de filtro dentro do Rastreio (que antes
-# refazia essa consulta a CADA rerun da tela), mas curto o bastante pra
-# não esconder por muito tempo uma baixa de entrega ou upload recém-feitos
-# — e, de qualquer forma, salvar_entregas_db/dar_baixa_entrega_db chamam
-# .clear() nessas duas funções assim que mudam algo, então a atualização
-# aparece na hora mesmo com o cache ativo.
-@st.cache_data(ttl=8, show_spinner=False)
 def obter_tickets_db(data_alvo: str) -> list:
     docs = get_db().collection("entregas") \
                    .where("data_entrega","==",data_alvo).stream()
     return [d.to_dict().get("payload", d.to_dict()) for d in docs]
 
-@st.cache_data(ttl=8, show_spinner=False)
 def obter_tickets_com_id_db(data_alvo: str) -> list:
     """
     Igual a obter_tickets_db, mas cada item vem com o campo '_doc_id'
@@ -375,8 +334,6 @@ def deletar_rota_db(rota: str, data: str):
     if encontrou:
         batch.commit()
         obter_datas_disponiveis_db.clear()
-        obter_tickets_db.clear()
-        obter_tickets_com_id_db.clear()
 
 # ══════════════════════════════════════════════════════════════════
 # CARTAS DE DÉBITO (RH)
@@ -493,15 +450,6 @@ def listar_lembretes_pessoais(usuario: str) -> list:
     """Lembretes do usuário logado (não aparecem para outros usuários)."""
     docs = get_db().collection("lembretes_pessoais").where("usuario", "==", usuario).stream()
     return sorted([d.to_dict() for d in docs], key=lambda x: x.get("criado_em",""), reverse=True)
-
-def listar_todos_lembretes_db() -> list:
-    """
-    Lembretes de TODOS os usuários, sem filtro — usado exclusivamente na
-    aba "Visão Geral (ADM)". Não deve ser chamada a partir de telas
-    acessíveis a papéis não-adm, pois expõe lembretes de terceiros.
-    """
-    docs = get_db().collection("lembretes_pessoais").stream()
-    return sorted([d.to_dict() for d in docs], key=lambda x: x.get("criado_em", ""), reverse=True)
 
 def criar_lembrete_pessoal_db(usuario: str, texto: str, data_hora: str, vinculo: str = "") -> str:
     """vinculo: nome do projeto RACI relacionado, ou "" para 'Pontual (fora de projetos)'."""
@@ -697,28 +645,6 @@ def obter_atividade_em_andamento_db(usuario: str):
         item["id"] = d.id
         return item
     return None
-
-def listar_atividades_em_andamento_db() -> list:
-    """
-    Retorna TODAS as atividades em andamento agora (de qualquer usuário),
-    cada uma com 'id' incluso. Usado na aba "Visão Geral (ADM)" para
-    mostrar, em tempo real, quem está com o cronômetro rodando neste
-    momento — sem precisar passar usuário por usuário.
-
-    Requer um índice simples em 'status' (o Firestore cria automaticamente
-    para queries de campo único, então não deve pedir índice composto).
-    """
-    docs = (
-        get_db().collection("diario_bordo")
-        .where("status", "==", "em_andamento")
-        .stream()
-    )
-    out = []
-    for d in docs:
-        item = d.to_dict()
-        item["id"] = d.id
-        out.append(item)
-    return out
 
 def listar_diario_bordo_db(usuario: str = None, data_ini=None, data_fim=None) -> list:
     """
