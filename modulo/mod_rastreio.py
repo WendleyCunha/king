@@ -52,6 +52,12 @@ TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/track
 # st.dialog disponível? (popup nativo). Senão, cai no st.popover.
 _HAS_DIALOG = bool(getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None))
 
+# Tempo de exibição de mensagens de sucesso/erro antes de recarregar a tela.
+# Reduzido de 1-1.5s para 0.5s em todos os pontos do arquivo: o objetivo é
+# só deixar o "toast" piscar na tela, não segurar a interação — isso, somado
+# aos ajustes de cache no database.py, é o que resolve a sensação de lentidão.
+_PAUSA_TOAST = 0.5
+
 
 # ── Helpers ────────────────────────────────────────────────────────
 def _html(s: str) -> str:
@@ -194,7 +200,7 @@ def _conteudo_motorista(rota, df, data_consulta, user):
         nn = st.text_input("Nome do condutor:", value=nome, key=f"nm_{ch}")
         if st.button("💾 Salvar nome", key=f"svnm_{ch}", type="primary"):
             salvar_vinculo_db(ch, nn.strip())
-            st.success("Salvo!"); time.sleep(.4); st.rerun()
+            st.success("Salvo!"); time.sleep(_PAUSA_TOAST); st.rerun()
     else:
         st.caption("🔒 Edição restrita.")
 
@@ -204,7 +210,7 @@ def _conteudo_motorista(rota, df, data_consulta, user):
             if st.button("🗑️ Excluir Rota", key=f"delr_{ch}"):
                 try:
                     deletar_rota_db(rota, data_consulta)
-                    st.success("Excluído!"); time.sleep(.7); st.rerun()
+                    st.success("Excluído!"); time.sleep(_PAUSA_TOAST); st.rerun()
                 except Exception as e:
                     st.error("⚠️ Não consegui excluir. Detalhe técnico abaixo:")
                     st.code(f"{type(e).__name__}: {e}", language="text")
@@ -324,7 +330,11 @@ def _aba_cadastros(datas_db):
         st.markdown("### 📤 Importar Planilha de Entregas")
         st.caption("Envie a planilha já roteirizada (uma linha por entrega, com a coluna do motorista).")
 
-        motoristas = [u for u in listar_usuarios() if u.get("role") == "motorista"]
+        # Buscado 1x e reaproveitado no resto da função (upload + lista de
+        # cadastrados), em vez de chamar listar_usuarios() de novo lá embaixo.
+        todos_usuarios = listar_usuarios()
+        motoristas = [u for u in todos_usuarios if u.get("role") == "motorista"]
+
         if not motoristas:
             st.warning("⚠️ Cadastre pelo menos um motorista na seção abaixo antes de importar.")
         else:
@@ -459,7 +469,7 @@ def _aba_cadastros(datas_db):
                             qtd = salvar_entregas_db(entregas, data_str)
                             msg_extra = f" ({sem_motorista} linha(s) pulada(s) sem motorista)" if sem_motorista else ""
                             st.success(f"✅ {qtd} entregas importadas para {data_str}{msg_extra}.")
-                            time.sleep(1.2)
+                            time.sleep(_PAUSA_TOAST)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Não consegui importar a planilha: {e}")
@@ -469,7 +479,9 @@ def _aba_cadastros(datas_db):
         with st.form("form_novo_motorista"):
             c1, c2 = st.columns(2)
             nm_nome  = c1.text_input("Nome completo")
-            nm_login = c2.text_input("Login")
+            nm_login = c2.text_input(
+                "Login", help="Dica: evite espaços — o login é usado como identificador exato no login do app.",
+            )
             c3, c4 = st.columns(2)
             nm_senha = c3.text_input("Senha", type="password")
             nm_placa = c4.text_input("Placa do veículo", placeholder="Ex: ABC1D23")
@@ -478,22 +490,33 @@ def _aba_cadastros(datas_db):
                     st.warning("Preencha nome, login e senha.")
                 else:
                     try:
-                        criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
-                                      modulos=["rastreio"], placa=nm_placa)
-                        salvar_vinculo_db(nm_login, nm_nome)
-                        st.success(f"Motorista **{nm_nome}** cadastrado! Login: `{nm_login}`")
+                        # criar_usuario normaliza o login (sem espaços, minúsculo)
+                        # e retorna a versão final — é essa que precisa ser usada
+                        # daqui pra frente (vínculo de rota e mensagem pro admin),
+                        # pra não haver risco de o login exibido aqui ser diferente
+                        # do que fica de fato salvo no banco.
+                        login_final = criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
+                                                     modulos=["rastreio"], placa=nm_placa)
+                        login_final = login_final or nm_login.strip().lower()
+                        salvar_vinculo_db(login_final, nm_nome)
+                        st.success(
+                            f"Motorista **{nm_nome}** cadastrado! Login para ele usar: `{login_final}`"
+                        )
                         time.sleep(1)
                         st.rerun()
                     except TypeError:
                         # Fallback: seu database.py ainda não tem o parâmetro placa=""
-                        # em criar_usuario. Cadastra sem a placa em vez de travar a tela.
+                        # em criar_usuario (versão antiga, sem normalização de login
+                        # nem retorno do login final). Cadastra sem a placa em vez
+                        # de travar a tela, mas recomenda atualizar o database.py.
                         criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
                                       modulos=["rastreio"])
                         salvar_vinculo_db(nm_login, nm_nome)
                         st.warning(
                             f"Motorista **{nm_nome}** cadastrado, mas a placa não foi salva "
                             "porque o database.py ainda não foi atualizado com o campo `placa`. "
-                            "Peça pra atualizar a função criar_usuario."
+                            "Peça pra atualizar a função criar_usuario. Atenção: como essa versão "
+                            "antiga não normaliza o login, digite exatamente igual na hora de logar."
                         )
                         time.sleep(1.5)
                         st.rerun()
@@ -508,8 +531,14 @@ def _aba_cadastros(datas_db):
         else:
             for m in motoristas:
                 login_m = m.get("usuario", "—")
+                # Mantém o expander ABERTO depois de qualquer ação (salvar
+                # nome/placa, redefinir senha, excluir) — sem isso, a tela
+                # recarrega, o expander volta a ficar fechado por padrão, e
+                # dá a falsa impressão de que a ação "não salvou nada".
+                exp_key = f"exp_aberto_mot_{login_m}"
                 with st.expander(
-                    f"🧑‍✈️ **{m.get('nome','—')}** · `{login_m}` · placa {m.get('placa') or '—'}"
+                    f"🧑‍✈️ **{m.get('nome','—')}** · `{login_m}` · placa {m.get('placa') or '—'}",
+                    expanded=st.session_state.get(exp_key, False),
                 ):
                     st.markdown("**✏️ Editar dados**")
                     ec1, ec2 = st.columns(2)
@@ -526,8 +555,9 @@ def _aba_cadastros(datas_db):
                                 atualizar_dados_usuario(login_m, nome=novo_nome, placa=nova_placa)
                                 # mantém o nome exibido no Dashboard/cards sincronizado
                                 salvar_vinculo_db(login_m, novo_nome)
+                                st.session_state[exp_key] = True
                                 st.success("Dados atualizados!")
-                                time.sleep(1)
+                                time.sleep(_PAUSA_TOAST)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Não consegui salvar: {e}")
@@ -544,17 +574,19 @@ def _aba_cadastros(datas_db):
                             st.warning("A senha deve ter pelo menos 6 caracteres.")
                         else:
                             ok, msg = redefinir_senha_usuario(login_m, nova_senha)
+                            st.session_state[exp_key] = True
                             (st.success if ok else st.error)(msg)
                             if ok:
-                                time.sleep(1)
+                                time.sleep(_PAUSA_TOAST)
                                 st.rerun()
 
                     st.markdown("---")
                     if st.checkbox("Liberar exclusão deste motorista", key=f"ed_chk_del_{login_m}"):
                         if st.button("🗑️ Excluir motorista", key=f"ed_del_{login_m}"):
                             deletar_usuario(login_m)
+                            st.session_state.pop(exp_key, None)  # motorista sumiu da lista
                             st.success("Motorista excluído.")
-                            time.sleep(1)
+                            time.sleep(_PAUSA_TOAST)
                             st.rerun()
 
     except Exception as e:
@@ -682,7 +714,7 @@ def _visualizacao_motorista(user):
                             ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto_bytes, motivo)
                             (st.success if ok else st.error)(msg)
                             if ok:
-                                time.sleep(1)
+                                time.sleep(_PAUSA_TOAST)
                                 st.rerun()
 
 
@@ -753,7 +785,9 @@ def renderizar_rastreio(papel: str, user: dict = None,
         except: data_consulta = hoje
     is_hoje = (data_consulta == hoje)
 
-    # Carrega dados
+    # Carrega dados (obter_tickets_db agora é cacheado no database.py —
+    # digitar na busca ou trocar de aba não bate mais no Firestore de novo
+    # a cada tecla, só quando o cache expira ou é limpo por uma mutação real).
     tickets_raw = obter_tickets_db(data_consulta)
     df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
 
