@@ -23,12 +23,21 @@ e isso rodava para TODOS os motoristas, a cada rerun de QUALQUER página
 do sistema (porque o main.py usa esse número no badge da sidebar) e
 também a cada 2s dentro do fragment do Chat. Isso é O(mensagens) e caro.
 
-Agora mantemos um contador incremental no doc-resumo /conversas_chat/{id}:
+Depois, passamos a manter um contador incremental no doc-resumo
+/conversas_chat/{id}:
     - nao_lidas_adm       → quantas mensagens do MOTORISTA o ADM não leu
     - nao_lidas_motorista → quantas mensagens do ADM o motorista não leu
 Cada envio faz um Increment(1); cada "marcar como lida" zera o campo.
-listar_conversas_com_nao_lidas() passa a ler 1 documento pequeno por
-motorista, em vez de até 1000 mensagens por motorista.
+
+MAIS UMA OTIMIZAÇÃO (a que resolve a lentidão geral do sistema):
+listar_conversas_com_nao_lidas() ainda fazia 1 leitura de documento POR
+MOTORISTA, em sequência — ou seja, N viagens de rede ao Firestore a cada
+rerun de QUALQUER tela (essa função roda o tempo todo por causa do badge
+da sidebar). Com poucos motoristas isso passa despercebido; com dezenas,
+essa fila de esperas sequenciais é a maior causa de lentidão do sistema
+inteiro, não só do Chat. Agora usamos `db.get_all(...)`, que busca todos
+os documentos de uma vez, numa única viagem de rede — o tempo de resposta
+deixa de crescer com o número de motoristas.
 ──────────────────────────────────────────────────────────────────────
 """
 
@@ -187,15 +196,22 @@ def listar_conversas_com_nao_lidas(lista_motoristas: list):
     Para o painel do ADM: retorna, para cada motorista, quantas mensagens
     não lidas ele mandou e qual foi a última mensagem.
 
-    OTIMIZADO: lê 1 documento pequeno (/conversas_chat/{motorista}) por
-    motorista, em vez de baixar até 1000 mensagens por motorista e contar
-    em Python. O contador vem pronto (nao_lidas_adm), mantido de forma
-    incremental por enviar_mensagem_chat / marcar_mensagens_lidas.
+    OTIMIZADO (2ª rodada): busca todos os documentos /conversas_chat/{m}
+    de uma vez com db.get_all(), em vez de 1 .get() sequencial por
+    motorista. Isso é o que resolve a lentidão sentida em QUALQUER tela do
+    sistema, já que essa função roda a cada rerun por causa do badge da
+    sidebar — antes, N motoristas = N viagens de rede sequenciais; agora
+    é sempre 1 viagem, não importa quantos motoristas existam.
     """
+    if not lista_motoristas:
+        return []
+
     db = get_db()
+    refs = [db.collection("conversas_chat").document(m) for m in lista_motoristas]
+    docs_por_ref = db.get_all(refs)
+
     resultado = []
-    for m in lista_motoristas:
-        doc = db.collection("conversas_chat").document(m).get()
+    for m, doc in zip(lista_motoristas, docs_por_ref):
         d = doc.to_dict() if doc.exists else {}
         resultado.append({
             "motorista": m,
