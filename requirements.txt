@@ -8,3 +8,4 @@ xlsxwriter>=3.2.0
 plotly>=5.20.0
 streamlit-autorefresh
 fpdf2
+matplotlib>=3.8.0
