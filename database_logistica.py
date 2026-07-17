@@ -9,7 +9,7 @@ Reaproveita a mesma conexão Firestore (banco "portal") via get_db(),
 que já vive no database.py.
 """
 
-from database import get_db, BRT
+from database import get_db, BRT, obter_tickets_db, obter_tickets_com_id_db
 from datetime import datetime
 
 
@@ -41,6 +41,13 @@ def salvar_entregas_db(entregas: list, data_alvo: str) -> int:
             batch.commit()
             batch = db.batch()
     batch.commit()
+
+    # As entregas recém-importadas não devem ficar escondidas atrás do cache
+    # de leitura (obter_tickets_db / obter_tickets_com_id_db) até expirar
+    # sozinho — limpamos na hora para o Dashboard já refletir o upload.
+    obter_tickets_db.clear()
+    obter_tickets_com_id_db.clear()
+
     return count
 
 
@@ -87,6 +94,11 @@ def dar_baixa_entrega_db(doc_id: str, status: str, foto_bytes: bytes = None, obs
             "status": status,
             "data": agora.strftime("%d/%m/%Y %H:%M"),
         })
+
+    # Idem: sem isso, o motorista dá baixa mas continua vendo a entrega como
+    # "⏳ Pendente" na própria tela dele até o cache expirar sozinho.
+    obter_tickets_db.clear()
+    obter_tickets_com_id_db.clear()
 
     return True, "✅ Baixa registrada com sucesso!"
 
