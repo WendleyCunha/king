@@ -1022,12 +1022,20 @@ def _tab_raci_matriz(pode_edit):
 
 # ─────────────────────────────────────────────────────────────
 # Helpers p/ opções dinâmicas (Inventário → Atividade, Organograma → Pessoa)
+# Cacheadas com TTL curto: evita ida ao Firestore a cada rerun da página
+# (o Streamlit reexecuta o script inteiro a cada clique em qualquer lugar
+# do app, então sem cache essas duas funções bateriam no banco o tempo
+# todo, mesmo com o usuário em outra aba). .clear() é chamado sempre que
+# o Inventário ou o Organograma são salvos, então o dado nunca fica velho
+# por mais que alguns segundos.
 # ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=30, show_spinner=False)
 def _opcoes_atividades_inventario():
     inventario = _ler("inventario", [])
     return sorted({(i.get("atividade") or "").strip() for i in inventario if (i.get("atividade") or "").strip()})
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def _opcoes_pessoas_organograma():
     organograma = _ler("organograma", [])
     return sorted({(o.get("pessoa") or "").strip() for o in organograma if (o.get("pessoa") or "").strip()})
