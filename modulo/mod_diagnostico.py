@@ -599,6 +599,10 @@ def _editor_tabela_simples(chave, colunas_config, campos_ordem, pode_edit, edito
 
     if pode_edit and not editado.equals(df):
         _salvar(chave, editado.to_dict("records"))
+        if chave == "inventario":
+            _opcoes_atividades_inventario.clear()
+        elif chave == "organograma":
+            _opcoes_pessoas_organograma.clear()
     return editado
 
 
