@@ -1216,18 +1216,13 @@ def _tab_diario(pode_edit):
                                        placeholder="se não estiver na lista")
         analista_atual = analista_novo.strip() or (analista_sel if analista_sel != "— selecione —" else "")
 
+        if not pessoas_org:
+            st.caption("💡 A aba 🧭 Organograma ainda não tem ninguém cadastrado, então o seletor acima "
+                       "está vazio. Digite o nome no campo **\"Ou nome novo\"** para continuar.")
+
         diario_atual = _ler("diario", [])
         idx_aberto, aberto = (_registro_aberto(diario_atual, analista_atual, hoje_str)
                                if analista_atual else (None, None))
-
-        with st.expander("🔧 Diagnóstico técnico (temporário — remover depois de confirmar)"):
-            st.write("hoje_str (data usada para buscar o cronômetro):", hoje_str)
-            st.write("analista_atual:", repr(analista_atual))
-            st.write("total de registros no diário:", len(diario_atual))
-            st.write("idx_aberto encontrado:", idx_aberto)
-            st.write("registro em aberto:", aberto)
-            if diario_atual:
-                st.write("últimos 3 registros salvos:", diario_atual[-3:])
 
         st.markdown("&nbsp;", unsafe_allow_html=True)
         if aberto:
@@ -1314,9 +1309,9 @@ def _tab_diario(pode_edit):
                             st.stop()
                         st.rerun()
             else:
-                st.caption("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
-                           "comece digitando uma abaixo (ela entra automaticamente no Inventário e na "
-                           "grade nos próximos toques).")
+                st.info("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
+                        "comece digitando uma no campo **\"Atividade não está na lista acima?\"** logo "
+                        "abaixo (ela entra automaticamente no Inventário e na grade nos próximos toques).")
 
             c1, c2 = st.columns(2)
             if _botao_resiliente(c1, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
