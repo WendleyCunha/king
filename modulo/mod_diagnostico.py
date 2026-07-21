@@ -1171,13 +1171,6 @@ def _encerrar_dia(analista):
         _salvar("diario", diario)
 
 
-def _grade_atividades(atividades_inv):
-    """A grade de toques precisa ser EXATAMENTE a lista do Inventário — se uma
-    atividade for excluída de lá, ela some da grade; se for adicionada, aparece.
-    Sem mistura com frequência do Diário e sem limite de quantidade."""
-    return list(atividades_inv)
-
-
 def _botao_resiliente(coluna, label, key, **kwargs):
     """st.button() com rede de segurança: se o Streamlit falhar ao registrar
     o widget (ex: StreamlitDuplicateElementKey — falha intermitente observada
@@ -1211,9 +1204,9 @@ def _botao_resiliente(coluna, label, key, **kwargs):
 # ─────────────────────────────────────────────────────────────
 def _tab_diario(pode_edit):
     st.markdown("#### 📓 Diário de Bordo")
-    st.caption("Modo esteira: toque na atividade que está começando agora — o sistema fecha "
-               "sozinho o cronômetro da atividade anterior e cronometra a nova a partir daí. "
-               "Nenhuma hora precisa ser digitada durante a observação.")
+    st.caption("Escolha a atividade e toque em Iniciar — o sistema fecha sozinho o cronômetro da "
+               "atividade anterior e cronometra a nova a partir daí. Nenhuma hora precisa ser "
+               "digitada durante a observação.")
 
     colunas = ["data", "analista", "hora_inicio", "hora_fim", "duracao", "atividade",
                "categoria", "origem", "sistemas", "depende_terceiros", "quem", "obs"]
@@ -1303,33 +1296,32 @@ def _tab_diario(pode_edit):
                     _salvar("diario", diario_atual)
 
         if analista_atual:
-            st.markdown("##### ⚡ Toque na atividade que está começando agora")
-            st.caption("A grade abaixo é exatamente a lista da aba 📋 Inventário — inclua, edite ou "
-                       "exclua atividades por lá para atualizar o que aparece aqui.")
-            grade = _grade_atividades(atividades_inv)
-            if grade:
-                cols = st.columns(4)
-                for i, nome in enumerate(grade):
-                    destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
-                    if _botao_resiliente(
-                        cols[i % 4], ("🟢 " if destaque else "") + nome,
-                        key=f"diag_tap_{normalizar_texto(nome)}",
-                        use_container_width=True, disabled=bool(destaque),
-                    ):
-                        try:
-                            _registrar_toque(analista_atual, nome)
-                        except Exception as e:
-                            st.error(f"Não consegui iniciar a atividade '{nome}': {e}")
-                            st.exception(e)
-                            st.stop()
-                        st.rerun()
-            else:
-                st.info("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
-                        "comece digitando uma no campo **\"Atividade não está na lista acima?\"** logo "
-                        "abaixo (ela entra automaticamente no Inventário e na grade nos próximos toques).")
+            st.markdown("##### ⚡ Iniciar ou trocar de atividade")
+            st.caption("Escolha a atividade e toque em Iniciar — fecha sozinho o cronômetro da "
+                       "atividade anterior (se houver) e começa a cronometrar a partir de agora.")
 
-            c1, c2 = st.columns(2)
-            if _botao_resiliente(c1, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
+            opcoes_atividade = ["— selecione —"] + atividades_inv + ["+ nova atividade..."]
+            escolha_ativ = st.selectbox("Atividade", opcoes_atividade, key="diag_esteira_ativ_sel")
+            nome_novo_ativ = ""
+            if escolha_ativ == "+ nova atividade...":
+                nome_novo_ativ = st.text_input("Nome da nova atividade", key="diag_esteira_ativ_novo")
+            atividade_escolhida = (nome_novo_ativ.strip() if escolha_ativ == "+ nova atividade..."
+                                    else (escolha_ativ if escolha_ativ != "— selecione —" else ""))
+            ja_em_andamento = (aberto and atividade_escolhida
+                                and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(atividade_escolhida))
+
+            b1, b2, b3 = st.columns(3)
+            if _botao_resiliente(b1, "▶️ Iniciar esta atividade", "diag_esteira_iniciar",
+                                  use_container_width=True, type="primary",
+                                  disabled=not atividade_escolhida or bool(ja_em_andamento)):
+                try:
+                    _registrar_toque(analista_atual, atividade_escolhida)
+                except Exception as e:
+                    st.error(f"Não consegui iniciar a atividade '{atividade_escolhida}': {e}")
+                    st.exception(e)
+                    st.stop()
+                st.rerun()
+            if _botao_resiliente(b2, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
                 try:
                     _registrar_toque(analista_atual, "Pausa / Interrupção")
                 except Exception as e:
@@ -1337,8 +1329,7 @@ def _tab_diario(pode_edit):
                     st.exception(e)
                     st.stop()
                 st.rerun()
-            if _botao_resiliente(c2, "🏁 Finalizar o dia", "diag_tap_fim",
-                                  use_container_width=True, type="primary"):
+            if _botao_resiliente(b3, "🏁 Finalizar o dia", "diag_tap_fim", use_container_width=True):
                 try:
                     _encerrar_dia(analista_atual)
                 except Exception as e:
@@ -1346,22 +1337,6 @@ def _tab_diario(pode_edit):
                     st.exception(e)
                     st.stop()
                 st.rerun()
-
-            with st.form("diag_form_toque_novo", clear_on_submit=True):
-                cc1, cc2 = st.columns([3, 1])
-                nova_atividade = cc1.text_input(
-                    "Atividade não está na lista acima?", key="diag_novo_toque_nome",
-                    placeholder="digite o nome e toque em Começar",
-                )
-                comecar = cc2.form_submit_button("▶️ Começar", use_container_width=True)
-                if comecar and nova_atividade.strip():
-                    try:
-                        _registrar_toque(analista_atual, nova_atividade.strip())
-                    except Exception as e:
-                        st.error(f"Não consegui iniciar '{nova_atividade}': {e}")
-                        st.exception(e)
-                        st.stop()
-                    st.rerun()
 
         with st.expander("✏️ Lançamento manual com hora específica (retroativo)"):
             st.caption("Use isto só para completar um dia passado ou corrigir um horário — no dia a dia, "
@@ -2213,7 +2188,7 @@ def renderizar_diagnostico(papel, user=None):
 
     st.subheader("🗺️ Diagnóstico N2 — Mapeamento de Atividades Operacionais")
     st.caption("CX · Backoffice (N2) · Área responsável: PQI · entrega prevista 05/08/2026")
-    st.caption("🔧 build: 2026-07-21-esteira-v6-retry-limit — se você não está vendo exatamente "
+    st.caption("🔧 build: 2026-07-21-esteira-v7-seletor-unico — se você não está vendo exatamente "
                "este texto, o deploy ainda não atualizou.")
     if not editar:
         st.info("Modo somente leitura — peça a um supervisor ou administrador para editar.")
