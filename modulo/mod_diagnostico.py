@@ -666,7 +666,9 @@ def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
                "(tickets, tags do sistema, controles paralelos por fora do oficial). Também é "
-               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo.")
+               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo. "
+               "Para excluir uma linha direto na tabela, selecione-a (clique no início da linha) "
+               "e aperte a tecla Delete/Backspace — ou use o campo abaixo.")
     editado = _editor_tabela_simples(
         "inventario",
         {
@@ -678,6 +680,29 @@ def _tab_inventario(pode_edit):
         ["atividade", "categoria", "descricao", "registrada"],
         pode_edit, "diag_editor_inventario",
     )
+
+    if pode_edit:
+        st.markdown("---")
+        st.markdown("##### 🗑️ Excluir atividade")
+        atividades_atuais = sorted({(a or "").strip() for a in editado["atividade"] if (a or "").strip()})
+        if atividades_atuais:
+            c1, c2 = st.columns([3, 1])
+            escolha_excluir = c1.selectbox(
+                "Escolha a atividade para excluir", ["— selecione —"] + atividades_atuais,
+                key="diag_inventario_excluir_sel",
+            )
+            if c2.button("🗑️ Excluir", key="diag_inventario_excluir_btn", use_container_width=True,
+                         disabled=(escolha_excluir == "— selecione —")):
+                inventario_atual = _ler("inventario", [])
+                norm_alvo = normalizar_texto(escolha_excluir)
+                inventario_novo = [i for i in inventario_atual
+                                    if normalizar_texto(i.get("atividade", "")) != norm_alvo]
+                _salvar("inventario", inventario_novo)
+                _opcoes_atividades_inventario.clear()
+                st.success(f"Atividade **{escolha_excluir}** excluída do Inventário.")
+                st.rerun()
+        else:
+            st.caption("Nenhuma atividade cadastrada ainda.")
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Inventário (Excel)", "inventario_atividades", "Inventario",
@@ -1154,24 +1179,11 @@ def _encerrar_dia(analista):
         _salvar("diario", diario)
 
 
-def _grade_atividades(diario, atividades_inv, limite=12):
-    """Monta a grade de botões de toque rápido: primeiro as atividades mais
-    usadas recentemente (o que a pessoa mais faz aparece primeiro, sem
-    precisar rolar), completando com o restante do Inventário em ordem
-    alfabética até o limite."""
-    contagem, nome_original = {}, {}
-    for r in diario:
-        a = (r.get("atividade") or "").strip()
-        if not a:
-            continue
-        norm = normalizar_texto(a)
-        contagem[norm] = contagem.get(norm, 0) + 1
-        nome_original.setdefault(norm, a)
-
-    mais_usadas = [nome_original[norm] for norm, _ in sorted(contagem.items(), key=lambda kv: -kv[1])]
-    vistos = {normalizar_texto(n) for n in mais_usadas}
-    resto = [a for a in atividades_inv if normalizar_texto(a) not in vistos]
-    return (mais_usadas + resto)[:limite]
+def _grade_atividades(atividades_inv):
+    """A grade de toques precisa ser EXATAMENTE a lista do Inventário — se uma
+    atividade for excluída de lá, ela some da grade; se for adicionada, aparece.
+    Sem mistura com frequência do Diário e sem limite de quantidade."""
+    return list(atividades_inv)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1269,7 +1281,9 @@ def _tab_diario(pode_edit):
 
         if analista_atual:
             st.markdown("##### ⚡ Toque na atividade que está começando agora")
-            grade = _grade_atividades(diario_atual, atividades_inv)
+            st.caption("A grade abaixo é exatamente a lista da aba 📋 Inventário — inclua, edite ou "
+                       "exclua atividades por lá para atualizar o que aparece aqui.")
+            grade = _grade_atividades(atividades_inv)
             if grade:
                 cols = st.columns(4)
                 for i, nome in enumerate(grade):
@@ -1281,8 +1295,9 @@ def _tab_diario(pode_edit):
                         _registrar_toque(analista_atual, nome)
                         st.rerun()
             else:
-                st.caption("Ainda não há atividades no Inventário nem no Diário — comece digitando uma "
-                           "abaixo, ela entra automaticamente na grade nos próximos toques.")
+                st.caption("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
+                           "comece digitando uma abaixo (ela entra automaticamente no Inventário e na "
+                           "grade nos próximos toques).")
 
             c1, c2 = st.columns(2)
             with c1:
