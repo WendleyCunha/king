@@ -353,6 +353,25 @@ def sugerir_atividades_do_inventario(inventario, ja_existentes_normalizados):
     return nomes
 
 
+def adicionar_atividade_inventario_se_nova(atividade):
+    """Se a atividade digitada no Diário de Bordo ainda não existir no
+    Inventário (comparando por nome normalizado — sem acento/maiúsculas),
+    cria uma linha nova lá (categoria/descrição em branco, para completar
+    depois) e mantém a lista sempre em ordem alfabética. Usada para manter
+    o Inventário sempre alimentado pelo que aparece no Diário."""
+    atividade = (atividade or "").strip()
+    if not atividade:
+        return
+    inventario = _ler("inventario", [])
+    existentes = {normalizar_texto(i.get("atividade", "")) for i in inventario}
+    if normalizar_texto(atividade) in existentes:
+        return
+    inventario.append({"atividade": atividade, "categoria": "", "descricao": "", "registrada": ""})
+    inventario.sort(key=lambda i: normalizar_texto(i.get("atividade", "")))
+    _salvar("inventario", inventario)
+    _opcoes_atividades_inventario.clear()
+
+
 # ─────────────────────────────────────────────────────────────
 # Organograma visual — a partir da coluna "responde_para" cadastrada na
 # aba Organograma. Suporta responsabilidade compartilhada (ex: duas
@@ -638,7 +657,8 @@ def _tab_checklist():
 def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
-               "(tickets, tags do sistema, controles paralelos por fora do oficial).")
+               "(tickets, tags do sistema, controles paralelos por fora do oficial). Também é "
+               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo.")
     editado = _editor_tabela_simples(
         "inventario",
         {
@@ -1047,7 +1067,9 @@ def _opcoes_pessoas_organograma():
 def _tab_diario(pode_edit):
     st.markdown("#### 📓 Diário de Bordo")
     st.caption("Cada analista preenche uma linha por atividade, por 5 a 10 dias úteis. "
-               "A duração é calculada automaticamente a partir da hora de início e fim.")
+               "A duração é calculada automaticamente a partir da hora de início e fim. Toda "
+               "atividade nova lançada aqui também é adicionada automaticamente ao Inventário "
+               "(em ordem alfabética).")
 
     colunas = ["data", "analista", "hora_inicio", "hora_fim", "duracao", "atividade",
                "categoria", "origem", "sistemas", "depende_terceiros", "quem", "obs"]
@@ -1127,6 +1149,7 @@ def _tab_diario(pode_edit):
                         registros_atuais = _ler("diario", [])
                         registros_atuais.append(novo_registro)
                         _salvar("diario", registros_atuais)
+                        adicionar_atividade_inventario_se_nova(atividade_final)
                         st.success("Linha salva!")
                         st.rerun()
 
@@ -1145,7 +1168,6 @@ def _tab_diario(pode_edit):
         df["hora_inicio"] = df["hora_inicio"].apply(_to_time)
         df["hora_fim"] = df["hora_fim"].apply(_to_time)
 
-        opcoes_atividade = sorted(set(atividades_inv) | (set(df["atividade"]) - {""}))
         opcoes_analista = sorted(set(pessoas_org) | (set(df["analista"]) - {""}))
 
         editado = st.data_editor(
@@ -1157,8 +1179,7 @@ def _tab_diario(pode_edit):
                 "hora_inicio": st.column_config.TimeColumn("Hora início", format="HH:mm"),
                 "hora_fim": st.column_config.TimeColumn("Hora fim", format="HH:mm"),
                 "duracao": st.column_config.TextColumn("Duração (min)", disabled=True),
-                "atividade": (st.column_config.SelectboxColumn("Atividade realizada", options=opcoes_atividade, width="medium")
-                             if opcoes_atividade else st.column_config.TextColumn("Atividade realizada", width="medium")),
+                "atividade": st.column_config.TextColumn("Atividade realizada", width="medium"),
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_DIARIO),
                 "origem": st.column_config.SelectboxColumn("Origem da demanda", options=ORIGENS),
                 "sistemas": st.column_config.TextColumn("Sistema(s) utilizado(s)"),
@@ -1188,6 +1209,8 @@ def _tab_diario(pode_edit):
             assinatura = json.dumps(registros_novos, sort_keys=True, ensure_ascii=False)
             if registros_novos != registros and st.session_state.get("_diag_diario_assinatura") != assinatura:
                 _salvar("diario", registros_novos)
+                for r in registros_novos:
+                    adicionar_atividade_inventario_se_nova(r.get("atividade", ""))
                 st.session_state["_diag_diario_assinatura"] = assinatura
                 st.rerun()
 
