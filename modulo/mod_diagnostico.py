@@ -1208,6 +1208,15 @@ def _tab_diario(pode_edit):
         idx_aberto, aberto = (_registro_aberto(diario_atual, analista_atual, hoje_str)
                                if analista_atual else (None, None))
 
+        with st.expander("🔧 Diagnóstico técnico (temporário — remover depois de confirmar)"):
+            st.write("hoje_str (data usada para buscar o cronômetro):", hoje_str)
+            st.write("analista_atual:", repr(analista_atual))
+            st.write("total de registros no diário:", len(diario_atual))
+            st.write("idx_aberto encontrado:", idx_aberto)
+            st.write("registro em aberto:", aberto)
+            if diario_atual:
+                st.write("últimos 3 registros salvos:", diario_atual[-3:])
+
         st.markdown("&nbsp;", unsafe_allow_html=True)
         if aberto:
             decorrido = _minutos_decorridos_desde(aberto.get("hora_inicio", ""))
@@ -1285,7 +1294,12 @@ def _tab_diario(pode_edit):
                         key=f"diag_tap_{normalizar_texto(nome)}_{uuid.uuid4().hex[:12]}",
                         use_container_width=True, disabled=bool(destaque),
                     ):
-                        _registrar_toque(analista_atual, nome)
+                        try:
+                            _registrar_toque(analista_atual, nome)
+                        except Exception as e:
+                            st.error(f"Não consegui iniciar a atividade '{nome}': {e}")
+                            st.exception(e)
+                            st.stop()
                         st.rerun()
             else:
                 st.caption("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
@@ -1296,12 +1310,22 @@ def _tab_diario(pode_edit):
             with c1:
                 if st.button("⏸️ Pausa / Interrupção", key=f"diag_tap_pausa_{uuid.uuid4().hex[:12]}",
                              use_container_width=True):
-                    _registrar_toque(analista_atual, "Pausa / Interrupção")
+                    try:
+                        _registrar_toque(analista_atual, "Pausa / Interrupção")
+                    except Exception as e:
+                        st.error(f"Não consegui registrar a pausa: {e}")
+                        st.exception(e)
+                        st.stop()
                     st.rerun()
             with c2:
                 if st.button("🏁 Finalizar o dia", key=f"diag_tap_fim_{uuid.uuid4().hex[:12]}",
                              use_container_width=True, type="primary"):
-                    _encerrar_dia(analista_atual)
+                    try:
+                        _encerrar_dia(analista_atual)
+                    except Exception as e:
+                        st.error(f"Não consegui finalizar o dia: {e}")
+                        st.exception(e)
+                        st.stop()
                     st.rerun()
 
             with st.form(f"diag_form_toque_novo_{uuid.uuid4().hex[:12]}", clear_on_submit=True):
@@ -1312,7 +1336,12 @@ def _tab_diario(pode_edit):
                 )
                 comecar = cc2.form_submit_button("▶️ Começar", use_container_width=True)
                 if comecar and nova_atividade.strip():
-                    _registrar_toque(analista_atual, nova_atividade.strip())
+                    try:
+                        _registrar_toque(analista_atual, nova_atividade.strip())
+                    except Exception as e:
+                        st.error(f"Não consegui iniciar '{nova_atividade}': {e}")
+                        st.exception(e)
+                        st.stop()
                     st.rerun()
 
         with st.expander("✏️ Lançamento manual com hora específica (retroativo)"):
