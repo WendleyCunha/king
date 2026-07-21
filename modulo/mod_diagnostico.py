@@ -17,6 +17,7 @@
 # Entry point: renderizar_diagnostico(papel, user) — mesmo padrão de
 # renderizar_rastreio / renderizar_tickets / renderizar_cartas.
 # =============================================================
+import itertools
 import json
 import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -28,6 +29,13 @@ import streamlit as st
 from database import get_db, pode_editar
 
 BRT = timezone(timedelta(hours=-3))
+
+# Contador global (sobrevive entre reruns dentro do mesmo processo) usado só
+# para dar um sufixo único às chaves dos botões de toque do Diário de Bordo
+# (ação sem estado a lembrar — não precisam de chave estável entre execuções).
+# Blinda contra o erro StreamlitDuplicateElementKey caso o Streamlit acabe
+# renderizando o mesmo bloco mais de uma vez na mesma passada do script.
+_diag_diario_contador = itertools.count()
 
 # Altura fixa (em pixels) aplicada a TODAS as tabelas editáveis (st.data_editor)
 # do módulo. Sem uma altura fixa, o data_editor "cresce" pra caber todas as
@@ -1181,6 +1189,7 @@ def _tab_diario(pode_edit):
     atividades_inv = _opcoes_atividades_inventario()
     pessoas_org = _opcoes_pessoas_organograma()
     hoje_str = date.today().strftime("%Y-%m-%d")
+    _exec_id = next(_diag_diario_contador)
 
     if pode_edit:
         st.markdown("##### 👤 Quem está sendo observado agora?")
@@ -1266,7 +1275,7 @@ def _tab_diario(pode_edit):
                 for i, nome in enumerate(grade):
                     destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
                     if cols[i % 4].button(
-                        ("🟢 " if destaque else "") + nome, key=f"diag_tap_{normalizar_texto(nome)}",
+                        ("🟢 " if destaque else "") + nome, key=f"diag_tap_{normalizar_texto(nome)}_{_exec_id}",
                         use_container_width=True, disabled=bool(destaque),
                     ):
                         _registrar_toque(analista_atual, nome)
@@ -1277,15 +1286,15 @@ def _tab_diario(pode_edit):
 
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("⏸️ Pausa / Interrupção", key="diag_tap_pausa", use_container_width=True):
+                if st.button("⏸️ Pausa / Interrupção", key=f"diag_tap_pausa_{_exec_id}", use_container_width=True):
                     _registrar_toque(analista_atual, "Pausa / Interrupção")
                     st.rerun()
             with c2:
-                if st.button("🏁 Finalizar o dia", key="diag_tap_fim", use_container_width=True, type="primary"):
+                if st.button("🏁 Finalizar o dia", key=f"diag_tap_fim_{_exec_id}", use_container_width=True, type="primary"):
                     _encerrar_dia(analista_atual)
                     st.rerun()
 
-            with st.form("diag_form_toque_novo", clear_on_submit=True):
+            with st.form(f"diag_form_toque_novo_{_exec_id}", clear_on_submit=True):
                 cc1, cc2 = st.columns([3, 1])
                 nova_atividade = cc1.text_input(
                     "Atividade não está na lista acima?", key="diag_novo_toque_nome",
