@@ -1178,6 +1178,19 @@ def _grade_atividades(atividades_inv):
     return list(atividades_inv)
 
 
+def _botao_resiliente(coluna, label, key, **kwargs):
+    """st.button() com rede de segurança: se o Streamlit falhar ao registrar
+    o widget (ex: StreamlitDuplicateElementKey — falha intermitente observada
+    nesta combinação específica de versões), avisa e força um rerun limpo em
+    vez de derrubar a página inteira com a tela vermelha de erro."""
+    try:
+        return coluna.button(label, key=key, **kwargs)
+    except Exception:
+        st.warning("⚠️ Tive um problema temporário para desenhar este botão — atualizando a página...")
+        st.rerun()
+        return False
+
+
 # ─────────────────────────────────────────────────────────────
 # 05 · Diário de Bordo
 # ─────────────────────────────────────────────────────────────
@@ -1288,8 +1301,8 @@ def _tab_diario(pode_edit):
                 cols = st.columns(4)
                 for i, nome in enumerate(grade):
                     destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
-                    if cols[i % 4].button(
-                        ("🟢 " if destaque else "") + nome,
+                    if _botao_resiliente(
+                        cols[i % 4], ("🟢 " if destaque else "") + nome,
                         key=f"diag_tap_{normalizar_texto(nome)}",
                         use_container_width=True, disabled=bool(destaque),
                     ):
@@ -1306,26 +1319,23 @@ def _tab_diario(pode_edit):
                            "grade nos próximos toques).")
 
             c1, c2 = st.columns(2)
-            with c1:
-                if st.button("⏸️ Pausa / Interrupção", key="diag_tap_pausa",
-                             use_container_width=True):
-                    try:
-                        _registrar_toque(analista_atual, "Pausa / Interrupção")
-                    except Exception as e:
-                        st.error(f"Não consegui registrar a pausa: {e}")
-                        st.exception(e)
-                        st.stop()
-                    st.rerun()
-            with c2:
-                if st.button("🏁 Finalizar o dia", key="diag_tap_fim",
-                             use_container_width=True, type="primary"):
-                    try:
-                        _encerrar_dia(analista_atual)
-                    except Exception as e:
-                        st.error(f"Não consegui finalizar o dia: {e}")
-                        st.exception(e)
-                        st.stop()
-                    st.rerun()
+            if _botao_resiliente(c1, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
+                try:
+                    _registrar_toque(analista_atual, "Pausa / Interrupção")
+                except Exception as e:
+                    st.error(f"Não consegui registrar a pausa: {e}")
+                    st.exception(e)
+                    st.stop()
+                st.rerun()
+            if _botao_resiliente(c2, "🏁 Finalizar o dia", "diag_tap_fim",
+                                  use_container_width=True, type="primary"):
+                try:
+                    _encerrar_dia(analista_atual)
+                except Exception as e:
+                    st.error(f"Não consegui finalizar o dia: {e}")
+                    st.exception(e)
+                    st.stop()
+                st.rerun()
 
             with st.form("diag_form_toque_novo", clear_on_submit=True):
                 cc1, cc2 = st.columns([3, 1])
