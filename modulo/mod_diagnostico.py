@@ -658,7 +658,9 @@ def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
                "(tickets, tags do sistema, controles paralelos por fora do oficial). Também é "
-               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo.")
+               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo. "
+               "Para excluir uma linha direto na tabela, selecione-a (clique no início da linha) "
+               "e aperte a tecla Delete/Backspace — ou use o campo abaixo.")
     editado = _editor_tabela_simples(
         "inventario",
         {
@@ -670,6 +672,29 @@ def _tab_inventario(pode_edit):
         ["atividade", "categoria", "descricao", "registrada"],
         pode_edit, "diag_editor_inventario",
     )
+
+    if pode_edit:
+        st.markdown("---")
+        st.markdown("##### 🗑️ Excluir atividade")
+        atividades_atuais = sorted({(a or "").strip() for a in editado["atividade"] if (a or "").strip()})
+        if atividades_atuais:
+            c1, c2 = st.columns([3, 1])
+            escolha_excluir = c1.selectbox(
+                "Escolha a atividade para excluir", ["— selecione —"] + atividades_atuais,
+                key="diag_inventario_excluir_sel",
+            )
+            if c2.button("🗑️ Excluir", key="diag_inventario_excluir_btn", use_container_width=True,
+                         disabled=(escolha_excluir == "— selecione —")):
+                inventario_atual = _ler("inventario", [])
+                norm_alvo = normalizar_texto(escolha_excluir)
+                inventario_novo = [i for i in inventario_atual
+                                    if normalizar_texto(i.get("atividade", "")) != norm_alvo]
+                _salvar("inventario", inventario_novo)
+                _opcoes_atividades_inventario.clear()
+                st.success(f"Atividade **{escolha_excluir}** excluída do Inventário.")
+                st.rerun()
+        else:
+            st.caption("Nenhuma atividade cadastrada ainda.")
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Inventário (Excel)", "inventario_atividades", "Inventario",
@@ -1146,24 +1171,39 @@ def _encerrar_dia(analista):
         _salvar("diario", diario)
 
 
-def _grade_atividades(diario, atividades_inv, limite=12):
-    """Monta a grade de botões de toque rápido: primeiro as atividades mais
-    usadas recentemente (o que a pessoa mais faz aparece primeiro, sem
-    precisar rolar), completando com o restante do Inventário em ordem
-    alfabética até o limite."""
-    contagem, nome_original = {}, {}
-    for r in diario:
-        a = (r.get("atividade") or "").strip()
-        if not a:
-            continue
-        norm = normalizar_texto(a)
-        contagem[norm] = contagem.get(norm, 0) + 1
-        nome_original.setdefault(norm, a)
+def _grade_atividades(atividades_inv):
+    """A grade de toques precisa ser EXATAMENTE a lista do Inventário — se uma
+    atividade for excluída de lá, ela some da grade; se for adicionada, aparece.
+    Sem mistura com frequência do Diário e sem limite de quantidade."""
+    return list(atividades_inv)
 
-    mais_usadas = [nome_original[norm] for norm, _ in sorted(contagem.items(), key=lambda kv: -kv[1])]
-    vistos = {normalizar_texto(n) for n in mais_usadas}
-    resto = [a for a in atividades_inv if normalizar_texto(a) not in vistos]
-    return (mais_usadas + resto)[:limite]
+
+def _botao_resiliente(coluna, label, key, **kwargs):
+    """st.button() com rede de segurança: se o Streamlit falhar ao registrar
+    o widget (ex: StreamlitDuplicateElementKey — falha intermitente observada
+    nesta combinação específica de versões), avisa e força UM rerun limpo em
+    vez de derrubar a página inteira com a tela vermelha de erro.
+
+    Importante: só tenta esse rerun automático UMA vez por botão (rastreado em
+    session_state). Se a falha se repetir na tentativa seguinte — sinal de que
+    o problema é persistente, não intermitente —, para de insistir e mostra um
+    erro parado na tela. Sem esse limite, uma falha persistente vira looping
+    infinito de recarregamento (falha → rerun → falha → rerun → ...)."""
+    contador_key = f"_diag_retry_{key}"
+    try:
+        resultado = coluna.button(label, key=key, **kwargs)
+        st.session_state.pop(contador_key, None)  # sucesso: zera o contador desse botão
+        return resultado
+    except Exception as e:
+        tentativas = st.session_state.get(contador_key, 0)
+        if tentativas >= 1:
+            st.error(f"⚠️ Não consegui desenhar o botão \"{label}\" (falha persistente, não tentando "
+                     f"recarregar de novo automaticamente para evitar loop). Detalhe técnico: {e}")
+            return False
+        st.session_state[contador_key] = tentativas + 1
+        st.warning("⚠️ Tive um problema temporário para desenhar este botão — atualizando a página...")
+        st.rerun()
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1180,7 +1220,7 @@ def _tab_diario(pode_edit):
 
     atividades_inv = _opcoes_atividades_inventario()
     pessoas_org = _opcoes_pessoas_organograma()
-    hoje_str = date.today().strftime("%Y-%m-%d")
+    hoje_str = datetime.now(BRT).strftime("%Y-%m-%d")
 
     if pode_edit:
         st.markdown("##### 👤 Quem está sendo observado agora?")
@@ -1190,6 +1230,10 @@ def _tab_diario(pode_edit):
         analista_novo = c2.text_input("Ou nome novo", key="diag_diario_analista_novo",
                                        placeholder="se não estiver na lista")
         analista_atual = analista_novo.strip() or (analista_sel if analista_sel != "— selecione —" else "")
+
+        if not pessoas_org:
+            st.caption("💡 A aba 🧭 Organograma ainda não tem ninguém cadastrado, então o seletor acima "
+                       "está vazio. Digite o nome no campo **\"Ou nome novo\"** para continuar.")
 
         diario_atual = _ler("diario", [])
         idx_aberto, aberto = (_registro_aberto(diario_atual, analista_atual, hoje_str)
@@ -1212,32 +1256,96 @@ def _tab_diario(pode_edit):
         else:
             st.info("Selecione ou digite quem está sendo observado para liberar os toques rápidos.")
 
+        # ── Painel da atividade EM ANDAMENTO: os campos já chegam pré-preenchidos
+        # (copiados do último uso dessa mesma atividade), mas dá pra ajustar aqui
+        # mesmo, enquanto o cronômetro roda — sem precisar abrir a tabela grande
+        # nem esperar a atividade terminar. Cada edição atualiza o MESMO registro
+        # em aberto (não cria uma linha nova).
+        if aberto and pode_edit:
+            with st.expander("📝 Detalhes desta atividade (opcional, pode preencher enquanto roda)",
+                              expanded=False):
+                d1, d2 = st.columns(2)
+                v_categoria = d1.selectbox(
+                    "Categoria", [""] + CATEGORIAS_DIARIO,
+                    index=([""] + CATEGORIAS_DIARIO).index(aberto.get("categoria", ""))
+                    if aberto.get("categoria", "") in CATEGORIAS_DIARIO else 0,
+                    key=f"diag_aberto_categoria_{idx_aberto}",
+                )
+                v_origem = d2.selectbox(
+                    "Origem da demanda", [""] + ORIGENS,
+                    index=([""] + ORIGENS).index(aberto.get("origem", ""))
+                    if aberto.get("origem", "") in ORIGENS else 0,
+                    key=f"diag_aberto_origem_{idx_aberto}",
+                )
+                d3, d4 = st.columns(2)
+                v_sistemas = d3.text_input("Sistema(s) utilizado(s)", value=aberto.get("sistemas", ""),
+                                            key=f"diag_aberto_sistemas_{idx_aberto}")
+                v_depende = d4.selectbox(
+                    "Depende de terceiros?", ["Não", "Sim"],
+                    index=1 if aberto.get("depende_terceiros") == "Sim" else 0,
+                    key=f"diag_aberto_depende_{idx_aberto}",
+                )
+                v_quem = st.text_input("Quem? (se depende de terceiros)", value=aberto.get("quem", ""),
+                                        key=f"diag_aberto_quem_{idx_aberto}")
+                v_obs = st.text_area("Observações", value=aberto.get("obs", ""), height=80,
+                                      key=f"diag_aberto_obs_{idx_aberto}")
+
+                mudou = (
+                    v_categoria != aberto.get("categoria", "") or v_origem != aberto.get("origem", "") or
+                    v_sistemas != aberto.get("sistemas", "") or v_depende != aberto.get("depende_terceiros", "Não") or
+                    v_quem != aberto.get("quem", "") or v_obs != aberto.get("obs", "")
+                )
+                if mudou:
+                    diario_atual[idx_aberto].update({
+                        "categoria": v_categoria, "origem": v_origem, "sistemas": v_sistemas,
+                        "depende_terceiros": v_depende, "quem": v_quem, "obs": v_obs,
+                    })
+                    _salvar("diario", diario_atual)
+
         if analista_atual:
             st.markdown("##### ⚡ Toque na atividade que está começando agora")
-            grade = _grade_atividades(diario_atual, atividades_inv)
+            st.caption("A grade abaixo é exatamente a lista da aba 📋 Inventário — inclua, edite ou "
+                       "exclua atividades por lá para atualizar o que aparece aqui.")
+            grade = _grade_atividades(atividades_inv)
             if grade:
                 cols = st.columns(4)
                 for i, nome in enumerate(grade):
                     destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
-                    if cols[i % 4].button(
-                        ("🟢 " if destaque else "") + nome, key=f"diag_tap_{normalizar_texto(nome)}",
+                    if _botao_resiliente(
+                        cols[i % 4], ("🟢 " if destaque else "") + nome,
+                        key=f"diag_tap_{normalizar_texto(nome)}",
                         use_container_width=True, disabled=bool(destaque),
                     ):
-                        _registrar_toque(analista_atual, nome)
+                        try:
+                            _registrar_toque(analista_atual, nome)
+                        except Exception as e:
+                            st.error(f"Não consegui iniciar a atividade '{nome}': {e}")
+                            st.exception(e)
+                            st.stop()
                         st.rerun()
             else:
-                st.caption("Ainda não há atividades no Inventário nem no Diário — comece digitando uma "
-                           "abaixo, ela entra automaticamente na grade nos próximos toques.")
+                st.info("Ainda não há atividades no Inventário — cadastre na aba 📋 Inventário, ou "
+                        "comece digitando uma no campo **\"Atividade não está na lista acima?\"** logo "
+                        "abaixo (ela entra automaticamente no Inventário e na grade nos próximos toques).")
 
             c1, c2 = st.columns(2)
-            with c1:
-                if st.button("⏸️ Pausa / Interrupção", key="diag_tap_pausa", use_container_width=True):
+            if _botao_resiliente(c1, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
+                try:
                     _registrar_toque(analista_atual, "Pausa / Interrupção")
-                    st.rerun()
-            with c2:
-                if st.button("🏁 Finalizar o dia", key="diag_tap_fim", use_container_width=True, type="primary"):
+                except Exception as e:
+                    st.error(f"Não consegui registrar a pausa: {e}")
+                    st.exception(e)
+                    st.stop()
+                st.rerun()
+            if _botao_resiliente(c2, "🏁 Finalizar o dia", "diag_tap_fim",
+                                  use_container_width=True, type="primary"):
+                try:
                     _encerrar_dia(analista_atual)
-                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não consegui finalizar o dia: {e}")
+                    st.exception(e)
+                    st.stop()
+                st.rerun()
 
             with st.form("diag_form_toque_novo", clear_on_submit=True):
                 cc1, cc2 = st.columns([3, 1])
@@ -1247,7 +1355,12 @@ def _tab_diario(pode_edit):
                 )
                 comecar = cc2.form_submit_button("▶️ Começar", use_container_width=True)
                 if comecar and nova_atividade.strip():
-                    _registrar_toque(analista_atual, nova_atividade.strip())
+                    try:
+                        _registrar_toque(analista_atual, nova_atividade.strip())
+                    except Exception as e:
+                        st.error(f"Não consegui iniciar '{nova_atividade}': {e}")
+                        st.exception(e)
+                        st.stop()
                     st.rerun()
 
         with st.expander("✏️ Lançamento manual com hora específica (retroativo)"):
