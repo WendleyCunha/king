@@ -17,7 +17,6 @@
 # Entry point: renderizar_diagnostico(papel, user) — mesmo padrão de
 # renderizar_rastreio / renderizar_tickets / renderizar_cartas.
 # =============================================================
-import uuid
 import json
 import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -1291,7 +1290,7 @@ def _tab_diario(pode_edit):
                     destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
                     if cols[i % 4].button(
                         ("🟢 " if destaque else "") + nome,
-                        key=f"diag_tap_{normalizar_texto(nome)}_{uuid.uuid4().hex[:12]}",
+                        key=f"diag_tap_{normalizar_texto(nome)}",
                         use_container_width=True, disabled=bool(destaque),
                     ):
                         try:
@@ -1308,7 +1307,7 @@ def _tab_diario(pode_edit):
 
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("⏸️ Pausa / Interrupção", key=f"diag_tap_pausa_{uuid.uuid4().hex[:12]}",
+                if st.button("⏸️ Pausa / Interrupção", key="diag_tap_pausa",
                              use_container_width=True):
                     try:
                         _registrar_toque(analista_atual, "Pausa / Interrupção")
@@ -1318,7 +1317,7 @@ def _tab_diario(pode_edit):
                         st.stop()
                     st.rerun()
             with c2:
-                if st.button("🏁 Finalizar o dia", key=f"diag_tap_fim_{uuid.uuid4().hex[:12]}",
+                if st.button("🏁 Finalizar o dia", key="diag_tap_fim",
                              use_container_width=True, type="primary"):
                     try:
                         _encerrar_dia(analista_atual)
@@ -1328,7 +1327,7 @@ def _tab_diario(pode_edit):
                         st.stop()
                     st.rerun()
 
-            with st.form(f"diag_form_toque_novo_{uuid.uuid4().hex[:12]}", clear_on_submit=True):
+            with st.form("diag_form_toque_novo", clear_on_submit=True):
                 cc1, cc2 = st.columns([3, 1])
                 nova_atividade = cc1.text_input(
                     "Atividade não está na lista acima?", key="diag_novo_toque_nome",
