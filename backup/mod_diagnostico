@@ -353,6 +353,25 @@ def sugerir_atividades_do_inventario(inventario, ja_existentes_normalizados):
     return nomes
 
 
+def adicionar_atividade_inventario_se_nova(atividade):
+    """Se a atividade digitada no Diário de Bordo ainda não existir no
+    Inventário (comparando por nome normalizado — sem acento/maiúsculas),
+    cria uma linha nova lá (categoria/descrição em branco, para completar
+    depois) e mantém a lista sempre em ordem alfabética. Usada para manter
+    o Inventário sempre alimentado pelo que aparece no Diário."""
+    atividade = (atividade or "").strip()
+    if not atividade:
+        return
+    inventario = _ler("inventario", [])
+    existentes = {normalizar_texto(i.get("atividade", "")) for i in inventario}
+    if normalizar_texto(atividade) in existentes:
+        return
+    inventario.append({"atividade": atividade, "categoria": "", "descricao": "", "registrada": ""})
+    inventario.sort(key=lambda i: normalizar_texto(i.get("atividade", "")))
+    _salvar("inventario", inventario)
+    _opcoes_atividades_inventario.clear()
+
+
 # ─────────────────────────────────────────────────────────────
 # Organograma visual — a partir da coluna "responde_para" cadastrada na
 # aba Organograma. Suporta responsabilidade compartilhada (ex: duas
@@ -599,6 +618,10 @@ def _editor_tabela_simples(chave, colunas_config, campos_ordem, pode_edit, edito
 
     if pode_edit and not editado.equals(df):
         _salvar(chave, editado.to_dict("records"))
+        if chave == "inventario":
+            _opcoes_atividades_inventario.clear()
+        elif chave == "organograma":
+            _opcoes_pessoas_organograma.clear()
     return editado
 
 
@@ -634,7 +657,8 @@ def _tab_checklist():
 def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
-               "(tickets, tags do sistema, controles paralelos por fora do oficial).")
+               "(tickets, tags do sistema, controles paralelos por fora do oficial). Também é "
+               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo.")
     editado = _editor_tabela_simples(
         "inventario",
         {
@@ -1017,72 +1041,178 @@ def _tab_raci_matriz(pode_edit):
 
 
 # ─────────────────────────────────────────────────────────────
+# Helpers p/ opções dinâmicas (Inventário → Atividade, Organograma → Pessoa)
+# Cacheadas com TTL curto: evita ida ao Firestore a cada rerun da página
+# (o Streamlit reexecuta o script inteiro a cada clique em qualquer lugar
+# do app, então sem cache essas duas funções bateriam no banco o tempo
+# todo, mesmo com o usuário em outra aba). .clear() é chamado sempre que
+# o Inventário ou o Organograma são salvos, então o dado nunca fica velho
+# por mais que alguns segundos.
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=30, show_spinner=False)
+def _opcoes_atividades_inventario():
+    inventario = _ler("inventario", [])
+    return sorted({(i.get("atividade") or "").strip() for i in inventario if (i.get("atividade") or "").strip()})
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _opcoes_pessoas_organograma():
+    organograma = _ler("organograma", [])
+    return sorted({(o.get("pessoa") or "").strip() for o in organograma if (o.get("pessoa") or "").strip()})
+
+
+# ─────────────────────────────────────────────────────────────
 # 05 · Diário de Bordo
 # ─────────────────────────────────────────────────────────────
 def _tab_diario(pode_edit):
     st.markdown("#### 📓 Diário de Bordo")
     st.caption("Cada analista preenche uma linha por atividade, por 5 a 10 dias úteis. "
-               "A duração é calculada automaticamente a partir da hora de início e fim.")
+               "A duração é calculada automaticamente a partir da hora de início e fim. Toda "
+               "atividade nova lançada aqui também é adicionada automaticamente ao Inventário "
+               "(em ordem alfabética).")
 
-    registros = _ler("diario", [])
     colunas = ["data", "analista", "hora_inicio", "hora_fim", "duracao", "atividade",
                "categoria", "origem", "sistemas", "depende_terceiros", "quem", "obs"]
-    df = pd.DataFrame(registros) if registros else pd.DataFrame([{}])
-    for c in colunas:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[colunas].fillna("")
-    df["data"] = df["data"].apply(_to_date)
-    df["hora_inicio"] = df["hora_inicio"].apply(_to_time)
-    df["hora_fim"] = df["hora_fim"].apply(_to_time)
 
-    editado = st.data_editor(
-        df, num_rows="dynamic", use_container_width=True, hide_index=True, key="diag_editor_diario",
-        column_config={
-            "data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-            "analista": st.column_config.TextColumn("Analista"),
-            "hora_inicio": st.column_config.TimeColumn("Hora início", format="HH:mm"),
-            "hora_fim": st.column_config.TimeColumn("Hora fim", format="HH:mm"),
-            "duracao": st.column_config.TextColumn("Duração (min)", disabled=True),
-            "atividade": st.column_config.TextColumn("Atividade realizada", width="medium"),
-            "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_DIARIO),
-            "origem": st.column_config.SelectboxColumn("Origem da demanda", options=ORIGENS),
-            "sistemas": st.column_config.TextColumn("Sistema(s) utilizado(s)"),
-            "depende_terceiros": st.column_config.SelectboxColumn("Depende de terceiros?", options=["Não", "Sim"]),
-            "quem": st.column_config.TextColumn("Quem? (se sim)"),
-            "obs": st.column_config.TextColumn("Observações", width="large"),
-        },
-        disabled=not pode_edit,
-        height=_ALTURA_TABELA_PADRAO,
-    )
+    atividades_inv = _opcoes_atividades_inventario()
+    pessoas_org = _opcoes_pessoas_organograma()
 
-    editado = editado.copy()
-    editado["duracao"] = editado.apply(
-        lambda r: calcular_duracao_min(_time_to_str(r["hora_inicio"]), _time_to_str(r["hora_fim"])), axis=1
-    )
-
-    registros_novos = [{
-        "data": _date_to_str(r["data"]), "analista": r["analista"] or "",
-        "hora_inicio": _time_to_str(r["hora_inicio"]), "hora_fim": _time_to_str(r["hora_fim"]),
-        "duracao": r["duracao"] or "", "atividade": r["atividade"] or "",
-        "categoria": r["categoria"] or "", "origem": r["origem"] or "",
-        "sistemas": r["sistemas"] or "", "depende_terceiros": r["depende_terceiros"] or "",
-        "quem": r["quem"] or "", "obs": r["obs"] or "",
-    } for _, r in editado.iterrows()]
-
+    # ── Lançamento rápido: preenche tudo e só grava ao clicar em "Salvar linha".
+    # Fica dentro de um expander pra não ocupar tela quando você só quer consultar.
     if pode_edit:
-        # Precisamos de UM rerun por edição real para a coluna "Duração" (calculada)
-        # aparecer atualizada em tela. Sem a "assinatura" abaixo, uma pequena instabilidade
-        # de tipo entre o que acabamos de montar e o que está salvo (ex.: data/hora indo e
-        # voltando de string para objeto a cada execução) pode fazer essa comparação nunca
-        # "estabilizar", disparando st.rerun() sem parar — daí a tela ficar piscando.
-        # Guardando a assinatura do que já foi salvo NESTA sessão, o rerun só acontece
-        # uma vez por alteração de verdade, mesmo que a comparação abaixo seja instável.
-        assinatura = json.dumps(registros_novos, sort_keys=True, ensure_ascii=False)
-        if registros_novos != registros and st.session_state.get("_diag_diario_assinatura") != assinatura:
-            _salvar("diario", registros_novos)
-            st.session_state["_diag_diario_assinatura"] = assinatura
-            st.rerun()
+        with st.expander("➕ Lançar novo registro", expanded=True):
+            st.caption("Preencha os campos abaixo e clique em **Salvar linha** — sem precisar "
+                       "digitar direto na tabela grande.")
+            with st.form("diag_form_add_diario", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                f_data = c1.date_input("Data", value=date.today(), key="diag_novo_data")
+
+                f_analista_sel = c2.selectbox(
+                    "Analista (do Organograma)",
+                    ["— selecione —"] + pessoas_org, key="diag_novo_analista_sel",
+                )
+                f_analista_novo = c3.text_input(
+                    "Ou novo nome", key="diag_novo_analista_novo",
+                    placeholder="se não estiver na lista",
+                )
+
+                c4, c5 = st.columns(2)
+                f_hi = c4.time_input("Hora início", key="diag_novo_hi", step=60)
+                f_hf = c5.time_input("Hora fim", key="diag_novo_hf", step=60)
+
+                c6, c7 = st.columns(2)
+                f_ativ_sel = c6.selectbox(
+                    "Atividade (do Inventário)",
+                    ["— selecione —"] + atividades_inv, key="diag_novo_ativ_sel",
+                )
+                f_ativ_novo = c7.text_input(
+                    "Ou nova atividade", key="diag_novo_ativ_novo",
+                    placeholder="se não estiver na lista",
+                )
+
+                c8, c9 = st.columns(2)
+                f_categoria = c8.selectbox("Categoria", [""] + CATEGORIAS_DIARIO, key="diag_novo_categoria")
+                f_origem = c9.selectbox("Origem da demanda", [""] + ORIGENS, key="diag_novo_origem")
+
+                c10, c11 = st.columns(2)
+                f_sistemas = c10.text_input("Sistema(s) utilizado(s)", key="diag_novo_sistemas")
+                f_depende = c11.selectbox("Depende de terceiros?", ["Não", "Sim"], key="diag_novo_depende")
+
+                f_quem = st.text_input("Quem? (se depende de terceiros)", key="diag_novo_quem")
+                f_obs = st.text_area("Observações", key="diag_novo_obs", height=80)
+
+                enviado = st.form_submit_button("💾 Salvar linha", type="primary", use_container_width=True)
+
+                if enviado:
+                    analista_final = f_analista_novo.strip() or (
+                        f_analista_sel if f_analista_sel != "— selecione —" else "")
+                    atividade_final = f_ativ_novo.strip() or (
+                        f_ativ_sel if f_ativ_sel != "— selecione —" else "")
+
+                    if not analista_final or not atividade_final:
+                        st.warning("Preencha ao menos **Analista** e **Atividade** antes de salvar.")
+                    else:
+                        novo_registro = {
+                            "data": _date_to_str(f_data),
+                            "analista": analista_final,
+                            "hora_inicio": _time_to_str(f_hi),
+                            "hora_fim": _time_to_str(f_hf),
+                            "duracao": calcular_duracao_min(_time_to_str(f_hi), _time_to_str(f_hf)),
+                            "atividade": atividade_final,
+                            "categoria": f_categoria,
+                            "origem": f_origem,
+                            "sistemas": f_sistemas,
+                            "depende_terceiros": f_depende,
+                            "quem": f_quem,
+                            "obs": f_obs,
+                        }
+                        registros_atuais = _ler("diario", [])
+                        registros_atuais.append(novo_registro)
+                        _salvar("diario", registros_atuais)
+                        adicionar_atividade_inventario_se_nova(atividade_final)
+                        st.success("Linha salva!")
+                        st.rerun()
+
+    st.markdown("---")
+
+    # ── Tabela com tudo que já foi lançado — também num expander, fechado por
+    # padrão pra manter a tela limpa (você abre só quando quiser revisar/editar).
+    registros = _ler("diario", [])
+    with st.expander(f"📋 Registros já lançados ({len(registros)})", expanded=False):
+        df = pd.DataFrame(registros) if registros else pd.DataFrame([{}])
+        for c in colunas:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[colunas].fillna("")
+        df["data"] = df["data"].apply(_to_date)
+        df["hora_inicio"] = df["hora_inicio"].apply(_to_time)
+        df["hora_fim"] = df["hora_fim"].apply(_to_time)
+
+        opcoes_analista = sorted(set(pessoas_org) | (set(df["analista"]) - {""}))
+
+        editado = st.data_editor(
+            df, num_rows="dynamic", use_container_width=True, hide_index=True, key="diag_editor_diario",
+            column_config={
+                "data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "analista": (st.column_config.SelectboxColumn("Analista", options=opcoes_analista)
+                             if opcoes_analista else st.column_config.TextColumn("Analista")),
+                "hora_inicio": st.column_config.TimeColumn("Hora início", format="HH:mm"),
+                "hora_fim": st.column_config.TimeColumn("Hora fim", format="HH:mm"),
+                "duracao": st.column_config.TextColumn("Duração (min)", disabled=True),
+                "atividade": st.column_config.TextColumn("Atividade realizada", width="medium"),
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_DIARIO),
+                "origem": st.column_config.SelectboxColumn("Origem da demanda", options=ORIGENS),
+                "sistemas": st.column_config.TextColumn("Sistema(s) utilizado(s)"),
+                "depende_terceiros": st.column_config.SelectboxColumn("Depende de terceiros?", options=["Não", "Sim"]),
+                "quem": st.column_config.TextColumn("Quem? (se sim)"),
+                "obs": st.column_config.TextColumn("Observações", width="large"),
+            },
+            disabled=not pode_edit,
+            height=_ALTURA_TABELA_PADRAO,
+        )
+
+        editado = editado.copy()
+        editado["duracao"] = editado.apply(
+            lambda r: calcular_duracao_min(_time_to_str(r["hora_inicio"]), _time_to_str(r["hora_fim"])), axis=1
+        )
+
+        registros_novos = [{
+            "data": _date_to_str(r["data"]), "analista": r["analista"] or "",
+            "hora_inicio": _time_to_str(r["hora_inicio"]), "hora_fim": _time_to_str(r["hora_fim"]),
+            "duracao": r["duracao"] or "", "atividade": r["atividade"] or "",
+            "categoria": r["categoria"] or "", "origem": r["origem"] or "",
+            "sistemas": r["sistemas"] or "", "depende_terceiros": r["depende_terceiros"] or "",
+            "quem": r["quem"] or "", "obs": r["obs"] or "",
+        } for _, r in editado.iterrows()]
+
+        if pode_edit:
+            assinatura = json.dumps(registros_novos, sort_keys=True, ensure_ascii=False)
+            if registros_novos != registros and st.session_state.get("_diag_diario_assinatura") != assinatura:
+                _salvar("diario", registros_novos)
+                for r in registros_novos:
+                    adicionar_atividade_inventario_se_nova(r.get("atividade", ""))
+                st.session_state["_diag_diario_assinatura"] = assinatura
+                st.rerun()
 
     st.caption('💡 Registre **tudo**: reuniões, e-mails, retrabalho, espera por resposta de outra área, '
                'e atividades "não oficiais" (ajudar N1, apagar incêndio, planilha paralela). '
@@ -1090,7 +1220,7 @@ def _tab_diario(pode_edit):
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Diário de Bordo (Excel)", "diario_de_bordo", "Diario",
-                 registros_novos, colunas=colunas)
+                 registros_novos if 'registros_novos' in dir() else registros, colunas=colunas)
 
 
 # ─────────────────────────────────────────────────────────────
