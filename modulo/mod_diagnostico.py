@@ -1075,8 +1075,8 @@ def _tab_diario(pode_edit):
                 )
 
                 c4, c5 = st.columns(2)
-                f_hi = c4.time_input("Hora início", key="diag_novo_hi")
-                f_hf = c5.time_input("Hora fim", key="diag_novo_hf")
+                f_hi = c4.time_input("Hora início", key="diag_novo_hi", step=60)
+                f_hf = c5.time_input("Hora fim", key="diag_novo_hf", step=60)
 
                 c6, c7 = st.columns(2)
                 f_ativ_sel = c6.selectbox(
