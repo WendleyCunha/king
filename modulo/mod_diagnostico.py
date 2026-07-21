@@ -2213,6 +2213,8 @@ def renderizar_diagnostico(papel, user=None):
 
     st.subheader("🗺️ Diagnóstico N2 — Mapeamento de Atividades Operacionais")
     st.caption("CX · Backoffice (N2) · Área responsável: PQI · entrega prevista 05/08/2026")
+    st.caption("🔧 build: 2026-07-21-esteira-v6-retry-limit — se você não está vendo exatamente "
+               "este texto, o deploy ainda não atualizou.")
     if not editar:
         st.info("Modo somente leitura — peça a um supervisor ou administrador para editar.")
 
