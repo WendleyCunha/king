@@ -1193,7 +1193,7 @@ def _tab_diario(pode_edit):
 
     atividades_inv = _opcoes_atividades_inventario()
     pessoas_org = _opcoes_pessoas_organograma()
-    hoje_str = date.today().strftime("%Y-%m-%d")
+    hoje_str = datetime.now(BRT).strftime("%Y-%m-%d")
 
     if pode_edit:
         st.markdown("##### 👤 Quem está sendo observado agora?")
