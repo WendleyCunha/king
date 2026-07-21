@@ -1062,27 +1062,243 @@ def _opcoes_pessoas_organograma():
 
 
 # ─────────────────────────────────────────────────────────────
+# 05 · Diário de Bordo — helpers do modo "esteira" (cronometragem contínua)
+#
+# Modelo usado em ferramentas reais de time-and-motion study (o método
+# clássico de "continuous timing" da Engenharia Industrial) e em apps de
+# um-toque-troca-tarefa (Toggl, Clockify): quem está observando NUNCA digita
+# hora nenhuma. Um toque = "essa é a atividade que está rolando agora — feche
+# o cronômetro da anterior e abra o desta". O sistema carimba o horário
+# sozinho (datetime.now()) e assume o resto (categoria/origem/sistemas) do
+# último lançamento igual, então a maior parte dos toques não pede nada além
+# do nome da atividade. Detalhes finos (obs, quem, sistemas) ficam para depois,
+# num momento de calmaria — não para o meio da observação ao vivo.
+# ─────────────────────────────────────────────────────────────
+def _registro_aberto(diario, analista, data_str):
+    """'Cursor' da esteira: o último lançamento desta pessoa/dia que ainda não
+    tem hora_fim — ou seja, a atividade rolando agora. Percorre de trás pra
+    frente porque é o único jeito barato de achar 'o último' sem depender de
+    os registros virem ordenados."""
+    for i in range(len(diario) - 1, -1, -1):
+        r = diario[i]
+        if r.get("analista") == analista and r.get("data") == data_str and not (r.get("hora_fim") or "").strip():
+            return i, r
+    return None, None
+
+
+def _contexto_ultima_ocorrencia(atividade, diario):
+    """Copia categoria/origem/sistemas/depende_terceiros do último lançamento
+    com esse MESMO nome de atividade (normalizado) — assim o toque já chega
+    com o contexto certo na maioria das vezes, sem perguntar de novo."""
+    alvo = normalizar_texto(atividade)
+    for r in reversed(diario):
+        if normalizar_texto(r.get("atividade", "")) == alvo:
+            return {
+                "categoria": r.get("categoria", ""), "origem": r.get("origem", ""),
+                "sistemas": r.get("sistemas", ""), "depende_terceiros": r.get("depende_terceiros", "Não"),
+            }
+    return {"categoria": "", "origem": "", "sistemas": "", "depende_terceiros": "Não"}
+
+
+def _minutos_decorridos_desde(hora_str):
+    """Quantos minutos já se passaram desde hora_str até agora — usado só
+    pra mostrar '23 min em andamento' no card da atividade atual."""
+    h = _to_time(hora_str)
+    if not h:
+        return 0
+    agora = datetime.now(BRT).time()
+    diff = (agora.hour * 60 + agora.minute) - (h.hour * 60 + h.minute)
+    return diff if diff >= 0 else diff + 24 * 60
+
+
+def _registrar_toque(analista, atividade, obs=""):
+    """O coração do modo esteira: fecha o registro em aberto (se houver) NO
+    INSTANTE do toque, e abre um novo — sem pedir hora nenhuma pra ninguém."""
+    agora = datetime.now(BRT)
+    agora_str, hoje_str = agora.strftime("%H:%M"), agora.strftime("%Y-%m-%d")
+    diario = _ler("diario", [])
+
+    idx_aberto, _ = _registro_aberto(diario, analista, hoje_str)
+    if idx_aberto is not None:
+        diario[idx_aberto]["hora_fim"] = agora_str
+        diario[idx_aberto]["duracao"] = calcular_duracao_min(diario[idx_aberto]["hora_inicio"], agora_str)
+
+    ctx = _contexto_ultima_ocorrencia(atividade, diario)
+    diario.append({
+        "data": hoje_str, "analista": analista, "hora_inicio": agora_str, "hora_fim": "",
+        "duracao": "", "atividade": atividade, "categoria": ctx["categoria"], "origem": ctx["origem"],
+        "sistemas": ctx["sistemas"], "depende_terceiros": ctx["depende_terceiros"], "quem": "", "obs": obs,
+    })
+    _salvar("diario", diario)
+    adicionar_atividade_inventario_se_nova(atividade)
+
+
+def _encerrar_dia(analista):
+    """Fecha o cronômetro em aberto sem abrir um novo — marca o fim real da
+    jornada observada (sem precisar criar uma linha 'DIA FINALIZADO' manual)."""
+    agora = datetime.now(BRT)
+    agora_str, hoje_str = agora.strftime("%H:%M"), agora.strftime("%Y-%m-%d")
+    diario = _ler("diario", [])
+    idx_aberto, _ = _registro_aberto(diario, analista, hoje_str)
+    if idx_aberto is not None:
+        diario[idx_aberto]["hora_fim"] = agora_str
+        diario[idx_aberto]["duracao"] = calcular_duracao_min(diario[idx_aberto]["hora_inicio"], agora_str)
+        _salvar("diario", diario)
+
+
+def _grade_atividades(diario, atividades_inv, limite=12):
+    """Monta a grade de botões de toque rápido: primeiro as atividades mais
+    usadas recentemente (o que a pessoa mais faz aparece primeiro, sem
+    precisar rolar), completando com o restante do Inventário em ordem
+    alfabética até o limite."""
+    contagem, nome_original = {}, {}
+    for r in diario:
+        a = (r.get("atividade") or "").strip()
+        if not a:
+            continue
+        norm = normalizar_texto(a)
+        contagem[norm] = contagem.get(norm, 0) + 1
+        nome_original.setdefault(norm, a)
+
+    mais_usadas = [nome_original[norm] for norm, _ in sorted(contagem.items(), key=lambda kv: -kv[1])]
+    vistos = {normalizar_texto(n) for n in mais_usadas}
+    resto = [a for a in atividades_inv if normalizar_texto(a) not in vistos]
+    return (mais_usadas + resto)[:limite]
+
+
+# ─────────────────────────────────────────────────────────────
 # 05 · Diário de Bordo
 # ─────────────────────────────────────────────────────────────
 def _tab_diario(pode_edit):
     st.markdown("#### 📓 Diário de Bordo")
-    st.caption("Cada analista preenche uma linha por atividade, por 5 a 10 dias úteis. "
-               "A duração é calculada automaticamente a partir da hora de início e fim. Toda "
-               "atividade nova lançada aqui também é adicionada automaticamente ao Inventário "
-               "(em ordem alfabética).")
+    st.caption("Modo esteira: toque na atividade que está começando agora — o sistema fecha "
+               "sozinho o cronômetro da atividade anterior e cronometra a nova a partir daí. "
+               "Nenhuma hora precisa ser digitada durante a observação.")
 
     colunas = ["data", "analista", "hora_inicio", "hora_fim", "duracao", "atividade",
                "categoria", "origem", "sistemas", "depende_terceiros", "quem", "obs"]
 
     atividades_inv = _opcoes_atividades_inventario()
     pessoas_org = _opcoes_pessoas_organograma()
+    hoje_str = date.today().strftime("%Y-%m-%d")
 
-    # ── Lançamento rápido: preenche tudo e só grava ao clicar em "Salvar linha".
-    # Fica dentro de um expander pra não ocupar tela quando você só quer consultar.
     if pode_edit:
-        with st.expander("➕ Lançar novo registro", expanded=True):
-            st.caption("Preencha os campos abaixo e clique em **Salvar linha** — sem precisar "
-                       "digitar direto na tabela grande.")
+        st.markdown("##### 👤 Quem está sendo observado agora?")
+        c1, c2 = st.columns([2, 1])
+        analista_sel = c1.selectbox("Analista (do Organograma)", ["— selecione —"] + pessoas_org,
+                                     key="diag_diario_analista_sel")
+        analista_novo = c2.text_input("Ou nome novo", key="diag_diario_analista_novo",
+                                       placeholder="se não estiver na lista")
+        analista_atual = analista_novo.strip() or (analista_sel if analista_sel != "— selecione —" else "")
+
+        diario_atual = _ler("diario", [])
+        idx_aberto, aberto = (_registro_aberto(diario_atual, analista_atual, hoje_str)
+                               if analista_atual else (None, None))
+
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        if aberto:
+            decorrido = _minutos_decorridos_desde(aberto.get("hora_inicio", ""))
+            st.markdown(
+                f"<div style='background:#1B2A4A;color:#fff;padding:14px 18px;border-radius:10px;'>"
+                f"<div style='font-size:12px;opacity:.75;'>⏱️ EM ANDAMENTO DESDE {aberto.get('hora_inicio','')}</div>"
+                f"<div style='font-size:20px;font-weight:700;margin:2px 0;'>{aberto.get('atividade','')}</div>"
+                f"<div style='font-size:13px;opacity:.85;'>{decorrido} min até agora — toque em outra "
+                f"atividade abaixo para trocar</div></div>",
+                unsafe_allow_html=True,
+            )
+        elif analista_atual:
+            st.info("Nenhuma atividade em andamento para essa pessoa hoje — toque em uma atividade "
+                     "abaixo para começar a cronometrar.")
+        else:
+            st.info("Selecione ou digite quem está sendo observado para liberar os toques rápidos.")
+
+        # ── Painel da atividade EM ANDAMENTO: os campos já chegam pré-preenchidos
+        # (copiados do último uso dessa mesma atividade), mas dá pra ajustar aqui
+        # mesmo, enquanto o cronômetro roda — sem precisar abrir a tabela grande
+        # nem esperar a atividade terminar. Cada edição atualiza o MESMO registro
+        # em aberto (não cria uma linha nova).
+        if aberto and pode_edit:
+            with st.expander("📝 Detalhes desta atividade (opcional, pode preencher enquanto roda)",
+                              expanded=False):
+                d1, d2 = st.columns(2)
+                v_categoria = d1.selectbox(
+                    "Categoria", [""] + CATEGORIAS_DIARIO,
+                    index=([""] + CATEGORIAS_DIARIO).index(aberto.get("categoria", ""))
+                    if aberto.get("categoria", "") in CATEGORIAS_DIARIO else 0,
+                    key=f"diag_aberto_categoria_{idx_aberto}",
+                )
+                v_origem = d2.selectbox(
+                    "Origem da demanda", [""] + ORIGENS,
+                    index=([""] + ORIGENS).index(aberto.get("origem", ""))
+                    if aberto.get("origem", "") in ORIGENS else 0,
+                    key=f"diag_aberto_origem_{idx_aberto}",
+                )
+                d3, d4 = st.columns(2)
+                v_sistemas = d3.text_input("Sistema(s) utilizado(s)", value=aberto.get("sistemas", ""),
+                                            key=f"diag_aberto_sistemas_{idx_aberto}")
+                v_depende = d4.selectbox(
+                    "Depende de terceiros?", ["Não", "Sim"],
+                    index=1 if aberto.get("depende_terceiros") == "Sim" else 0,
+                    key=f"diag_aberto_depende_{idx_aberto}",
+                )
+                v_quem = st.text_input("Quem? (se depende de terceiros)", value=aberto.get("quem", ""),
+                                        key=f"diag_aberto_quem_{idx_aberto}")
+                v_obs = st.text_area("Observações", value=aberto.get("obs", ""), height=80,
+                                      key=f"diag_aberto_obs_{idx_aberto}")
+
+                mudou = (
+                    v_categoria != aberto.get("categoria", "") or v_origem != aberto.get("origem", "") or
+                    v_sistemas != aberto.get("sistemas", "") or v_depende != aberto.get("depende_terceiros", "Não") or
+                    v_quem != aberto.get("quem", "") or v_obs != aberto.get("obs", "")
+                )
+                if mudou:
+                    diario_atual[idx_aberto].update({
+                        "categoria": v_categoria, "origem": v_origem, "sistemas": v_sistemas,
+                        "depende_terceiros": v_depende, "quem": v_quem, "obs": v_obs,
+                    })
+                    _salvar("diario", diario_atual)
+
+        if analista_atual:
+            st.markdown("##### ⚡ Toque na atividade que está começando agora")
+            grade = _grade_atividades(diario_atual, atividades_inv)
+            if grade:
+                cols = st.columns(4)
+                for i, nome in enumerate(grade):
+                    destaque = (aberto and normalizar_texto(aberto.get("atividade", "")) == normalizar_texto(nome))
+                    if cols[i % 4].button(
+                        ("🟢 " if destaque else "") + nome, key=f"diag_tap_{normalizar_texto(nome)}",
+                        use_container_width=True, disabled=bool(destaque),
+                    ):
+                        _registrar_toque(analista_atual, nome)
+                        st.rerun()
+            else:
+                st.caption("Ainda não há atividades no Inventário nem no Diário — comece digitando uma "
+                           "abaixo, ela entra automaticamente na grade nos próximos toques.")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("⏸️ Pausa / Interrupção", key="diag_tap_pausa", use_container_width=True):
+                    _registrar_toque(analista_atual, "Pausa / Interrupção")
+                    st.rerun()
+            with c2:
+                if st.button("🏁 Finalizar o dia", key="diag_tap_fim", use_container_width=True, type="primary"):
+                    _encerrar_dia(analista_atual)
+                    st.rerun()
+
+            with st.form("diag_form_toque_novo", clear_on_submit=True):
+                cc1, cc2 = st.columns([3, 1])
+                nova_atividade = cc1.text_input(
+                    "Atividade não está na lista acima?", key="diag_novo_toque_nome",
+                    placeholder="digite o nome e toque em Começar",
+                )
+                comecar = cc2.form_submit_button("▶️ Começar", use_container_width=True)
+                if comecar and nova_atividade.strip():
+                    _registrar_toque(analista_atual, nova_atividade.strip())
+                    st.rerun()
+
+        with st.expander("✏️ Lançamento manual com hora específica (retroativo)"):
+            st.caption("Use isto só para completar um dia passado ou corrigir um horário — no dia a dia, "
+                       "prefira os toques acima.")
             with st.form("diag_form_add_diario", clear_on_submit=True):
                 c1, c2, c3 = st.columns(3)
                 f_data = c1.date_input("Data", value=date.today(), key="diag_novo_data")
@@ -1156,9 +1372,10 @@ def _tab_diario(pode_edit):
     st.markdown("---")
 
     # ── Tabela com tudo que já foi lançado — também num expander, fechado por
-    # padrão pra manter a tela limpa (você abre só quando quiser revisar/editar).
+    # padrão pra manter a tela limpa (você abre só quando quiser revisar/editar/
+    # completar detalhes como obs, sistemas e quem, deixados em branco nos toques).
     registros = _ler("diario", [])
-    with st.expander(f"📋 Registros já lançados ({len(registros)})", expanded=False):
+    with st.expander(f"📋 Registros já lançados ({len(registros)}) — completar detalhes / editar", expanded=False):
         df = pd.DataFrame(registros) if registros else pd.DataFrame([{}])
         for c in colunas:
             if c not in df.columns:
