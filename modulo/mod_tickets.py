@@ -60,13 +60,46 @@ do módulo:
 """
 import streamlit as st
 
+# ── Reexporta TUDO que o antigo mod_tickets.py monolítico expunha, para não
+# quebrar nenhum outro arquivo do sistema (ex.: home.py) que faça
+# `from modulo.mod_tickets import X` direto, sem passar por renderizar_tickets.
 from .tickets.common import (
-    listar_tickets, ticket_visivel, classificar_fila, _html,
+    BRT, COLECAO, ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_TOKEN, ZENDESK_VIEW_ID,
+    STATUS_CFG, PRIO_CFG, STATUS_ABERTOS,
+    GOLD, GOLD_WARN, GOLD_VENC, GREEN_OK, BLUE_INFO, DEPT_PALETTE,
+    agora_brt, _html, esc, texto_busca, transferir_tickets,
+    deadline_ativo, sla_label, sla_restante, pill, sla_estado,
+    ticket_vencido_pendente, sla_foi_perdido,
+    tem_interacao_nao_vista,
+    cor_departamento, solicitacoes_abertas, solicitacoes_abertas_para_setor,
+    ticket_tem_pendencia_para_setor, registrar_solicitacao_setor,
+    responder_solicitacao_setor, tickets_pendentes_do_setor, departamentos_com_pendencia,
+    JANELA_VALIDACAO_H, classificar_fila,
+    ticket_visivel,
+    normalizar_codigo_cliente, tickets_do_cliente,
+    listar_tickets, criar_ticket, atualizar_ticket, adicionar_comentario,
+    vincular_ticket_relacionado, sync_zendesk, deletar_todos_tickets,
+    _caminho_motivo, PAGE_SIZE_CARDS, _paginar, _nav_paginas,
+    get_db, listar_departamentos, listar_tabulacoes, resolver_destinatario_ticket,
+    listar_usuarios,
 )
+from .mod_motivos import (
+    listar_motivos_pai, motivos_pai_do_departamento,
+    listar_motivos_filho, listar_motivos_filho_de,
+    listar_etapas, listar_etapas_de, resolver_etapa_final,
+)
+from .tickets.strip import _render_ticket_strip, _badges_ticket
 from .tickets.novo import _render_novo
-from .tickets.filas import _render_filas_em_abas
-from .tickets.detalhe import _render_painel_lateral_detalhe
-from .tickets.geral import _render_visao_geral_operacao, _render_sync
+from .tickets.filas import _render_filas_em_abas, _render_lista_em_grid, _render_lista_pendencias_setor
+from .tickets.detalhe import (
+    _render_painel_lateral_detalhe, _carregar_e_render_detalhe, _detalhe_corpo,
+    _bloco_classificacao, _bloco_pendencias_setor,
+)
+from .tickets.geral import (
+    _render_visao_geral_operacao, _render_sync,
+    _gerar_excel_relatorio, _aba_dashboard, _aba_por_atendente,
+    _aba_por_motivo, _aba_sla_perdido, _aba_exportar,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
