@@ -9,7 +9,7 @@ pendência de setor quando o Motivo tem "departamento_vinculado".
 import time
 import streamlit as st
 
-from ..mod_motivos import motivos_pai_do_departamento
+from modulo.mod_motivos import motivos_pai_do_departamento
 from .common import (
     STATUS_ABERTOS, esc, _html,
     listar_departamentos, normalizar_codigo_cliente, tickets_do_cliente,
