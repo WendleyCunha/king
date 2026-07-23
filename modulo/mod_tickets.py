@@ -184,15 +184,35 @@ def _render_estilo_paineis_redimensionaveis():
        "CX" / "Logística" / etc.) — fica "grudado" no topo da coluna
        de Lista, sempre visível e clicável, igual um cabeçalho de
        card fixo, enquanto só os cards de ticket abaixo rolam.
+
+       PAINEL DE DEMANDAS: a busca global (container "tk_busca_wrap") e a
+       barra de abas (data-baseweb="tab-list") são DOIS elementos sticky
+       empilhados um sobre o outro (cada um com seu próprio `top`), que
+       juntos formam a aparência de um único cartão fixo no topo — como um
+       painel de demandas — enquanto a lista de tickets abaixo rola
+       normalmente. O `top: 54px` da barra de abas é a altura estimada do
+       cartão da busca acima dela; se sobrar/faltar uma folguinha entre os
+       dois ao rolar, ajuste esse valor (e o padding do tk_busca_wrap logo
+       abaixo) até encostarem perfeitamente.
        ═══════════════════════════════════════════════════════════ */
-    div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
+    div[class*="st-key-tk_paineis"] div[class*="st-key-tk_busca_wrap"] {
         position: sticky;
         top: 0;
+        z-index: 41;
+        background: #FFFFFF;
+        padding: 10px 12px 8px;
+        margin: 0 -6px 0;
+        border-radius: 10px 10px 0 0;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.07);
+    }
+    div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
+        position: sticky;
+        top: 54px;
         z-index: 40;
         background: #FFFFFF;
         padding: 8px 6px 0;
         margin: 0 -6px 8px;
-        border-radius: 10px 10px 0 0;
+        border-radius: 0 0 10px 10px;
         box-shadow: 0 3px 6px rgba(0,0,0,0.07);
     }
     </style>
