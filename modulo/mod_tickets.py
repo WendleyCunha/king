@@ -91,7 +91,10 @@ from .mod_motivos import (
 )
 from tickets.strip import _render_ticket_strip, _badges_ticket
 from tickets.novo import _render_novo
-from tickets.filas import _render_filas_em_abas, _render_lista_em_grid, _render_lista_pendencias_setor
+from tickets.filas import (
+    _render_painel_tickets_topo, _render_conteudo_fila_selecionada,
+    _render_lista_em_grid, _render_lista_pendencias_setor,
+)
 from tickets.detalhe import (
     _render_painel_lateral_detalhe, _carregar_e_render_detalhe, _detalhe_corpo,
     _bloco_classificacao, _bloco_pendencias_setor,
@@ -157,11 +160,12 @@ def _render_estilo_paineis_redimensionaveis():
        "janelinha" com altura travada relativa à tela e overflow
        próprio. Pura CSS, sem depender de JS ou de posições internas
        do Streamlit — só a altura em si (calc(100vh - Npx)) é uma
-       estimativa do espaço ocupado pelo cabeçalho acima; ajuste o
-       valor abaixo se sobrar/faltar espaço no seu layout.
+       estimativa do espaço ocupado pelo cabeçalho acima E pelo Painel
+       de Tickets (busca + botões de view), que agora ficam FORA destas
+       colunas; ajuste o valor abaixo se sobrar/faltar espaço no layout.
        ═══════════════════════════════════════════════════════════ */
     div[class*="st-key-tk_paineis"] div[data-testid="stColumn"] {
-        max-height: calc(100vh - 230px);
+        max-height: calc(100vh - 340px);
         overflow-y: auto;
         overflow-x: hidden;
         padding-right: 6px;
@@ -180,39 +184,42 @@ def _render_estilo_paineis_redimensionaveis():
     }
 
     /* ═══════════════════════════════════════════════════════════
-       CABEÇALHO DE ABAS FIXO ("Meus tickets" / "Abertos" / ... /
-       "CX" / "Logística" / etc.) — fica "grudado" no topo da coluna
-       de Lista, sempre visível e clicável, igual um cabeçalho de
-       card fixo, enquanto só os cards de ticket abaixo rolam.
-
-       PAINEL DE TICKETS (busca + abas grudados, congelado no topo): a
-       busca global (container "tk_busca_wrap") e a barra de abas
-       (data-baseweb="tab-list") são DOIS elementos sticky empilhados um
-       sobre o outro. O `top` da barra de abas abaixo é só um valor de
-       segurança para o instante antes do JS carregar — o script no fim
-       deste arquivo MEDE a altura real do cartão de busca renderizado e
-       ajusta esse `top` via JavaScript (nada de chute fixo), então os
-       dois encostam certinho não importa o tamanho de fonte/zoom.
+       PAINEL DE TICKETS — cartão independente, renderizado FORA e
+       ACIMA dos 3 painéis redimensionáveis (Ações/Lista/Detalhe).
+       Reúne o título, a busca global e os botões clicáveis de "view"
+       (Meus tickets, Abertos, Em andamento, Urgentes, SLA vencidos,
+       Todos + um por Departamento). Como as 3 colunas de baixo já
+       rolam por dentro de si mesmas (não a página toda), este painel
+       fica sempre visível sem precisar de position:sticky — é só um
+       bloco normal, acima da área que rola.
        ═══════════════════════════════════════════════════════════ */
-    div[class*="st-key-tk_paineis"] div[class*="st-key-tk_busca_wrap"] {
-        position: sticky;
-        top: 0;
-        z-index: 41;
+    div[class*="st-key-tk_painel_topo"] {
         background: #FFFFFF;
-        padding: 10px 12px 8px;
-        margin: 0 -6px 0;
-        border-radius: 10px 10px 0 0;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.07);
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 14px 16px 10px;
+        margin-bottom: 14px;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.06);
     }
-    div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
-        position: sticky;
-        top: 60px;
-        z-index: 40;
-        background: #FFFFFF;
-        padding: 8px 6px 0;
-        margin: 0 -6px 8px;
-        border-radius: 0 0 10px 10px;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.07);
+    .tk-painel-topo-titulo {
+        font-size: 0.74rem; font-weight: 800; color: #7a5f1a;
+        text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;
+    }
+    /* Botões de view lado a lado, quebrando linha quando não couberem
+       (em vez de um por coluna fixa, que ficaria espremido com muitos
+       Departamentos cadastrados). */
+    div[class*="st-key-tk_view_buttons"] [data-testid="stVerticalBlock"] {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+    }
+    div[class*="st-key-tk_view_buttons"] [data-testid="stElementContainer"] {
+        width: auto !important;
+        flex: 0 0 auto !important;
+    }
+    div[class*="st-key-tk_view_buttons"] button {
+        white-space: nowrap;
     }
     </style>
     """), unsafe_allow_html=True)
@@ -222,19 +229,6 @@ def _render_estilo_paineis_redimensionaveis():
     <script>
     (function() {
         const doc = window.parent.document;
-
-        function alinharPainelDemandas(wrap) {
-            // Mede a altura REAL do cartão de busca renderizado e empurra a
-            // barra de abas pra encostar exatamente embaixo dele — nada de
-            // valor fixo chutado no CSS, então funciona em qualquer
-            // zoom/fonte/tamanho de tela.
-            const buscaWrap = wrap.querySelector('div[class*="st-key-tk_busca_wrap"]');
-            const tabList = wrap.querySelector('div[data-baseweb="tab-list"]');
-            if (buscaWrap && tabList) {
-                const altura = buscaWrap.getBoundingClientRect().height;
-                if (altura > 0) tabList.style.top = altura + 'px';
-            }
-        }
 
         function montarResizers() {
             const wrap = doc.querySelector('div[class*="st-key-tk_paineis"]');
@@ -295,6 +289,7 @@ def _render_estilo_paineis_redimensionaveis():
                 window.addEventListener('resize', posicionar);
             }
 
+
             // resizer 1: entre "Filas" (cols[0]) e "Lista" (cols[1])
             criarResizer(cols[0], 'tk_larg_filas', true, cols[0], 160, 420);
             // resizer 2 (só existe quando o Detalhe está aberto): entre
@@ -303,7 +298,6 @@ def _render_estilo_paineis_redimensionaveis():
                 criarResizer(cols[2], 'tk_larg_detalhe', false, cols[1], 320, 900);
             }
 
-            alinharPainelDemandas(wrap);
             return true;
         }
 
@@ -485,6 +479,14 @@ def renderizar_tickets(papel: str, user: dict = None):
     modo = st.session_state.tk_modo
     mostra_detalhe = bool(st.session_state.tk_ticket_aberto) and modo in ("lista", None)
 
+    # ── PAINEL DE TICKETS (independente, fora das 3 colunas de baixo) ──
+    # Busca global + botões clicáveis de "view" (Meus tickets, Abertos,
+    # Em andamento, Urgentes, SLA vencidos, Todos, + um por Departamento).
+    # Fica sempre visível porque as 3 colunas abaixo (Ações/Lista/Detalhe)
+    # já rolam por dentro de si mesmas — não é preciso nenhum truque de
+    # CSS sticky pra "congelar" este painel no topo.
+    _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+
     with st.container(key="tk_paineis"):
         if mostra_detalhe:
             col_filas, col_main, col_detalhe = st.columns([1, 2, 1.4])
@@ -516,11 +518,11 @@ def renderizar_tickets(papel: str, user: dict = None):
             if f_venc:
                 st.markdown(_html(
                     f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
-                    f'aguardando tratativa! Verifique a aba "SLA vencidos".</div>'
+                    f'aguardando tratativa! Verifique a view "SLA vencidos" no Painel de Tickets.</div>'
                 ), unsafe_allow_html=True)
 
             if modo in ("lista", None):
-                _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+                _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
             elif modo == "novo":
                 _render_novo(user)
             elif modo == "equipe":
