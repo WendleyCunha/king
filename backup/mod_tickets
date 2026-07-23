@@ -717,6 +717,23 @@ def _render_estilo_paineis_redimensionaveis():
     div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar-thumb:hover {
         background: #C9A84C;
     }
+
+    /* ═══════════════════════════════════════════════════════════
+       CABEÇALHO DE ABAS FIXO ("Meus tickets" / "Abertos" / ... /
+       "CX" / "Logística" / etc.) — fica "grudado" no topo da coluna
+       de Lista, sempre visível e clicável, igual um cabeçalho de
+       card fixo, enquanto só os cards de ticket abaixo rolam.
+       ═══════════════════════════════════════════════════════════ */
+    div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: #FFFFFF;
+        padding: 8px 6px 0;
+        margin: 0 -6px 8px;
+        border-radius: 10px 10px 0 0;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.07);
+    }
     </style>
     """), unsafe_allow_html=True)
 
