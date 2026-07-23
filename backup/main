@@ -12,6 +12,7 @@ from database import (
     # ── novas funções ──
     listar_departamentos, criar_departamento, deletar_departamento,
     atualizar_departamento_usuario, redefinir_senha_usuario,
+    atualizar_perfil_usuario, renomear_login_usuario,
 )
 from modulo.mod_rastreio import renderizar_rastreio
 
@@ -120,10 +121,50 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 }
 .nav-section { font-size:0.68rem; font-weight:700; text-transform:uppercase;
     letter-spacing:1.5px; color:#9aabb8; padding:14px 4px 6px; display:block; }
-.nav-soon { padding:8px 14px; font-size:0.85rem; color:#b0bec5;
-    display:flex; justify-content:space-between; align-items:center; margin-bottom:2px; }
-.soon-tag { font-size:0.6rem; background:#f0f2f5; color:#9aabb8;
-    padding:2px 7px; border-radius:8px; font-weight:600; }
+
+/* ── Grupo "Sistema" — sub-navegação com barra lateral, visual mais
+   discreto que o item "Meu Dia" (Operacional) e diferente do botão
+   "Configurações" (Administração), pra manter a hierarquia clara. ── */
+section[data-testid="stSidebar"] .st-key-sistema_nav .stButton > button {
+    background: transparent !important;
+    border: none !important;
+    border-left: 3px solid #e2e8f0 !important;
+    border-radius: 0 8px 8px 0 !important;
+    color: #45566b !important;
+    font-weight: 500 !important;
+    padding-left: 16px !important;
+    margin-bottom: 2px !important;
+}
+section[data-testid="stSidebar"] .st-key-sistema_nav .stButton > button:hover {
+    background: #f4f6f9 !important;
+    border-left-color: #C9A84C !important;
+    color: #2c3e50 !important;
+}
+section[data-testid="stSidebar"] .st-key-sistema_nav .stButton > button[kind="primary"] {
+    background: rgba(201,168,76,0.10) !important;
+    border-left: 3px solid #C9A84C !important;
+    color: #7a5f1a !important;
+    font-weight: 700 !important;
+}
+
+/* ── Botão "Configurações" (Administração) — estilo outline/discreto,
+   deliberadamente diferente de Operacional e de Sistema. ── */
+section[data-testid="stSidebar"] .st-key-config_nav .stButton > button {
+    background: #ffffff !important;
+    border: 1px dashed #c7d0d9 !important;
+    border-radius: 8px !important;
+    color: #64778d !important;
+    font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] .st-key-config_nav .stButton > button:hover {
+    border-color: #95a5a6 !important;
+    color: #2c3e50 !important;
+}
+section[data-testid="stSidebar"] .st-key-config_nav .stButton > button[kind="primary"] {
+    background: #eef1f4 !important;
+    border: 1px solid #95a5a6 !important;
+    color: #2c3e50 !important;
+}
 .ks-header {
     background:#ffffff; border-left:5px solid #C9A84C;
     border-radius:12px; padding:16px 24px; margin-bottom:20px;
@@ -329,54 +370,61 @@ with st.sidebar:
             st.session_state.modulo_ativo = "home"
             st.rerun()
 
-    for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
-        if key not in mods: continue
-        lbl = label
-        # Chat agora vive dentro do Rastreio (aba ao lado de Cadastros) —
-        # o badge de mensagens pendentes aparece aqui, no botão Rastreio.
-        # (cacheado por 5s em _total_chat_pendentes — ver database_chat.py
-        # para o motivo da otimização; sem isso, essa chamada rodava
-        # pesada a cada rerun de QUALQUER tela, não só do Chat.)
-        if key == "rastreio" and papel in ("adm", "supervisor"):
-            _pend_nav = _total_chat_pendentes()
-            if _pend_nav:
-                lbl = f"{label} 💬 🔴 {_pend_nav}"
-        ativo = st.session_state.modulo_ativo == key
-        if st.button(lbl, key=f"nav_{key}", use_container_width=True,
-                     type="primary" if ativo else "secondary"):
-            st.session_state.modulo_ativo = key
-            st.rerun()
+    # ── Grupo "Sistema" — Rastreio / Tickets / Cartas / Diagnóstico N2 ──
+    # Visual de sub-navegação (barra lateral discreta), propositalmente
+    # diferente do item "Meu Dia" (Operacional) e do botão "Configurações"
+    # (Administração), pra deixar a hierarquia da sidebar clara. O
+    # roteamento continua idêntico (cadeia de elif mais abaixo) — só
+    # mudou a apresentação visual.
+    st.markdown('<span class="nav-section">Sistema</span>', unsafe_allow_html=True)
 
-    # Diagnóstico N2 — visível para adm/supervisor, igual às Configurações
-    # (não depende de 'modulos' do usuário no Firestore, então nenhum
-    # usuário existente precisa ser editado pra esse botão aparecer).
-    if papel in ("adm", "supervisor"):
-        ativo = st.session_state.modulo_ativo == "diagnostico"
-        if st.button("🗺️ Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
-                     type="primary" if ativo else "secondary"):
-            st.session_state.modulo_ativo = "diagnostico"
-            st.rerun()
+    with st.container(key="sistema_nav"):
+        for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
+            if key not in mods: continue
+            lbl = label
+            # Chat agora vive dentro do Rastreio (aba ao lado de Cadastros) —
+            # o badge de mensagens pendentes aparece aqui, no botão Rastreio.
+            # (cacheado por 5s em _total_chat_pendentes — ver database_chat.py
+            # para o motivo da otimização; sem isso, essa chamada rodava
+            # pesada a cada rerun de QUALQUER tela, não só do Chat.)
+            if key == "rastreio" and papel in ("adm", "supervisor"):
+                _pend_nav = _total_chat_pendentes()
+                if _pend_nav:
+                    lbl = f"{label} 💬 🔴 {_pend_nav}"
+            ativo = st.session_state.modulo_ativo == key
+            if st.button(lbl, key=f"nav_{key}", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = key
+                st.rerun()
 
+        # Diagnóstico N2 — visível para adm/supervisor, agrupado dentro de
+        # "Sistema" junto com Rastreio/Tickets/Cartas. Sem ícone, para ficar
+        # no mesmo padrão dos demais itens do grupo. (não depende de
+        # 'modulos' do usuário no Firestore, então nenhum usuário existente
+        # precisa ser editado pra esse botão aparecer).
+        if papel in ("adm", "supervisor"):
+            ativo = st.session_state.modulo_ativo == "diagnostico"
+            if st.button("Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = "diagnostico"
+                st.rerun()
+
+    # ── Grupo "Administração" — Configurações ──
+    # Seção própria, com rótulo e estilo de botão diferentes de Operacional
+    # e de Sistema (ver CSS .st-key-config_nav acima).
     if papel == "adm":
-        ativo = st.session_state.modulo_ativo == "config"
-        if st.button("Configuracoes", key="nav_config", use_container_width=True,
-                     type="primary" if ativo else "secondary"):
-            st.session_state.modulo_ativo = "config"
-            st.rerun()
+        st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
+                    unsafe_allow_html=True)
+        st.markdown('<span class="nav-section">Administração</span>', unsafe_allow_html=True)
+        with st.container(key="config_nav"):
+            ativo = st.session_state.modulo_ativo == "config"
+            if st.button("Configurações", key="nav_config", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = "config"
+                st.rerun()
 
-    st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
-                unsafe_allow_html=True)
-    st.markdown('<span class="nav-section">Em Breve</span>', unsafe_allow_html=True)
-    for lbl in ["Painel Atendente", "ERP Base", "Analytics"]:
-        st.markdown(
-            f'<div class="nav-soon">{lbl}<span class="soon-tag">em breve</span></div>',
-            unsafe_allow_html=True)
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 8px;"></div>',
                 unsafe_allow_html=True)
-    st.markdown(
-        '<div style="font-size:0.7rem;color:#b0bec5;padding:0 4px 16px;">'
-        'v2.0 · Firebase · Brasília (BRT)</div>',
-        unsafe_allow_html=True)
 
 # ── CABEÇALHO ─────────────────────────────────────────────────────
 lb        = get_logo()
@@ -487,6 +535,56 @@ elif modulo_ativo == "config" and papel == "adm":
         dep   = u.get("departamento", "—") or "—"
         role  = u.get("role", "—")
         with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {role.upper()} · 🏢 {dep}"):
+
+            # ── Editar Perfil (Nome / Nível) ──────────────────────────
+            st.markdown("**✏️ Editar Perfil**")
+            pc1, pc2 = st.columns(2)
+            novo_nome_p = pc1.text_input("Nome completo", value=u.get("nome", ""),
+                                          key=f"nome_{ctx}_{uname}_{idx}")
+            niveis = ["operacional", "supervisor", "adm", "motorista"]
+            idx_nivel = niveis.index(role) if role in niveis else 0
+            novo_nivel_p = pc2.selectbox("Nível", niveis, index=idx_nivel,
+                                          key=f"nivel_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            if st.button("💾 Salvar Perfil", key=f"svperfil_{ctx}_{uname}_{idx}",
+                         disabled=(uname == "admin")):
+                if not novo_nome_p.strip():
+                    st.error("O nome não pode ficar em branco.")
+                else:
+                    ok, msg = atualizar_perfil_usuario(uname, novo_nome_p, novo_nivel_p)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        time.sleep(.5); st.rerun()
+
+            st.markdown("---")
+
+            # ── Editar Login (recria o documento — ação sensível) ─────
+            st.markdown("**🔁 Alterar Login**")
+            st.caption("O login é o identificador do usuário no banco (usado pra entrar no "
+                       "sistema). Alterá-lo recria o cadastro com o novo login e apaga o "
+                       "antigo — confirme antes de salvar.")
+            novo_login_p = st.text_input("Novo login", value=uname,
+                                          key=f"login_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            confirma_login = st.checkbox("Confirmo que quero renomear este login",
+                                          key=f"confloginn_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            if st.button("🔁 Renomear Login", key=f"svlogin_{ctx}_{uname}_{idx}",
+                         disabled=(uname == "admin")):
+                novo_login_norm = novo_login_p.strip().lower()
+                if not novo_login_norm:
+                    st.error("O login não pode ficar em branco.")
+                elif novo_login_norm == uname:
+                    st.info("Esse já é o login atual.")
+                elif not confirma_login:
+                    st.warning("Marque a confirmação para renomear o login.")
+                else:
+                    ok, msg = renomear_login_usuario(uname, novo_login_norm)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        time.sleep(.6); st.rerun()
+
+            st.markdown("---")
 
             # Departamento
             if dep_nomes:
