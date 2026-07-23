@@ -208,11 +208,13 @@ def _render_estilo_paineis_redimensionaveis():
     /* Botões de view lado a lado, quebrando linha quando não couberem
        (em vez de um por coluna fixa, que ficaria espremido com muitos
        Departamentos cadastrados). */
-    div[class*="st-key-tk_view_buttons"] [data-testid="stVerticalBlock"] {
-        display: flex;
-        flex-wrap: wrap;
+    div[class*="st-key-tk_view_buttons"],
+    div[class*="st-key-tk_view_buttons"] > div[data-testid="stVerticalBlock"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center;
         gap: 8px;
-        margin-top: 8px;
+        margin-top: 4px;
     }
     div[class*="st-key-tk_view_buttons"] [data-testid="stElementContainer"] {
         width: auto !important;
