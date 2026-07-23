@@ -120,6 +120,104 @@ def atualizar_dados_usuario(usuario: str, nome: str = None, placa: str = None):
         get_db().collection("usuarios").document(usuario).update(campos)
         listar_usuarios.clear()
 
+def atualizar_perfil_usuario(usuario: str, nome: str = None, role: str = None):
+    """
+    Edita nome completo e/ou nível (role) de um usuário já cadastrado.
+
+    Propositalmente NÃO mexe no campo 'modulos' (permissões de acesso aos
+    módulos Rastreio/Tickets/Cartas) — isso continua sendo gerenciado à
+    parte, na aba Permissões, pra não sobrescrever customizações que o
+    admin já tenha feito manualmente pra esse usuário. Trocar o nível
+    (ex: operacional → supervisor) muda o que aparece como 'papel' do
+    usuário no sistema, mas não concede módulos novos automaticamente.
+    """
+    if usuario == "admin":
+        return False, "O perfil do admin master não pode ser alterado aqui."
+
+    ref = get_db().collection("usuarios").document(usuario)
+    doc = ref.get()
+    if not doc.exists:
+        return False, "Usuário não encontrado."
+
+    campos = {}
+    if nome is not None and nome.strip():
+        campos["nome"] = nome.strip()
+    if role is not None and role in ("operacional", "supervisor", "adm", "motorista"):
+        campos["role"] = role
+
+    if not campos:
+        return False, "Nada para atualizar."
+
+    ref.update(campos)
+    listar_usuarios.clear()
+    return True, "Perfil atualizado com sucesso."
+
+def renomear_login_usuario(login_atual: str, novo_login: str):
+    """
+    Renomeia o login (= ID do documento) de um usuário.
+
+    O Firestore não permite trocar o ID de um documento já existente, então
+    esta função:
+      1. Lê o documento atual;
+      2. Normaliza e valida o novo login (minúsculo, sem espaço, não pode
+         ser 'admin' nem já estar em uso);
+      3. Cria um novo documento com o novo ID, copiando todos os dados e
+         atualizando o campo interno 'usuario' para o novo valor;
+      4. Apaga o documento antigo;
+      5. Propaga a mudança para as coleções que guardam o login no campo
+         'usuario' (lembretes_pessoais, diario_bordo).
+
+    ATENÇÃO: outras coleções que eventualmente referenciem o login (por
+    exemplo, atribuição de tickets em mod_tickets.py, ou vínculos no
+    Diagnóstico N2) não são cobertas aqui porque esses módulos não fazem
+    parte deste arquivo — vale conferir manualmente se algum deles guarda
+    o login como string solta.
+
+    Retorna (True, msg_sucesso) ou (False, msg_erro).
+    """
+    if login_atual == "admin":
+        return False, "O login do admin master não pode ser alterado."
+
+    novo_login_norm = _normalizar_login(novo_login)
+    if not novo_login_norm:
+        return False, "Informe um novo login válido."
+    if novo_login_norm == login_atual:
+        return False, "Esse já é o login atual."
+    if novo_login_norm == "admin":
+        return False, "Esse login é reservado ao admin master."
+
+    db = get_db()
+    ref_antigo  = db.collection("usuarios").document(login_atual)
+    doc_antigo  = ref_antigo.get()
+    if not doc_antigo.exists:
+        return False, "Usuário não encontrado."
+
+    ref_novo = db.collection("usuarios").document(novo_login_norm)
+    if ref_novo.get().exists:
+        return False, f"Já existe um usuário com o login '{novo_login_norm}'."
+
+    dados = doc_antigo.to_dict()
+    dados["usuario"] = novo_login_norm
+
+    batch = db.batch()
+    batch.set(ref_novo, dados)
+    batch.delete(ref_antigo)
+    batch.commit()
+
+    # ── Propaga o novo login pras coleções que guardam 'usuario' ──
+    for colecao in ("lembretes_pessoais", "diario_bordo"):
+        docs_ref = db.collection(colecao).where("usuario", "==", login_atual).stream()
+        batch2 = db.batch()
+        tem_algo = False
+        for d in docs_ref:
+            batch2.update(d.reference, {"usuario": novo_login_norm})
+            tem_algo = True
+        if tem_algo:
+            batch2.commit()
+
+    listar_usuarios.clear()
+    return True, f"Login alterado para '{novo_login_norm}' com sucesso."
+
 def alterar_senha_usuario(usuario: str, senha_atual: str, nova_senha: str):
     """Retorna (True, msg_sucesso) ou (False, msg_erro)."""
     if usuario == "admin":
