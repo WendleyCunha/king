@@ -25,8 +25,10 @@ except Exception as _erro_import_home:
 
 try:
     from modulo.mod_tickets import renderizar_tickets
-except ImportError:
-    def renderizar_tickets(papel, user=None): st.info("🚧 Módulo de Tickets em desenvolvimento...")
+except Exception as _erro_import_tickets:
+    def renderizar_tickets(papel, user=None, _erro=_erro_import_tickets):
+        st.error("⚠️ Falha ao carregar o módulo de Tickets. Detalhe técnico abaixo:")
+        st.exception(_erro)
 
 try:
     from modulo.mod_cartas import renderizar_cartas
