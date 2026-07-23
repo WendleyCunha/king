@@ -717,6 +717,23 @@ def _render_estilo_paineis_redimensionaveis():
     div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar-thumb:hover {
         background: #C9A84C;
     }
+
+    /* ═══════════════════════════════════════════════════════════
+       CABEÇALHO DE ABAS FIXO ("Meus tickets" / "Abertos" / ... /
+       "CX" / "Logística" / etc.) — fica "grudado" no topo da coluna
+       de Lista, sempre visível e clicável, igual um cabeçalho de
+       card fixo, enquanto só os cards de ticket abaixo rolam.
+       ═══════════════════════════════════════════════════════════ */
+    div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: #FFFFFF;
+        padding: 8px 6px 0;
+        margin: 0 -6px 8px;
+        border-radius: 10px 10px 0 0;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.07);
+    }
     </style>
     """), unsafe_allow_html=True)
 
@@ -861,55 +878,52 @@ def renderizar_tickets(papel: str, user: dict = None):
        TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket, usado em
        TODO lugar do sistema que mostra um ticket (Filas de Trabalho,
        abas por Departamento, Visão Geral por Atendente, SLA vencidos).
-       Um único bloco de HTML (sem "costura" entre botão e conteúdo).
+       O clique é um BOTÃO DE VERDADE (visível), não mais um botão
+       invisível sobreposto — mais robusto e sempre clicável. O botão
+       forma a "linha de cima" (ícone + ID + título) e o restante das
+       informações (badges, cliente, SLA) fica colado visualmente
+       embaixo, no mesmo estilo de card conectado do padrão antigo.
        ═══════════════════════════════════════════════════════════ */
-    .tk-strip {
-        background:#fff; border:1px solid #e2e8f0; border-left:5px solid #C9A84C;
-        border-radius:10px; padding:10px 16px 8px; transition:box-shadow .15s;
+    div[class*="st-key-tkwrap_"] {
+        margin-bottom: 10px;
     }
-    .tk-strip-top { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-        justify-content:space-between; }
-    .tk-strip-id { font-weight:800; color:#2c3e50; font-size:0.85rem; white-space:nowrap; }
-    .tk-strip-title { font-weight:700; color:#2c3e50; font-size:0.92rem; flex:1; min-width:180px; }
-    .tk-strip-pills { white-space:nowrap; }
-    .tk-strip-meta { font-size:0.76rem; color:#64778d; margin-top:5px; line-height:1.6; }
+    div[class*="st-key-tkwrap_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-bottom:none !important; border-left:5px solid #C9A84C !important;
+        border-radius:10px 10px 0 0 !important; color:#2c3e50 !important;
+        font-weight:700 !important; font-size:0.92rem !important;
+        padding:10px 16px 6px !important; margin-bottom:0 !important;
+        height:auto !important; white-space:normal !important;
+        transition:background .15s, box-shadow .15s;
+    }
+    div[class*="st-key-tkwrap_"] button:hover {
+        background:#FBF6E6 !important; border-color:#C9A84C !important;
+    }
+    div[class*="st-key-tkwrap_venc_"] button {
+        border-left-color:#8A6D1F !important; animation: tkbordapiscar 1s infinite;
+    }
+    div[class*="st-key-tkwrap_warn_"] button {
+        border-left-color:#D4A12C !important; animation: tkbordapiscarsuave 1.6s infinite;
+    }
+    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);} 50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);} }
+    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(212,161,44,0);} 50%{box-shadow:0 0 0 3px rgba(212,161,44,.30);} }
+
+    .tk-stripbody {
+        background:#fff; border:1px solid #e2e8f0; border-top:none;
+        border-left:5px solid #C9A84C; border-radius:0 0 10px 10px;
+        padding:6px 16px 10px; margin-top:-1px;
+    }
+    .tk-stripbody.aberto-agora { box-shadow:0 0 0 2px #2563EB inset; }
+    .tk-strip-meta { font-size:0.76rem; color:#64778d; margin-top:2px; line-height:1.6; }
+    .tk-strip-pills { white-space:nowrap; margin-bottom:2px; display:block; }
     .tk-strip-bottom { display:flex; align-items:center; gap:10px; margin-top:7px; }
     .tk-strip-slabar { flex:1; background:#e8ecf0; border-radius:4px; height:5px; }
     .tk-strip-slafill { height:5px; border-radius:4px; }
     .tk-strip-slatext { font-size:0.72rem; color:#64778d; white-space:nowrap; }
 
-    /* Container que "embrulha" cada tirinha: recebe o botão invisível que
-       cobre 100% da área, tornando o card inteiro clicável sem precisar de
-       um botão visualmente separado do conteúdo (o que causava o efeito de
-       "3 caixinhas soltas" na versão anterior). */
-    div[class*="st-key-tkwrap_"] {
-        position: relative;
-        margin-bottom: 10px;
-    }
-    div[class*="st-key-tkwrap_"] div[data-testid="stButton"] {
-        margin: 0 !important;
-        height: 0 !important;
-        min-height: 0 !important;
-        overflow: visible !important;
-    }
-    div[class*="st-key-tkwrap_"] button {
-        position: absolute !important;
-        inset: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        opacity: 0;
-        z-index: 5;
-        cursor: pointer;
-        padding: 0 !important;
-    }
-    div[class*="st-key-tkwrap_"]:hover .tk-strip {
-        box-shadow: 0 2px 10px rgba(0,0,0,0.10);
-    }
-
     button[kind="primary"], button[kind="primaryFormSubmit"],
+
     button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
     [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
         background-color:#C9A84C !important; border-color:#C9A84C !important;
@@ -1189,17 +1203,20 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
     """
     TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket usado em TODO o
     sistema (Filas de Trabalho, abas por Departamento, Visão Geral por
-    Atendente, SLA vencidos). Um único bloco de HTML (sem "costura" visual
-    entre botão e conteúdo) com TODAS as informações e cores já existentes:
-    ícone de origem, ID, título, departamento, motivo (pai › filho › etapa),
-    cliente, nº de comentários, data de criação, pill de status, pill de
-    prioridade, badges (vencido / aviso <30min / validação pendente / nova
-    interação / pendências de setor) e a barra + texto do SLA/prazo ativo.
+    Atendente, SLA vencidos), com TODAS as informações e cores já
+    existentes: ícone de origem, ID, título, departamento, motivo (pai ›
+    filho › etapa), cliente, nº de comentários, data de criação, pill de
+    status, pill de prioridade, badges (vencido / aviso <30min / validação
+    pendente / nova interação / pendências de setor) e a barra + texto do
+    SLA/prazo ativo.
 
-    O card inteiro é clicável — um botão invisível cobre toda a tirinha via
-    CSS (ver `st-key-tkwrap_` no bloco de estilos). O clique NÃO abre mais
-    popup: apenas define qual ticket está "aberto" no estado da sessão, e a
-    coluna de Detalhe (terceira coluna, à direita) aparece/atualiza sozinha.
+    O clique é um BOTÃO DE VERDADE (visível), formando a "linha de cima" do
+    card — ícone + ID + título — e o restante das informações fica colado
+    visualmente embaixo dele (mesmo padrão comprovado do card antigo com
+    botão real, mais robusto do que um botão invisível sobreposto). O
+    clique define qual ticket está "aberto" no estado da sessão, e a
+    coluna de Detalhe (terceira coluna, à direita) aparece/atualiza sozinha
+    — sem popup.
 
     extra_badge_html: badge(s) adicional(is) específico(s) do contexto (ex.:
     a tag "🏠 aberto aqui" / "↩ vindo de X" usada na aba de um Departamento).
@@ -1228,19 +1245,21 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
     else:                  barra = "#16A34A"
 
     borda = GOLD_VENC if estado == "venc" else ("#D4A12C" if estado == "warn" else "#C9A84C")
-    sombra_extra = "box-shadow:0 0 0 2px #2563EB inset;" if ticket_aberto_agora else ""
+    classe_aberto = "aberto-agora" if ticket_aberto_agora else ""
     badges   = (extra_badge_html or "") + _badges_ticket(t, user)
     meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
     meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
 
-    with st.container(key=f"tkwrap_{key_ctx}"):
+    # o `estado` entra na key do container pra o CSS conseguir mirar o
+    # botão (venc/warn) e dar o mesmo destaque piscante que a borda tinha
+    with st.container(key=f"tkwrap_{estado}_{key_ctx}"):
+        if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkbtn_{key_ctx}", use_container_width=True):
+            st.session_state.tk_ticket_aberto = tid
+            st.rerun()
+
         st.markdown(_html(f"""
-        <div class="tk-strip" style="border-left-color:{borda};{sombra_extra}">
-            <div class="tk-strip-top">
-                <span class="tk-strip-id">{icon} #{esc(idv)}</span>
-                <span class="tk-strip-title">{esc(titulo)}</span>
-                <span class="tk-strip-pills">{pill(sv_label,sbg,sc)} {pill(pv_label,pbg,pc)}</span>
-            </div>
+        <div class="tk-stripbody {classe_aberto}" style="border-left-color:{borda};">
+            <div class="tk-strip-pills">{pill(sv_label,sbg,sc)} {pill(pv_label,pbg,pc)}</div>
             <div class="tk-strip-meta">
                 🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)}{meta_com}{meta_mot}
                 &nbsp;·&nbsp; 🕐 {esc(criado)} &nbsp; {badges}
@@ -1253,9 +1272,6 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
             </div>
         </div>
         """), unsafe_allow_html=True)
-        if st.button("", key=f"tkbtn_{key_ctx}", use_container_width=True):
-            st.session_state.tk_ticket_aberto = tid
-            st.rerun()
 
 
 # ───────────────────────────────────────────────────────────────────
