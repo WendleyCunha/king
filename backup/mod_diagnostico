@@ -1366,7 +1366,7 @@ def _tab_diario(pode_edit):
             height=_ALTURA_TABELA_PADRAO,
         )
 
-        editado = editado.copy()
+        editado = editado.copy().fillna("")
         editado["duracao"] = editado.apply(
             lambda r: calcular_duracao_min(_time_to_str(r["hora_inicio"]), _time_to_str(r["hora_fim"])), axis=1
         )
