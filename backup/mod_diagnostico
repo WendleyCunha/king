@@ -148,10 +148,14 @@ def _jornadas_para_registros(jornadas):
 # Lógica pura de consolidação automática (sem Streamlit/Firestore —
 # fácil de testar isoladamente e reaproveitar).
 # ─────────────────────────────────────────────────────────────
-def normalizar_texto(t: str) -> str:
-    t = (t or "").strip().lower()
+def normalizar_texto(t) -> str:
+    try:
+        if t is None or pd.isna(t):
+            return ""
+    except (TypeError, ValueError):
+        pass  # tipos que pd.isna não aceita (ex: listas) — segue o fluxo normal
+    t = str(t).strip().lower()
     return re.sub(r"\s+", " ", t)
-
 
 def calcular_duracao_min(hora_inicio: str, hora_fim: str) -> str:
     if not hora_inicio or not hora_fim:
