@@ -20,10 +20,16 @@ from .strip import _render_ticket_strip
 
 def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
     # Empacotado num container com key próprio ("tk_busca_wrap") para que o
-    # CSS em mod_tickets.py consiga fixá-lo no topo junto com a barra de
-    # abas logo abaixo, formando um único "cartão" fixo (painel de demandas)
-    # enquanto a lista de tickets rola por baixo.
+    # CSS + JS em mod_tickets.py consigam fixá-lo no topo junto com a barra
+    # de abas logo abaixo, formando um único "cartão" congelado — o Painel
+    # de Tickets — enquanto a lista de tickets abaixo dele rola normalmente.
     with st.container(key="tk_busca_wrap"):
+        st.markdown(
+            '<div style="font-size:0.72rem;font-weight:800;color:#7a5f1a;'
+            'text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">'
+            '📋 Painel de Tickets</div>',
+            unsafe_allow_html=True,
+        )
         busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
                               label_visibility="collapsed", key="tk_busca")
     b = busca.strip().lower() if busca else ""
