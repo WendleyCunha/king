@@ -19,8 +19,13 @@ from .strip import _render_ticket_strip
 
 
 def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
-    busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
-                          label_visibility="collapsed", key="tk_busca")
+    # Empacotado num container com key próprio ("tk_busca_wrap") para que o
+    # CSS em mod_tickets.py consiga fixá-lo no topo junto com a barra de
+    # abas logo abaixo, formando um único "cartão" fixo (painel de demandas)
+    # enquanto a lista de tickets rola por baixo.
+    with st.container(key="tk_busca_wrap"):
+        busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
+                              label_visibility="collapsed", key="tk_busca")
     b = busca.strip().lower() if busca else ""
 
     def _filtra(lista):
