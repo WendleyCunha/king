@@ -12,6 +12,7 @@ from database import (
     # ── novas funções ──
     listar_departamentos, criar_departamento, deletar_departamento,
     atualizar_departamento_usuario, redefinir_senha_usuario,
+    atualizar_perfil_usuario, renomear_login_usuario,
 )
 from modulo.mod_rastreio import renderizar_rastreio
 
@@ -534,6 +535,56 @@ elif modulo_ativo == "config" and papel == "adm":
         dep   = u.get("departamento", "—") or "—"
         role  = u.get("role", "—")
         with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {role.upper()} · 🏢 {dep}"):
+
+            # ── Editar Perfil (Nome / Nível) ──────────────────────────
+            st.markdown("**✏️ Editar Perfil**")
+            pc1, pc2 = st.columns(2)
+            novo_nome_p = pc1.text_input("Nome completo", value=u.get("nome", ""),
+                                          key=f"nome_{ctx}_{uname}_{idx}")
+            niveis = ["operacional", "supervisor", "adm", "motorista"]
+            idx_nivel = niveis.index(role) if role in niveis else 0
+            novo_nivel_p = pc2.selectbox("Nível", niveis, index=idx_nivel,
+                                          key=f"nivel_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            if st.button("💾 Salvar Perfil", key=f"svperfil_{ctx}_{uname}_{idx}",
+                         disabled=(uname == "admin")):
+                if not novo_nome_p.strip():
+                    st.error("O nome não pode ficar em branco.")
+                else:
+                    ok, msg = atualizar_perfil_usuario(uname, novo_nome_p, novo_nivel_p)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        time.sleep(.5); st.rerun()
+
+            st.markdown("---")
+
+            # ── Editar Login (recria o documento — ação sensível) ─────
+            st.markdown("**🔁 Alterar Login**")
+            st.caption("O login é o identificador do usuário no banco (usado pra entrar no "
+                       "sistema). Alterá-lo recria o cadastro com o novo login e apaga o "
+                       "antigo — confirme antes de salvar.")
+            novo_login_p = st.text_input("Novo login", value=uname,
+                                          key=f"login_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            confirma_login = st.checkbox("Confirmo que quero renomear este login",
+                                          key=f"confloginn_{ctx}_{uname}_{idx}",
+                                          disabled=(uname == "admin"))
+            if st.button("🔁 Renomear Login", key=f"svlogin_{ctx}_{uname}_{idx}",
+                         disabled=(uname == "admin")):
+                novo_login_norm = novo_login_p.strip().lower()
+                if not novo_login_norm:
+                    st.error("O login não pode ficar em branco.")
+                elif novo_login_norm == uname:
+                    st.info("Esse já é o login atual.")
+                elif not confirma_login:
+                    st.warning("Marque a confirmação para renomear o login.")
+                else:
+                    ok, msg = renomear_login_usuario(uname, novo_login_norm)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        time.sleep(.6); st.rerun()
+
+            st.markdown("---")
 
             # Departamento
             if dep_nomes:
