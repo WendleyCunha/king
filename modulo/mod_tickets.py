@@ -185,15 +185,14 @@ def _render_estilo_paineis_redimensionaveis():
        de Lista, sempre visível e clicável, igual um cabeçalho de
        card fixo, enquanto só os cards de ticket abaixo rolam.
 
-       PAINEL DE DEMANDAS: a busca global (container "tk_busca_wrap") e a
-       barra de abas (data-baseweb="tab-list") são DOIS elementos sticky
-       empilhados um sobre o outro (cada um com seu próprio `top`), que
-       juntos formam a aparência de um único cartão fixo no topo — como um
-       painel de demandas — enquanto a lista de tickets abaixo rola
-       normalmente. O `top: 54px` da barra de abas é a altura estimada do
-       cartão da busca acima dela; se sobrar/faltar uma folguinha entre os
-       dois ao rolar, ajuste esse valor (e o padding do tk_busca_wrap logo
-       abaixo) até encostarem perfeitamente.
+       PAINEL DE TICKETS (busca + abas grudados, congelado no topo): a
+       busca global (container "tk_busca_wrap") e a barra de abas
+       (data-baseweb="tab-list") são DOIS elementos sticky empilhados um
+       sobre o outro. O `top` da barra de abas abaixo é só um valor de
+       segurança para o instante antes do JS carregar — o script no fim
+       deste arquivo MEDE a altura real do cartão de busca renderizado e
+       ajusta esse `top` via JavaScript (nada de chute fixo), então os
+       dois encostam certinho não importa o tamanho de fonte/zoom.
        ═══════════════════════════════════════════════════════════ */
     div[class*="st-key-tk_paineis"] div[class*="st-key-tk_busca_wrap"] {
         position: sticky;
@@ -207,7 +206,7 @@ def _render_estilo_paineis_redimensionaveis():
     }
     div[class*="st-key-tk_paineis"] div[data-baseweb="tab-list"] {
         position: sticky;
-        top: 54px;
+        top: 60px;
         z-index: 40;
         background: #FFFFFF;
         padding: 8px 6px 0;
@@ -223,6 +222,19 @@ def _render_estilo_paineis_redimensionaveis():
     <script>
     (function() {
         const doc = window.parent.document;
+
+        function alinharPainelDemandas(wrap) {
+            // Mede a altura REAL do cartão de busca renderizado e empurra a
+            // barra de abas pra encostar exatamente embaixo dele — nada de
+            // valor fixo chutado no CSS, então funciona em qualquer
+            // zoom/fonte/tamanho de tela.
+            const buscaWrap = wrap.querySelector('div[class*="st-key-tk_busca_wrap"]');
+            const tabList = wrap.querySelector('div[data-baseweb="tab-list"]');
+            if (buscaWrap && tabList) {
+                const altura = buscaWrap.getBoundingClientRect().height;
+                if (altura > 0) tabList.style.top = altura + 'px';
+            }
+        }
 
         function montarResizers() {
             const wrap = doc.querySelector('div[class*="st-key-tk_paineis"]');
@@ -277,6 +289,10 @@ def _render_estilo_paineis_redimensionaveis():
                     doc.addEventListener('mousemove', mover);
                     doc.addEventListener('mouseup', soltar);
                 });
+
+                // Reposiciona a barra sozinha se a janela mudar de tamanho,
+                // pra ela nunca "ficar pra trás" da divisa real da coluna.
+                window.addEventListener('resize', posicionar);
             }
 
             // resizer 1: entre "Filas" (cols[0]) e "Lista" (cols[1])
@@ -286,13 +302,34 @@ def _render_estilo_paineis_redimensionaveis():
             if (cols.length >= 3) {
                 criarResizer(cols[2], 'tk_larg_detalhe', false, cols[1], 320, 900);
             }
+
+            alinharPainelDemandas(wrap);
             return true;
         }
 
+        // Tentativa inicial via polling (cobre o primeiro carregamento da
+        // página, antes de qualquer interação do usuário).
         const tentativa = setInterval(function() {
             if (montarResizers()) clearInterval(tentativa);
         }, 120);
-        setTimeout(function() { clearInterval(tentativa); }, 6000);
+        setTimeout(function() { clearInterval(tentativa); }, 8000);
+
+        // MutationObserver: sempre que o DOM do painel mudar de verdade —
+        // abrir/fechar o detalhe do ticket (2 ↔ 3 colunas), trocar de aba,
+        // digitar na busca, paginar — remonta os resizers e realinha o
+        // painel de busca+abas. Isso é o que resolve os resizers "sumirem"
+        // depois de um rerun do Streamlit: antes só dependíamos de um
+        // polling de 120ms nos primeiros segundos da página, que não cobria
+        // mudanças de estrutura (como abrir o detalhe) acontecendo depois.
+        const wrapInicial = doc.querySelector('div[class*="st-key-tk_paineis"]');
+        if (wrapInicial) {
+            let pendente = null;
+            const observer = new MutationObserver(function() {
+                if (pendente) clearTimeout(pendente);
+                pendente = setTimeout(montarResizers, 80);
+            });
+            observer.observe(wrapInicial, { childList: true, subtree: true });
+        }
     })();
     </script>
     """, height=0, width=0)
