@@ -674,7 +674,7 @@ def _render_estilo_paineis_redimensionaveis():
     <style>
     div[class*="st-key-tk_paineis"] div[data-testid="stHorizontalBlock"] {
         position: relative;
-        align-items: stretch;
+        align-items: flex-start;
     }
     .tk-resizer {
         position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px;
@@ -687,6 +687,35 @@ def _render_estilo_paineis_redimensionaveis():
     }
     .tk-resizer:hover::after, .tk-resizer.tk-ativo::after {
         background: #C9A84C; height: 70px;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       ROLAGEM INTERNA INDEPENDENTE — cada coluna ("Ações", "Lista",
+       "Detalhe") rola por dentro, sem empurrar as outras, igual ao
+       painel de e-mail / WhatsApp Web. Cada coluna vira sua própria
+       "janelinha" com altura travada relativa à tela e overflow
+       próprio. Pura CSS, sem depender de JS ou de posições internas
+       do Streamlit — só a altura em si (calc(100vh - Npx)) é uma
+       estimativa do espaço ocupado pelo cabeçalho acima; ajuste o
+       valor abaixo se sobrar/faltar espaço no seu layout.
+       ═══════════════════════════════════════════════════════════ */
+    div[class*="st-key-tk_paineis"] div[data-testid="stColumn"] {
+        max-height: calc(100vh - 230px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 6px;
+    }
+    div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar {
+        width: 8px;
+    }
+    div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar-thumb {
+        background: #D8CBA0; border-radius: 4px;
+    }
+    div[class*="st-key-tk_paineis"] div[data-testid="stColumn"]::-webkit-scrollbar-thumb:hover {
+        background: #C9A84C;
     }
     </style>
     """), unsafe_allow_html=True)
