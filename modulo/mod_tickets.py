@@ -211,6 +211,7 @@ def _render_estilo_paineis_redimensionaveis():
     div[class*="st-key-tk_view_buttons"],
     div[class*="st-key-tk_view_buttons"] > div[data-testid="stVerticalBlock"] {
         display: flex !important;
+        flex-direction: row !important;
         flex-wrap: wrap !important;
         align-items: center;
         gap: 8px;
