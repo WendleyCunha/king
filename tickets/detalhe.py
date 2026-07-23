@@ -11,7 +11,7 @@ import time
 import streamlit as st
 from datetime import datetime, timedelta
 
-from ..mod_motivos import listar_motivos_filho, listar_motivos_filho_de, listar_etapas_de
+from modulo.mod_motivos import listar_motivos_filho, listar_motivos_filho_de, listar_etapas_de
 from .common import (
     BRT, COLECAO, get_db, STATUS_CFG, PRIO_CFG, GOLD_VENC, GREEN_OK,
     esc, pill, _html, agora_brt, sla_label, sla_restante, deadline_ativo,
