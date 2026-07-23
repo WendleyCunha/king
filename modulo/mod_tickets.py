@@ -67,6 +67,22 @@ Novidades desta versão (mantém tudo da v3 + patch de performance):
        É uma única tirinha horizontal (um só bloco de HTML, sem "costura"
        entre botão e conteúdo), com TODAS as cores/badges/informações que
        já existiam, e o card inteiro é clicável (botão invisível por cima).
+
+  [15] PAINÉIS REDIMENSIONÁVEIS + DETALHE LATERAL (v4.2):
+       - O popup (st.dialog) de detalhe do ticket foi REMOVIDO. Clicar num
+         ticket agora abre o detalhe numa TERCEIRA coluna, à direita —
+         igual um cliente de e-mail (lista no meio, leitura à direita).
+       - As duas divisas entre colunas (Filas↔Lista e Lista↔Detalhe) são
+         arrastáveis com o mouse (mesmo padrão de painéis redimensionáveis
+         de e-mail), substituindo o antigo slider "Ajustar largura dos
+         painéis". A largura escolhida fica salva no sessionStorage do
+         navegador (por aba) e é reaplicada a cada rerun, mas reseta num F5
+         (é um ajuste 100% client-side, não fica no Firestore).
+       - Isso depende de atributos internos do Streamlit
+         (data-testid="stColumn"/"stHorizontalBlock") que não são API
+         pública — funciona nas versões atuais, mas pode parar de arrastar
+         (sem quebrar nada, só volta pras proporções padrão) se uma futura
+         atualização do Streamlit renomear esses atributos.
 """
 import streamlit as st
 import pandas as pd
@@ -511,25 +527,6 @@ def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
         else:
             st.caption("Sem comentários registrados neste chamado.")
 
-# ── Popup (modal) de detalhe ───────────────────────────────────────
-def abrir_ticket_popup(tid, user, papel):
-    deco = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
-    if deco is None:
-        st.session_state.tk_detalhe = tid
-        st.session_state.tk_modo    = "detalhe"
-        st.rerun()
-        return
-    try:
-        @deco("Detalhe do Ticket", width="large")
-        def _popup():
-            _carregar_e_render_detalhe(tid, user, papel, modal=True)
-        _popup()
-    except TypeError:
-        @deco("Detalhe do Ticket")
-        def _popup2():
-            _carregar_e_render_detalhe(tid, user, papel, modal=True)
-        _popup2()
-
 # ── CRUD Firestore ─────────────────────────────────────────────────
 @st.cache_data(ttl=10, show_spinner=False)
 def listar_tickets() -> list:
@@ -646,6 +643,117 @@ def deletar_todos_tickets() -> int:
     return total
 
 # ═══════════════════════════════════════════════════════════════════
+# PAINÉIS REDIMENSIONÁVEIS (Filas ↔ Lista ↔ Detalhe) — arrasto client-side
+# ═══════════════════════════════════════════════════════════════════
+def _render_estilo_paineis_redimensionaveis():
+    """CSS + JS que transforma a divisa entre as colunas de 'Filas' / 'Lista'
+    / 'Detalhe do ticket' em barras arrastáveis (mesmo padrão de painéis
+    redimensionáveis de clientes de e-mail tipo Outlook/Gmail). Puramente
+    client-side: a largura escolhida fica salva no sessionStorage do
+    navegador (por aba) e é reaplicada a cada rerun do Streamlit, então o
+    ajuste "sobrevive" a cliques/reruns normais (mas não a um F5).
+
+    Depende de atributos internos do Streamlit (data-testid="stColumn" /
+    "stHorizontalBlock") que não são API pública — se uma futura versão do
+    Streamlit renomear esses atributos, o arrasto simplesmente para de
+    funcionar (sem quebrar a tela, só volta pras proporções padrão).
+    """
+    st.markdown(_html("""
+    <style>
+    div[class*="st-key-tk_paineis"] div[data-testid="stHorizontalBlock"] {
+        position: relative;
+        align-items: stretch;
+    }
+    .tk-resizer {
+        position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px;
+        cursor: col-resize; z-index: 999;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .tk-resizer::after {
+        content: ""; width: 4px; height: 42px; border-radius: 3px;
+        background: #D8CBA0; transition: background .15s, height .15s;
+    }
+    .tk-resizer:hover::after, .tk-resizer.tk-ativo::after {
+        background: #C9A84C; height: 70px;
+    }
+    </style>
+    <script>
+    (function() {
+        function montarResizers() {
+            const wrap = document.querySelector('div[class*="st-key-tk_paineis"]');
+            if (!wrap) return false;
+            const row = wrap.querySelector('div[data-testid="stHorizontalBlock"]');
+            if (!row) return false;
+            const cols = Array.from(row.querySelectorAll(':scope > div[data-testid="stColumn"]'));
+            if (cols.length < 2) return false;
+
+            row.querySelectorAll('.tk-resizer').forEach(el => el.remove());
+
+            function aplicarLarguraSalva(chave, col) {
+                const salva = sessionStorage.getItem(chave);
+                if (salva) {
+                    col.style.flex = '0 0 ' + salva + 'px';
+                    col.style.width = salva + 'px';
+                }
+            }
+            aplicarLarguraSalva('tk_larg_filas', cols[0]);
+            cols[1].style.flex = '1 1 0';
+            cols[1].style.minWidth = '0';
+            if (cols.length >= 3) aplicarLarguraSalva('tk_larg_detalhe', cols[2]);
+
+            function criarResizer(colAlvo, chave, cresceParaDireita, referencia, min, max) {
+                const barra = document.createElement('div');
+                barra.className = 'tk-resizer';
+                function posicionar() {
+                    barra.style.left = (referencia.getBoundingClientRect().right
+                                         - row.getBoundingClientRect().left) + 'px';
+                }
+                posicionar();
+                row.appendChild(barra);
+
+                barra.addEventListener('mousedown', function(e) {
+                    e.preventDefault();
+                    barra.classList.add('tk-ativo');
+                    const larguraInicial = colAlvo.getBoundingClientRect().width;
+                    const xInicial = e.clientX;
+                    function mover(ev) {
+                        const delta = cresceParaDireita ? (ev.clientX - xInicial) : -(ev.clientX - xInicial);
+                        const nova = Math.max(min, Math.min(max, larguraInicial + delta));
+                        colAlvo.style.flex = '0 0 ' + nova + 'px';
+                        colAlvo.style.width = nova + 'px';
+                        posicionar();
+                    }
+                    function soltar() {
+                        barra.classList.remove('tk-ativo');
+                        sessionStorage.setItem(chave, Math.round(colAlvo.getBoundingClientRect().width));
+                        document.removeEventListener('mousemove', mover);
+                        document.removeEventListener('mouseup', soltar);
+                    }
+                    document.addEventListener('mousemove', mover);
+                    document.addEventListener('mouseup', soltar);
+                });
+            }
+
+            // resizer 1: entre "Filas" (cols[0]) e "Lista" (cols[1])
+            criarResizer(cols[0], 'tk_larg_filas', true, cols[0], 160, 420);
+            // resizer 2 (só existe quando o Detalhe está aberto): entre
+            // "Lista" (cols[1]) e "Detalhe" (cols[2])
+            if (cols.length >= 3) {
+                criarResizer(cols[2], 'tk_larg_detalhe', false, cols[1], 320, 900);
+            }
+            return true;
+        }
+
+        const tentativa = setInterval(function() {
+            if (montarResizers()) clearInterval(tentativa);
+        }, 120);
+        setTimeout(function() { clearInterval(tentativa); }, 6000);
+    })();
+    </script>
+    """), unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # RENDERIZAÇÃO
 # ═══════════════════════════════════════════════════════════════════
 def renderizar_tickets(papel: str, user: dict = None):
@@ -665,6 +773,8 @@ def renderizar_tickets(papel: str, user: dict = None):
         "zendesk":     sum(1 for t in todos if "zendesk" in t.get("origem","")),
         "vencidos":    sum(1 for t in todos if ticket_vencido_pendente(t)),
     }
+
+    _render_estilo_paineis_redimensionaveis()
 
     st.markdown(_html("""
     <style>
@@ -776,9 +886,9 @@ def renderizar_tickets(papel: str, user: dict = None):
     </style>
     """), unsafe_allow_html=True)
 
-    if "tk_fila"    not in st.session_state: st.session_state.tk_fila    = "meus"
-    if "tk_detalhe" not in st.session_state: st.session_state.tk_detalhe = None
-    if "tk_modo"    not in st.session_state: st.session_state.tk_modo    = "lista"
+    if "tk_fila"          not in st.session_state: st.session_state.tk_fila          = "meus"
+    if "tk_ticket_aberto" not in st.session_state: st.session_state.tk_ticket_aberto  = None
+    if "tk_modo"          not in st.session_state: st.session_state.tk_modo          = "lista"
 
     uname = user.get("usuario","")
 
@@ -794,66 +904,59 @@ def renderizar_tickets(papel: str, user: dict = None):
     f_venc    = buckets["vencidos"]
     f_global  = todos_geral
 
-    with st.expander("↔️ Ajustar largura dos painéis", expanded=False):
-        st.slider("Largura da coluna de filas", 0.6, 2.4,
-                  float(st.session_state.get("tk_larg", 1.0)), 0.1, key="tk_larg")
-    larg = float(st.session_state.get("tk_larg", 1.0))
+    modo = st.session_state.tk_modo
+    mostra_detalhe = bool(st.session_state.tk_ticket_aberto) and modo in ("lista", None)
 
-    col_filas, col_sep, col_main = st.columns([larg, 0.06, 4.0])
+    with st.container(key="tk_paineis"):
+        if mostra_detalhe:
+            col_filas, col_main, col_detalhe = st.columns([1, 2, 1.4])
+        else:
+            col_filas, col_main = st.columns([1, 3])
+            col_detalhe = None
 
-    with col_sep:
-        st.markdown(_html(
-            '<div style="border-left:2px solid #C9A84C;min-height:680px;'
-            'width:1px;margin:0 auto;opacity:.6;"></div>'
-        ), unsafe_allow_html=True)
+        with col_filas:
+            st.markdown("**Ações**")
+            if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
+                st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None; st.rerun()
 
-    with col_filas:
-        st.markdown("**Ações**")
-        if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
-            st.session_state.tk_modo = "novo"; st.rerun()
+            if papel in ("supervisor", "adm"):
+                if st.button("📊 Visão Geral da Operação", use_container_width=True,
+                             type="primary" if st.session_state.tk_modo == "equipe" else "secondary"):
+                    st.session_state.tk_modo = "equipe"; st.session_state.tk_ticket_aberto = None; st.rerun()
 
-        if papel in ("supervisor", "adm"):
-            if st.button("📊 Visão Geral da Operação", use_container_width=True,
-                         type="primary" if st.session_state.tk_modo == "equipe" else "secondary"):
-                st.session_state.tk_modo = "equipe"; st.rerun()
+            if papel == "adm":
+                if st.button("🔄 Sync Zendesk", use_container_width=True):
+                    st.session_state.tk_modo = "sync"; st.session_state.tk_ticket_aberto = None; st.rerun()
 
-        if papel == "adm":
-            if st.button("🔄 Sync Zendesk", use_container_width=True):
-                st.session_state.tk_modo = "sync"; st.rerun()
+            st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
+                        unsafe_allow_html=True)
+            if st.button("📋 Ver Filas de Trabalho", use_container_width=True,
+                         type="primary" if st.session_state.tk_modo in ("lista", None) else "secondary"):
+                st.session_state.tk_modo = "lista"; st.rerun()
 
-        st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
-                    unsafe_allow_html=True)
-        if st.button("📋 Ver Filas de Trabalho", use_container_width=True,
-                     type="primary" if st.session_state.tk_modo in ("lista", None) else "secondary"):
-            st.session_state.tk_modo = "lista"; st.rerun()
+        with col_main:
+            if f_venc:
+                st.markdown(_html(
+                    f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
+                    f'aguardando tratativa! Verifique a aba "SLA vencidos".</div>'
+                ), unsafe_allow_html=True)
 
-    with col_main:
-        modo = st.session_state.tk_modo
+            if modo in ("lista", None):
+                _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+            elif modo == "novo":
+                _render_novo(user)
+            elif modo == "equipe":
+                if papel not in ("supervisor", "adm"):
+                    st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
+                    st.session_state.tk_modo = "lista"
+                else:
+                    _render_visao_geral_operacao(user, papel, todos_geral)
+            elif modo == "sync":
+                _render_sync()
 
-        if f_venc:
-            st.markdown(_html(
-                f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
-                f'aguardando tratativa! Verifique a aba "SLA vencidos".</div>'
-            ), unsafe_allow_html=True)
-
-        if modo in ("lista", None):
-            _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
-
-        elif modo == "detalhe":
-            _render_detalhe(st.session_state.tk_detalhe, user, papel)
-
-        elif modo == "novo":
-            _render_novo(user)
-
-        elif modo == "equipe":
-            if papel not in ("supervisor", "adm"):
-                st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
-                st.session_state.tk_modo = "lista"
-            else:
-                _render_visao_geral_operacao(user, papel, todos_geral)
-
-        elif modo == "sync":
-            _render_sync()
+        if col_detalhe is not None:
+            with col_detalhe:
+                _render_painel_lateral_detalhe(user, papel)
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -1047,9 +1150,9 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
     interação / pendências de setor) e a barra + texto do SLA/prazo ativo.
 
     O card inteiro é clicável — um botão invisível cobre toda a tirinha via
-    CSS (ver `st-key-tkwrap_` no bloco de estilos), então não existe mais um
-    botão visualmente separado do conteúdo (o efeito de "3 caixinhas soltas"
-    da versão anterior).
+    CSS (ver `st-key-tkwrap_` no bloco de estilos). O clique NÃO abre mais
+    popup: apenas define qual ticket está "aberto" no estado da sessão, e a
+    coluna de Detalhe (terceira coluna, à direita) aparece/atualiza sozinha.
 
     extra_badge_html: badge(s) adicional(is) específico(s) do contexto (ex.:
     a tag "🏠 aberto aqui" / "↩ vindo de X" usada na aba de um Departamento).
@@ -1070,19 +1173,22 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
     num_com = len(t.get("comentarios", []))
     criado  = str(t.get("criado_em",""))[:16]
 
+    ticket_aberto_agora = (tid == st.session_state.get("tk_ticket_aberto"))
+
     if   estado == "venc": barra = GOLD_VENC
     elif estado == "warn": barra = GOLD_WARN
     elif spct > 70:        barra = "#CA8A04"
     else:                  barra = "#16A34A"
 
     borda = GOLD_VENC if estado == "venc" else ("#D4A12C" if estado == "warn" else "#C9A84C")
+    sombra_extra = "box-shadow:0 0 0 2px #2563EB inset;" if ticket_aberto_agora else ""
     badges   = (extra_badge_html or "") + _badges_ticket(t, user)
     meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
     meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
 
     with st.container(key=f"tkwrap_{key_ctx}"):
         st.markdown(_html(f"""
-        <div class="tk-strip" style="border-left-color:{borda};">
+        <div class="tk-strip" style="border-left-color:{borda};{sombra_extra}">
             <div class="tk-strip-top">
                 <span class="tk-strip-id">{icon} #{esc(idv)}</span>
                 <span class="tk-strip-title">{esc(titulo)}</span>
@@ -1101,7 +1207,8 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
         </div>
         """), unsafe_allow_html=True)
         if st.button("", key=f"tkbtn_{key_ctx}", use_container_width=True):
-            abrir_ticket_popup(tid, user, papel)
+            st.session_state.tk_ticket_aberto = tid
+            st.rerun()
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -1156,8 +1263,6 @@ def _caminho_motivo(t) -> str:
 
 def _carregar_e_render_detalhe(tid, user, papel, modal=False):
     if not tid:
-        if not modal:
-            st.session_state.tk_modo = "lista"; st.rerun()
         return
     doc = get_db().collection(COLECAO).document(tid).get()
     if not doc.exists:
@@ -1166,10 +1271,21 @@ def _carregar_e_render_detalhe(tid, user, papel, modal=False):
     _detalhe_corpo(doc.to_dict(), tid, user, papel)
 
 
-def _render_detalhe(tid, user, papel):
-    if st.button("← Voltar para a fila"):
-        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
-    _carregar_e_render_detalhe(tid, user, papel, modal=False)
+def _render_painel_lateral_detalhe(user, papel):
+    """Coluna da direita (3ª coluna) com o detalhe do ticket clicado — em
+    vez do antigo popup/st.dialog. Só é chamada quando há um ticket aberto
+    no estado da sessão (tk_ticket_aberto)."""
+    tid = st.session_state.get("tk_ticket_aberto")
+    if not tid:
+        return
+    c_tit, c_fechar = st.columns([5, 1])
+    with c_tit:
+        st.markdown("### 📄 Detalhe do Ticket")
+    with c_fechar:
+        if st.button("✕", key="tk_fechar_detalhe", help="Fechar", use_container_width=True):
+            st.session_state.tk_ticket_aberto = None
+            st.rerun()
+    _carregar_e_render_detalhe(tid, user, papel, modal=True)
 
 
 # ── Classificação Motivo Filho / Etapa (SLA1 + SLA2) ───────────────
@@ -1519,7 +1635,7 @@ def _detalhe_corpo(t, tid, user, papel):
                                "permanece em 'Todos os tickets'.")
                     st.success(msg); time.sleep(.5)
                     if updates.get("status") in ("resolvido", "cancelado"):
-                        st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None
+                        st.session_state.tk_ticket_aberto = None
                     st.rerun()
                 else:
                     st.warning("Escreva uma resposta ou altere o status antes de enviar.")
@@ -1580,7 +1696,7 @@ def _detalhe_corpo(t, tid, user, papel):
                       use_container_width=True):
             atualizar_ticket(tid, {"status": "finalizado"}, interacao_de=user.get("usuario",""))
             st.success("Chamado encerrado!"); time.sleep(.5)
-            st.session_state.tk_modo = "lista"; st.session_state.tk_detalhe = None; st.rerun()
+            st.session_state.tk_ticket_aberto = None; st.rerun()
         if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
             atualizar_ticket(tid, {"status": "em_andamento"}, interacao_de=user.get("usuario",""))
             st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
