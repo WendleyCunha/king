@@ -1,11 +1,18 @@
 """
 KingStar — Módulo de Tickets — filas.py
 ─────────────────────────────────────────────────────────────────────────────
-Filas de Trabalho em abas: as caixas próprias do usuário (Meus tickets,
-Abertos, Em andamento, Urgentes, SLA vencidos, Todos) + uma aba extra por
-Departamento cadastrado, mostrando pra QUALQUER atendente quais tickets
-aquele setor precisa responder (abertos direto pro setor + pendências
-vindas de outro setor).
+Painel de Tickets (topo, independente): busca global + botões clicáveis
+("views") — Meus tickets, Abertos, Em andamento, Urgentes, SLA vencidos,
+Todos — mais um botão por Departamento cadastrado (mostrando pra QUALQUER
+atendente quais tickets aquele setor precisa responder: abertos direto pro
+setor + pendências vindas de outro setor). É renderizado FORA dos 3 painéis
+redimensionáveis (Ações/Lista/Detalhe) — como as colunas de baixo já rolam
+por dentro de si mesmas (não a página toda), esse painel fica sempre
+visível sem precisar de nenhum truque de CSS sticky.
+
+A seleção de qual "view" está ativa fica em st.session_state.tk_fila_selecionada
+e é lida por _render_conteudo_fila_selecionada, chamada de dentro da coluna
+"Lista" (ver mod_tickets.py), que mostra só os tickets da fila escolhida.
 """
 import time
 import streamlit as st
@@ -17,75 +24,110 @@ from .common import (
 )
 from .strip import _render_ticket_strip
 
+# Views fixas do Painel de Tickets — (chave interna, rótulo mostrado no botão)
+_FILA_DEFS = [
+    ("meus",         "📌 Meus tickets"),
+    ("aberto",       "Abertos"),
+    ("em_andamento", "Em andamento"),
+    ("urgente",      "Urgentes"),
+    ("vencidos",     "SLA vencidos"),
+    ("global",       "🌐 Todos"),
+]
 
-def _render_filas_em_abas(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
-    # Empacotado num container com key próprio ("tk_busca_wrap") para que o
-    # CSS + JS em mod_tickets.py consigam fixá-lo no topo junto com a barra
-    # de abas logo abaixo, formando um único "cartão" congelado — o Painel
-    # de Tickets — enquanto a lista de tickets abaixo dele rola normalmente.
-    with st.container(key="tk_busca_wrap"):
+
+def _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
+    """
+    PAINEL DE TICKETS — cartão independente, renderizado ACIMA dos 3 painéis
+    redimensionáveis, sem pertencer a nenhum deles. Reúne a busca global +
+    os botões clicáveis de "view" (antes eram abas dentro da coluna Lista).
+    Clicar num botão só troca st.session_state.tk_fila_selecionada e dá
+    rerun — quem realmente desenha a lista de tickets é
+    _render_conteudo_fila_selecionada, chamada separadamente de dentro da
+    coluna Lista.
+    """
+    if "tk_fila_selecionada" not in st.session_state:
+        st.session_state.tk_fila_selecionada = "meus"
+
+    contagens = {
+        "meus": len(meus), "aberto": len(f_abertos), "em_andamento": len(f_andam),
+        "urgente": len(f_urg), "vencidos": len(f_venc), "global": len(f_global),
+    }
+
+    deps_cadastrados = [d.get("nome") for d in listar_departamentos() if d.get("nome")]
+    setores_info = []
+    for nome_dep in deps_cadastrados:
+        qtd = len(tickets_pendentes_do_setor(f_global, nome_dep))
+        setores_info.append((f"setor::{nome_dep}", nome_dep, qtd))
+
+    with st.container(key="tk_painel_topo"):
         st.markdown(
-            '<div style="font-size:0.72rem;font-weight:800;color:#7a5f1a;'
-            'text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">'
-            '📋 Painel de Tickets</div>',
+            '<div class="tk-painel-topo-titulo">📋 Painel de Tickets</div>',
             unsafe_allow_html=True,
         )
-        busca = st.text_input("", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
-                              label_visibility="collapsed", key="tk_busca")
+        st.text_input(
+            "", placeholder="Busca global: ID, assunto, cliente, código, descrição, comentário...",
+            label_visibility="collapsed", key="tk_busca",
+        )
+
+        with st.container(key="tk_view_buttons"):
+            for chave, label in _FILA_DEFS:
+                ativo = st.session_state.tk_fila_selecionada == chave
+                if st.button(f"{label} ({contagens[chave]})", key=f"tkview_{chave}",
+                             type="primary" if ativo else "secondary"):
+                    st.session_state.tk_fila_selecionada = chave
+                    st.session_state.tk_modo = "lista"
+                    st.rerun()
+            for chave, nome_dep, qtd in setores_info:
+                ativo = st.session_state.tk_fila_selecionada == chave
+                if st.button(f"{_swatch_dept(nome_dep)} {nome_dep} ({qtd})", key=f"tkview_{chave}",
+                             type="primary" if ativo else "secondary"):
+                    st.session_state.tk_fila_selecionada = chave
+                    st.session_state.tk_modo = "lista"
+                    st.rerun()
+
+
+def _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
+    """Mostra a lista de tickets da view/departamento selecionado no Painel
+    de Tickets (topo), já aplicando o filtro de busca global. Chamada de
+    dentro da coluna "Lista", que é quem tem a rolagem própria."""
+    busca = st.session_state.get("tk_busca", "")
     b = busca.strip().lower() if busca else ""
 
     def _filtra(lista):
         return [t for t in lista if b in texto_busca(t)] if b else lista
 
-    tab_defs = [
-        ("meus",         "📌 Meus tickets", meus),
-        ("aberto",       "Abertos",         f_abertos),
-        ("em_andamento", "Em andamento",    f_andam),
-        ("urgente",      "Urgentes",        f_urg),
-        ("vencidos",     "SLA vencidos",    f_venc),
-        ("global",       "🌐 Todos",        f_global),
-    ]
+    fila_sel = st.session_state.get("tk_fila_selecionada", "meus")
 
-    # Abas extras: uma por Departamento cadastrado. Mostra os tickets que
-    # aquele setor precisa tratar: os abertos DIRETO pra ele (o caso comum)
-    # + os que outro setor pediu pendência (transparência entre equipes).
-    # Visível a QUALQUER atendente, não só de quem é dono do ticket.
-    deps_cadastrados = [d.get("nome") for d in listar_departamentos() if d.get("nome")]
-    dept_tab_defs = []
-    for nome_dep in deps_cadastrados:
-        pend_lista = tickets_pendentes_do_setor(f_global, nome_dep)
-        qtd = len(pend_lista)
-        label = f"{_swatch_dept(nome_dep)} {nome_dep} ({qtd})"
-        dept_tab_defs.append((f"setor::{nome_dep}", label, pend_lista, nome_dep))
+    mapa_filas = {
+        "meus": meus, "aberto": f_abertos, "em_andamento": f_andam,
+        "urgente": f_urg, "vencidos": f_venc, "global": f_global,
+    }
 
-    labels = [lbl for _, lbl, _ in tab_defs] + [lbl for _, lbl, _, _ in dept_tab_defs]
-    tabs = st.tabs(labels)
+    if fila_sel.startswith("setor::"):
+        nome_dep = fila_sel.split("setor::", 1)[1]
+        filtrados = _filtra(tickets_pendentes_do_setor(f_global, nome_dep))
+        cor = cor_departamento(nome_dep)
+        st.markdown(_html(f"""
+        <div style="font-size:0.82rem;color:#64778d;margin-bottom:8px;">
+            Tickets que o setor <span class="tk-setor-pill" style="background:{cor};">{esc(nome_dep)}</span>
+            precisa tratar: os abertos diretamente para ele + os que outro setor pediu
+            retorno. Qualquer atendente pode ver esta fila — é uma visão de
+            transparência entre equipes, o ticket continua único.
+        </div>"""), unsafe_allow_html=True)
+        st.markdown(f"**{len(filtrados)} ticket(s) pendente(s) com {nome_dep}**")
+        if not filtrados:
+            st.info(f"Nenhuma pendência aberta para {nome_dep} no momento.")
+        else:
+            _render_lista_pendencias_setor(filtrados, nome_dep, user, papel, fila_sel)
+        return
 
-    for (chave, _lbl, lista), tab in zip(tab_defs, tabs[:len(tab_defs)]):
-        with tab:
-            filtrados = _filtra(lista)
-            st.markdown(f"**{len(filtrados)} ticket(s)**")
-            if not filtrados:
-                st.info("Nenhum ticket nesta fila.")
-            else:
-                _render_lista_em_grid(filtrados, user, papel, chave)
-
-    for (chave, _lbl, lista, nome_dep), tab in zip(dept_tab_defs, tabs[len(tab_defs):]):
-        with tab:
-            filtrados = _filtra(lista)
-            cor = cor_departamento(nome_dep)
-            st.markdown(_html(f"""
-            <div style="font-size:0.82rem;color:#64778d;margin-bottom:8px;">
-                Tickets que o setor <span class="tk-setor-pill" style="background:{cor};">{esc(nome_dep)}</span>
-                precisa tratar: os abertos diretamente para ele + os que outro setor pediu
-                retorno. Qualquer atendente pode ver esta fila — é uma visão de
-                transparência entre equipes, o ticket continua único.
-            </div>"""), unsafe_allow_html=True)
-            st.markdown(f"**{len(filtrados)} ticket(s) pendente(s) com {nome_dep}**")
-            if not filtrados:
-                st.info(f"Nenhuma pendência aberta para {nome_dep} no momento.")
-            else:
-                _render_lista_pendencias_setor(filtrados, nome_dep, user, papel, chave)
+    lista = mapa_filas.get(fila_sel, meus)
+    filtrados = _filtra(lista)
+    st.markdown(f"**{len(filtrados)} ticket(s)**")
+    if not filtrados:
+        st.info("Nenhum ticket nesta fila.")
+    else:
+        _render_lista_em_grid(filtrados, user, papel, fila_sel)
 
 
 def _render_lista_pendencias_setor(lista, nome_dep, user, papel, chave):
