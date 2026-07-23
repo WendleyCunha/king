@@ -59,6 +59,14 @@ Novidades desta versão (mantém tudo da v3 + patch de performance):
   antigos/Zendesk, visibilidade por papel, ticket finalizado = somente
   leitura, histórico por cliente, performance com cache, Sync Zendesk,
   exclusão total, Visão Geral da Operação) permanece como na v3.
+
+  [14] TIRINHA HORIZONTAL (padrão único de card de ticket):
+       Todo lugar do sistema que mostra um ticket (Filas de Trabalho, abas
+       por Departamento em Pendências, Visão Geral por Atendente, SLA
+       vencidos) usa agora o MESMO componente visual: `_render_ticket_strip`.
+       É uma única tirinha horizontal (um só bloco de HTML, sem "costura"
+       entre botão e conteúdo), com TODAS as cores/badges/informações que
+       já existiam, e o card inteiro é clicável (botão invisível por cima).
 """
 import streamlit as st
 import pandas as pd
@@ -663,49 +671,16 @@ def renderizar_tickets(papel: str, user: dict = None):
     .tk-badge { background:#e2e8f0; color:#475569; padding:2px 8px;
         border-radius:10px; font-size:0.72rem; font-weight:700; }
     .tk-badge-red { background:#FBF3D9; color:#8A6D1F; }
-    .tk-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
-        padding:14px 16px; margin-bottom:8px; border-left:4px solid #C9A84C; }
-    .tk-card.vencido { border-left:4px solid #8A6D1F; box-shadow:0 0 0 1px #E8D9A6 inset; }
-    .tk-card-header { display:flex; justify-content:space-between;
-        align-items:flex-start; margin-bottom:6px; }
-    .tk-card-title { font-size:0.92rem; font-weight:700; color:#2c3e50; }
-    .tk-card-meta { font-size:0.75rem; color:#64778d; margin-top:4px; }
-    .tk-sla-bar { background:#e8ecf0; border-radius:4px; height:5px; margin:8px 0 4px; }
-    .tk-sla-fill { height:5px; border-radius:4px; }
-    .tk-sla-text { font-size:0.7rem; color:#64778d; }
-    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
-    .tk-blink { animation: tkpiscar 1s infinite;
-        background:#8A6D1F; color:#fff; padding:2px 10px; border-radius:12px;
-        font-size:0.72rem; font-weight:800; display:inline-block; }
     .tk-banner { animation: tkpiscar 1.2s infinite;
         background:#FBF3D9; color:#7A5C12; border:2px solid #8A6D1F;
         border-radius:10px; padding:12px 16px; margin-bottom:14px;
         font-weight:800; font-size:0.95rem; }
+    @keyframes tkpiscar { 0%,100%{opacity:1;} 50%{opacity:.30;} }
+    .tk-blink { animation: tkpiscar 1s infinite;
+        background:#8A6D1F; color:#fff; padding:2px 10px; border-radius:12px;
+        font-size:0.72rem; font-weight:800; display:inline-block; }
     .tk-equipe-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:14px 16px; margin-bottom:8px; border-top:4px solid #C9A84C; }
-
-    div[class*="st-key-tkcard_"] button {
-        text-align:left !important; justify-content:flex-start !important;
-        background:#fff !important; border:1px solid #e2e8f0 !important;
-        border-bottom:none !important; border-left:4px solid #C9A84C !important;
-        border-radius:10px 10px 0 0 !important; color:#2c3e50 !important;
-        font-weight:700 !important; font-size:0.92rem !important;
-        padding:12px 14px 8px !important; margin-bottom:0 !important;
-        transition:background .15s, box-shadow .15s; }
-    div[class*="st-key-tkcard_"] button:hover {
-        background:#FBF6E6 !important; border-color:#C9A84C !important; }
-    div[class*="st-key-tkcard_venc_"] button {
-        border-left-color:#8A6D1F !important; animation:tkbordapiscar 1s infinite; }
-    div[class*="st-key-tkcard_warn_"] button {
-        border-left-color:#D4A12C !important; animation:tkbordapiscarsuave 1.6s infinite; }
-    @keyframes tkbordapiscar { 0%,100%{box-shadow:0 0 0 0 rgba(138,109,31,0);} 50%{box-shadow:0 0 0 3px rgba(138,109,31,.35);} }
-    @keyframes tkbordapiscarsuave { 0%,100%{box-shadow:0 0 0 0 rgba(212,161,44,0);} 50%{box-shadow:0 0 0 3px rgba(212,161,44,.30);} }
-    .tk-cardbody { background:#fff; border:1px solid #e2e8f0; border-top:none;
-        border-left:4px solid #C9A84C; border-radius:0 0 10px 10px;
-        padding:4px 14px 12px; margin:-10px 0 12px; }
-    .tk-cardbody.venc { border-left-color:#8A6D1F; }
-    .tk-cardbody.warn { border-left-color:#D4A12C; }
-    .tk-cardmeta { font-size:0.75rem; color:#64778d; margin:2px 0 6px; }
     .tk-blink-venc { animation:tkpiscar 1s infinite; background:#8A6D1F; color:#fff;
         padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:800; }
     .tk-blink-warn { animation:tkpiscar 1.6s infinite; background:#FBF3D9; color:#7A5C12;
@@ -724,6 +699,59 @@ def renderizar_tickets(papel: str, user: dict = None):
         font-weight:800; color:#fff; display:inline-block; }
     .tk-setor-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px;
         padding:12px 14px; margin-bottom:10px; }
+
+    /* ═══════════════════════════════════════════════════════════
+       TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket, usado em
+       TODO lugar do sistema que mostra um ticket (Filas de Trabalho,
+       abas por Departamento, Visão Geral por Atendente, SLA vencidos).
+       Um único bloco de HTML (sem "costura" entre botão e conteúdo).
+       ═══════════════════════════════════════════════════════════ */
+    .tk-strip {
+        background:#fff; border:1px solid #e2e8f0; border-left:5px solid #C9A84C;
+        border-radius:10px; padding:10px 16px 8px; transition:box-shadow .15s;
+    }
+    .tk-strip-top { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+        justify-content:space-between; }
+    .tk-strip-id { font-weight:800; color:#2c3e50; font-size:0.85rem; white-space:nowrap; }
+    .tk-strip-title { font-weight:700; color:#2c3e50; font-size:0.92rem; flex:1; min-width:180px; }
+    .tk-strip-pills { white-space:nowrap; }
+    .tk-strip-meta { font-size:0.76rem; color:#64778d; margin-top:5px; line-height:1.6; }
+    .tk-strip-bottom { display:flex; align-items:center; gap:10px; margin-top:7px; }
+    .tk-strip-slabar { flex:1; background:#e8ecf0; border-radius:4px; height:5px; }
+    .tk-strip-slafill { height:5px; border-radius:4px; }
+    .tk-strip-slatext { font-size:0.72rem; color:#64778d; white-space:nowrap; }
+
+    /* Container que "embrulha" cada tirinha: recebe o botão invisível que
+       cobre 100% da área, tornando o card inteiro clicável sem precisar de
+       um botão visualmente separado do conteúdo (o que causava o efeito de
+       "3 caixinhas soltas" na versão anterior). */
+    div[class*="st-key-tkwrap_"] {
+        position: relative;
+        margin-bottom: 10px;
+    }
+    div[class*="st-key-tkwrap_"] div[data-testid="stButton"] {
+        margin: 0 !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+    }
+    div[class*="st-key-tkwrap_"] button {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        opacity: 0;
+        z-index: 5;
+        cursor: pointer;
+        padding: 0 !important;
+    }
+    div[class*="st-key-tkwrap_"]:hover .tk-strip {
+        box-shadow: 0 2px 10px rgba(0,0,0,0.10);
+    }
+
     button[kind="primary"], button[kind="primaryFormSubmit"],
     button[data-testid="baseButton-primary"], button[data-testid="baseButton-primaryFormSubmit"],
     [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
@@ -829,7 +857,7 @@ def renderizar_tickets(papel: str, user: dict = None):
 
 
 # ───────────────────────────────────────────────────────────────────
-# PAGINAÇÃO (9 tickets por página, em qualquer grid de cards)
+# PAGINAÇÃO (9 tickets por página, em qualquer lista de tirinhas)
 # ───────────────────────────────────────────────────────────────────
 PAGE_SIZE_CARDS = 9
 
@@ -932,80 +960,159 @@ def _render_lista_pendencias_setor(lista, nome_dep, user, papel, chave):
     pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(lista, f"pend_{chave}")
     for t in pagina_itens:
         tid = t.get("id","")
-        cor = cor_departamento(nome_dep)
-        idv = t.get("id_zendesk", tid[:8])
-        titulo = str(t.get("assunto","Sem título"))[:60]
         dep_origem = t.get("departamento") or t.get("categoria") or "—"
-        cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
         eh_dono = dep_origem == nome_dep
         pedidos_abertos = solicitacoes_abertas_para_setor(t, nome_dep)
 
-        with st.container(border=True):
-            c1, c2 = st.columns([4, 1])
-            with c1:
-                tag_origem = (
-                    f'<span class="tk-setor-pill" style="background:{cor};">🏠 aberto aqui</span>'
-                    if eh_dono else
-                    f'<span class="tk-setor-pill" style="background:{cor_departamento(dep_origem)};">'
-                    f'↩ vindo de {esc(dep_origem)}</span>'
-                )
-                st.markdown(_html(f"""
-                <div>
-                    <b style="color:#2c3e50;">#{esc(idv)} — {esc(titulo)}</b> {tag_origem}<br>
-                    <span style="font-size:0.78rem;color:#64778d;">
-                        🏢 {esc(dep_origem)} &nbsp;·&nbsp; 🧾 {esc(cliente)}
-                    </span>
-                </div>"""), unsafe_allow_html=True)
-            with c2:
-                if st.button("🔍 Abrir", key=f"pendopen_{chave}_{tid}", use_container_width=True):
-                    abrir_ticket_popup(tid, user, papel)
+        # Tag de origem — mesma tirinha padrão do resto do sistema, só que
+        # com esta tag extra pra deixar claro se o chamado nasceu neste
+        # setor ou veio pedido de outro.
+        cor = cor_departamento(nome_dep)
+        if eh_dono:
+            tag_origem = f'<span class="tk-setor-pill" style="background:{cor};">🏠 aberto aqui</span> '
+        else:
+            cor_o = cor_departamento(dep_origem)
+            tag_origem = (f'<span class="tk-setor-pill" style="background:{cor_o};">'
+                          f'↩ vindo de {esc(dep_origem)}</span> ')
 
-            if eh_dono and not pedidos_abertos:
-                st.caption("🏠 Chamado aberto diretamente neste setor — aguardando tratativa/classificação.")
+        _render_ticket_strip(t, user, papel, key_ctx=f"setor_{chave}_{tid}",
+                             extra_badge_html=tag_origem)
 
-            for pedido in pedidos_abertos:
-                st.markdown(_html(f"""
-                <div style="border-left:3px solid {cor};background:#fafafa;border-radius:6px;
-                            padding:8px 10px;margin:6px 0;">
-                    <span class="tk-setor-pill" style="background:{cor_departamento(pedido.get('setor_origem',''))};">
-                        {esc(pedido.get('setor_origem',''))}
-                    </span>
-                    <span style="font-size:0.78rem;color:#64778d;"> pediu em
-                    {esc(str(pedido.get('solicitado_em',''))[:16])} ({esc(pedido.get('solicitado_por_nome',''))}):</span>
-                    <div style="font-size:0.85rem;color:#2c3e50;margin-top:2px;">{esc(pedido.get('mensagem',''))}</div>
-                </div>"""), unsafe_allow_html=True)
+        if eh_dono and not pedidos_abertos:
+            st.caption("🏠 Chamado aberto diretamente neste setor — aguardando tratativa/classificação.")
 
-                dep_user = user.get("departamento")
-                pode_responder = (papel in ("supervisor", "adm")) or (dep_user == nome_dep)
-                if pode_responder:
-                    with st.form(f"form_resp_{chave}_{tid}_{pedido.get('id')}", clear_on_submit=True):
-                        resp_txt = st.text_area("Resposta", height=70, key=f"resp_txt_{tid}_{pedido.get('id')}",
-                                                placeholder="Escreva a resposta pro setor solicitante...")
-                        if st.form_submit_button(f"✅ Responder e concluir pendência ({nome_dep})",
-                                                 type="primary", use_container_width=True):
-                            if resp_txt.strip():
-                                responder_solicitacao_setor(tid, pedido, resp_txt.strip(), user)
-                                st.success("Pendência respondida!"); time.sleep(.6); st.rerun()
-                            else:
-                                st.warning("Escreva uma resposta antes de concluir.")
+        for pedido in pedidos_abertos:
+            st.markdown(_html(f"""
+            <div style="border-left:3px solid {cor};background:#fafafa;border-radius:6px;
+                        padding:8px 10px;margin:6px 0;">
+                <span class="tk-setor-pill" style="background:{cor_departamento(pedido.get('setor_origem',''))};">
+                    {esc(pedido.get('setor_origem',''))}
+                </span>
+                <span style="font-size:0.78rem;color:#64778d;"> pediu em
+                {esc(str(pedido.get('solicitado_em',''))[:16])} ({esc(pedido.get('solicitado_por_nome',''))}):</span>
+                <div style="font-size:0.85rem;color:#2c3e50;margin-top:2px;">{esc(pedido.get('mensagem',''))}</div>
+            </div>"""), unsafe_allow_html=True)
+
+            dep_user = user.get("departamento")
+            pode_responder = (papel in ("supervisor", "adm")) or (dep_user == nome_dep)
+            if pode_responder:
+                with st.form(f"form_resp_{chave}_{tid}_{pedido.get('id')}", clear_on_submit=True):
+                    resp_txt = st.text_area("Resposta", height=70, key=f"resp_txt_{tid}_{pedido.get('id')}",
+                                            placeholder="Escreva a resposta pro setor solicitante...")
+                    if st.form_submit_button(f"✅ Responder e concluir pendência ({nome_dep})",
+                                             type="primary", use_container_width=True):
+                        if resp_txt.strip():
+                            responder_solicitacao_setor(tid, pedido, resp_txt.strip(), user)
+                            st.success("Pendência respondida!"); time.sleep(.6); st.rerun()
+                        else:
+                            st.warning("Escreva uma resposta antes de concluir.")
     _nav_paginas(pag_atual, total_paginas, pag_key, total)
+
+
+# ───────────────────────────────────────────────────────────────────
+# TIRINHA HORIZONTAL — componente ÚNICO de card de ticket
+# ───────────────────────────────────────────────────────────────────
+def _badges_ticket(t, user) -> str:
+    """Badges/alertas coloridos do ticket — usados em QUALQUER lugar do
+    sistema que mostre a tirinha do ticket: vencido, aviso de <30min,
+    validação pendente, nova interação não vista e pendências abertas com
+    outros setores."""
+    estado = sla_estado(t)
+    badge = ""
+    if estado == "venc":
+        badge += '<span class="tk-blink-venc">⛔ PRAZO VENCIDO</span> '
+    elif estado == "warn":
+        badge += '<span class="tk-blink-warn">⏰ Faltam &lt; 30min</span> '
+    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario") \
+            and resolvido_em_validacao(t):
+        badge += '<span class="tk-badge-val">✔ valide este chamado</span> '
+    if tem_interacao_nao_vista(t, user):
+        badge += '<span class="tk-blink-info">🔵 Nova interação</span> '
+    for pend in solicitacoes_abertas(t):
+        cor_pend = cor_departamento(pend.get("setor_destino",""))
+        badge += (f'<span class="tk-setor-pill" style="background:{cor_pend};">'
+                  f'📨 aguarda {esc(pend.get("setor_destino",""))}</span> ')
+    return badge
+
+
+def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
+    """
+    TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket usado em TODO o
+    sistema (Filas de Trabalho, abas por Departamento, Visão Geral por
+    Atendente, SLA vencidos). Um único bloco de HTML (sem "costura" visual
+    entre botão e conteúdo) com TODAS as informações e cores já existentes:
+    ícone de origem, ID, título, departamento, motivo (pai › filho › etapa),
+    cliente, nº de comentários, data de criação, pill de status, pill de
+    prioridade, badges (vencido / aviso <30min / validação pendente / nova
+    interação / pendências de setor) e a barra + texto do SLA/prazo ativo.
+
+    O card inteiro é clicável — um botão invisível cobre toda a tirinha via
+    CSS (ver `st-key-tkwrap_` no bloco de estilos), então não existe mais um
+    botão visualmente separado do conteúdo (o efeito de "3 caixinhas soltas"
+    da versão anterior).
+
+    extra_badge_html: badge(s) adicional(is) específico(s) do contexto (ex.:
+    a tag "🏠 aberto aqui" / "↩ vindo de X" usada na aba de um Departamento).
+    """
+    tid    = t.get("id","")
+    estado = sla_estado(t)
+    sl, spct, svenc = sla_restante(t)
+    sv_label, sbg, sc, _ = STATUS_CFG.get(t.get("status","aberto"), ("—","#fff","#000","#000"))
+    pv_label, pbg, pc    = PRIO_CFG.get(t.get("prioridade","normal"), ("—","#fff","#000"))
+    icon    = "🔗" if "zendesk" in t.get("origem","") else "🏠"
+    idv     = t.get("id_zendesk", tid[:8])
+    titulo  = str(t.get("assunto","Sem título"))[:75]
+    dep     = t.get("departamento") or t.get("categoria") or "—"
+    caminho_mot = _caminho_motivo(t)
+    cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
+    cli_cod = t.get("cliente_codigo")
+    cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
+    num_com = len(t.get("comentarios", []))
+    criado  = str(t.get("criado_em",""))[:16]
+
+    if   estado == "venc": barra = GOLD_VENC
+    elif estado == "warn": barra = GOLD_WARN
+    elif spct > 70:        barra = "#CA8A04"
+    else:                  barra = "#16A34A"
+
+    borda = GOLD_VENC if estado == "venc" else ("#D4A12C" if estado == "warn" else "#C9A84C")
+    badges   = (extra_badge_html or "") + _badges_ticket(t, user)
+    meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
+    meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
+
+    with st.container(key=f"tkwrap_{key_ctx}"):
+        st.markdown(_html(f"""
+        <div class="tk-strip" style="border-left-color:{borda};">
+            <div class="tk-strip-top">
+                <span class="tk-strip-id">{icon} #{esc(idv)}</span>
+                <span class="tk-strip-title">{esc(titulo)}</span>
+                <span class="tk-strip-pills">{pill(sv_label,sbg,sc)} {pill(pv_label,pbg,pc)}</span>
+            </div>
+            <div class="tk-strip-meta">
+                🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)}{meta_com}{meta_mot}
+                &nbsp;·&nbsp; 🕐 {esc(criado)} &nbsp; {badges}
+            </div>
+            <div class="tk-strip-bottom">
+                <div class="tk-strip-slabar">
+                    <div class="tk-strip-slafill" style="width:{spct:.0f}%;background:{barra};"></div>
+                </div>
+                <div class="tk-strip-slatext">{esc(sla_label(t))}: <b style="color:{barra};">{esc(sl)}</b></div>
+            </div>
+        </div>
+        """), unsafe_allow_html=True)
+        if st.button("", key=f"tkbtn_{key_ctx}", use_container_width=True):
+            abrir_ticket_popup(tid, user, papel)
 
 
 # ───────────────────────────────────────────────────────────────────
 # COMPONENTES
 # ───────────────────────────────────────────────────────────────────
 def _render_lista_em_grid(filtrados, user, papel, fila):
-    ctrl1, ctrl2 = st.columns([2, 1])
-    with ctrl1:
-        modo_agrupar = st.selectbox(
-            "🗂️ Organizar por",
-            ["Motivo Pai", "Departamento", "Sem agrupamento"],
-            index=0, key=f"tk_agrupar_{fila}"
-        )
-    with ctrl2:
-        n_cols = st.selectbox(
-            "🔳 Cards por linha", [3, 4], index=0, key=f"tk_ncols_{fila}"
-        )
+    modo_agrupar = st.selectbox(
+        "🗂️ Organizar por",
+        ["Motivo Pai", "Departamento", "Sem agrupamento"],
+        index=0, key=f"tk_agrupar_{fila}"
+    )
 
     from collections import defaultdict
     grupos = defaultdict(list)
@@ -1037,120 +1144,14 @@ def _render_lista_em_grid(filtrados, user, papel, fila):
         pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
             lst, f"lista_{fila}_{chave}"
         )
-        for i in range(0, len(pagina_itens), n_cols):
-            cols_grid = st.columns(n_cols)
-            for j, t in enumerate(pagina_itens[i:i + n_cols]):
-                with cols_grid[j]:
-                    _render_card_clicavel(t, user, papel, fila)
+        for t in pagina_itens:
+            _render_ticket_strip(t, user, papel, key_ctx=f"{fila}_{chave}_{t.get('id','')}")
         _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
 def _caminho_motivo(t) -> str:
     partes = [p for p in [t.get("motivo_pai"), t.get("motivo_filho"), t.get("etapa_atual")] if p]
     return " › ".join(partes) if partes else ""
-
-
-def _render_card_clicavel(t, user, papel, fila="x"):
-    tid    = t.get("id","")
-    estado = sla_estado(t)
-    sl, spct, svenc = sla_restante(t)
-    sv = STATUS_CFG.get(t.get("status","aberto"), ("—",))[0]
-    pv = PRIO_CFG.get(t.get("prioridade","normal"), ("—",))[0]
-    icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
-    idv  = t.get("id_zendesk", tid[:8])
-    titulo = str(t.get("assunto","Sem título"))[:60]
-    dep    = t.get("departamento") or t.get("categoria") or "—"
-    caminho_mot = _caminho_motivo(t)
-    cliente = t.get("cliente_nome") or t.get("solicitante_nome") or "—"
-    cli_cod = t.get("cliente_codigo")
-    cliente_txt = cliente + (f" ({cli_cod})" if cli_cod else "")
-    num_com = len(t.get("comentarios", []))
-    pendencias_abertas = solicitacoes_abertas(t)
-
-    if   estado == "venc": barra = GOLD_VENC
-    elif estado == "warn": barra = GOLD_WARN
-    elif spct > 70:        barra = "#CA8A04"
-    else:                  barra = "#16A34A"
-
-    if estado == "venc":
-        badge = '<span class="tk-blink-venc">⛔ PRAZO VENCIDO</span>'
-    elif estado == "warn":
-        badge = '<span class="tk-blink-warn">⏰ Faltam &lt; 30min</span>'
-    else:
-        badge = ""
-
-    if t.get("status") == "resolvido" and t.get("aberto_por") == user.get("usuario") \
-            and resolvido_em_validacao(t):
-        badge += ' <span class="tk-badge-val">✔ valide este chamado</span>'
-
-    if tem_interacao_nao_vista(t, user):
-        badge += ' <span class="tk-blink-info">🔵 Nova interação</span>'
-
-    for pend in pendencias_abertas:
-        cor_pend = cor_departamento(pend.get("setor_destino",""))
-        badge += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
-                  f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
-
-    if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkcard_{estado}_{tid}_{fila}",
-                 use_container_width=True):
-        abrir_ticket_popup(tid, user, papel)
-
-    meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
-    meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
-    st.markdown(_html(f"""
-    <div class="tk-cardbody {estado if estado!='ok' else ''}">
-        <div class="tk-cardmeta">
-            🏢 {esc(dep)} &nbsp;·&nbsp; 🧾 {esc(cliente_txt)} &nbsp;·&nbsp;
-            <b>{esc(sv)}</b> / {esc(pv)}{meta_com}{meta_mot} &nbsp; {badge}
-        </div>
-        <div class="tk-sla-bar">
-            <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{barra};"></div>
-        </div>
-        <div class="tk-sla-text">{esc(sla_label(t))}: <b style="color:{barra};">{esc(sl)}</b></div>
-    </div>"""), unsafe_allow_html=True)
-
-
-def _render_card(t):
-    tid   = t.get("id","")
-    sl, spct, svenc = sla_restante(t)
-    sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
-    pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-    origem_icon = "🔗" if "zendesk" in t.get("origem","") else "🏠"
-    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
-    num_com = len(t.get("comentarios",[]))
-    pendente_vencido = ticket_vencido_pendente(t)
-
-    dep    = esc(t.get("departamento") or t.get("categoria") or "—")
-    caminho_mot = esc(_caminho_motivo(t))
-    titulo = esc(str(t.get("assunto","Sem título"))[:55])
-    id_vis = esc(t.get("id_zendesk", tid[:8]))
-    cliente = esc(t.get("cliente_nome") or t.get("solicitante_nome", t.get("solicitante","—")))
-    cli_cod = t.get("cliente_codigo")
-    cliente_txt = f"{cliente}" + (f" ({esc(cli_cod)})" if cli_cod else "")
-    criado = esc(t.get("criado_em","")[:16])
-
-    blink    = '<span class="tk-blink">PRAZO VENCIDO</span>' if pendente_vencido else ""
-    meta_mot = f"&nbsp;·&nbsp; 📂 {caminho_mot}" if caminho_mot else ""
-    meta_com = f"&nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
-
-    st.markdown(_html(f"""
-    <div class="tk-card {'vencido' if pendente_vencido else ''}">
-        <div class="tk-card-header">
-            <div>
-                <div class="tk-card-title">{origem_icon} #{id_vis} — {titulo}</div>
-                <div class="tk-card-meta">
-                    🏢 {dep}{meta_mot} &nbsp;·&nbsp; 🧾 {cliente_txt} &nbsp;·&nbsp; {criado}{meta_com}
-                </div>
-            </div>
-            <div style="text-align:right;white-space:nowrap;">
-                {blink} {pill(sv,sbg,sc)} {pill(pv,pbg,pc)}
-            </div>
-        </div>
-        <div class="tk-sla-bar">
-            <div class="tk-sla-fill" style="width:{spct:.0f}%;background:{sla_cor};"></div>
-        </div>
-        <div class="tk-sla-text">{esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b></div>
-    </div>"""), unsafe_allow_html=True)
 
 
 def _carregar_e_render_detalhe(tid, user, papel, modal=False):
@@ -2036,21 +2037,11 @@ def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
                         st.caption("⚠️ Não há outro atendente neste departamento para receber a transferência.")
 
                 st.markdown("---")
-                n_cols_eq = st.selectbox(
-                    "🔳 Cards por linha", [3, 4], index=0, key=f"eq_ncols_{uname}"
-                )
                 pagina_itens, pag_atual, total_paginas, pag_key, total = _paginar(
                     meus, f"eq_{uname}"
                 )
-                for i in range(0, len(pagina_itens), n_cols_eq):
-                    cols_grid = st.columns(n_cols_eq)
-                    for j, t in enumerate(pagina_itens[i:i + n_cols_eq]):
-                        with cols_grid[j]:
-                            _render_card(t)
-                            if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
-                                         key=f"eqopen_{uname}_{t.get('id','')}",
-                                         use_container_width=True):
-                                abrir_ticket_popup(t.get("id"), user, papel)
+                for t in pagina_itens:
+                    _render_ticket_strip(t, user, papel, key_ctx=f"eq_{uname}_{t.get('id','')}")
                 _nav_paginas(pag_atual, total_paginas, pag_key, total)
 
 
@@ -2147,16 +2138,9 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
     st.dataframe(df_det, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.caption("Clique para abrir um ticket específico:")
-    n_cols_sla = 3
-    for i in range(0, len(perdidos), n_cols_sla):
-        cols_grid = st.columns(n_cols_sla)
-        for j, t in enumerate(perdidos[i:i + n_cols_sla]):
-            with cols_grid[j]:
-                _render_card(t)
-                if st.button(f"🔍 Abrir #{t.get('id_zendesk', t.get('id','')[:8])}",
-                             key=f"slaopen_{t.get('id','')}", use_container_width=True):
-                    abrir_ticket_popup(t.get("id"), user, papel)
+    st.caption("Clique em qualquer ticket abaixo para abrir o detalhe:")
+    for t in perdidos:
+        _render_ticket_strip(t, user, papel, key_ctx=f"slaopen_{t.get('id','')}")
 
 
 def _aba_exportar(tickets: list, nomes_users: dict, dep_alvo: str, data_ini=None, data_fim=None):
