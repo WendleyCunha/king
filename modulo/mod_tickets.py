@@ -648,10 +648,22 @@ def deletar_todos_tickets() -> int:
 def _render_estilo_paineis_redimensionaveis():
     """CSS + JS que transforma a divisa entre as colunas de 'Filas' / 'Lista'
     / 'Detalhe do ticket' em barras arrastáveis (mesmo padrão de painéis
-    redimensionáveis de clientes de e-mail tipo Outlook/Gmail). Puramente
+    redimensionáveis de clientes de e-mail tipo Outlook/Gmail, e do mesmo
+    jeito que a barra lateral NATIVA do Streamlit já se comporta). Puramente
     client-side: a largura escolhida fica salva no sessionStorage do
     navegador (por aba) e é reaplicada a cada rerun do Streamlit, então o
     ajuste "sobrevive" a cliques/reruns normais (mas não a um F5).
+
+    IMPORTANTE: o CSS é injetado via st.markdown normalmente (funciona sem
+    problema, `<style>` inserido via innerHTML é aplicado pelo navegador).
+    Mas o <script> NÃO pode ir por st.markdown: por especificação do HTML,
+    tags <script> inseridas via innerHTML (que é como o Streamlit renderiza
+    st.markdown) simplesmente NUNCA executam — não é bug do Streamlit, é
+    proteção do próprio navegador. Por isso o script roda dentro de um
+    componente de verdade (`st.components.v1.html`, que cria um iframe onde
+    scripts executam normalmente) e, de dentro dele, usa
+    `window.parent.document` para enxergar e arrastar os elementos da
+    página principal (funciona porque o iframe é same-origin).
 
     Depende de atributos internos do Streamlit (data-testid="stColumn" /
     "stHorizontalBlock") que não são API pública — se uma futura versão do
@@ -677,17 +689,23 @@ def _render_estilo_paineis_redimensionaveis():
         background: #C9A84C; height: 70px;
     }
     </style>
+    """), unsafe_allow_html=True)
+
+    import streamlit.components.v1 as components
+    components.html("""
     <script>
     (function() {
+        const doc = window.parent.document;
+
         function montarResizers() {
-            const wrap = document.querySelector('div[class*="st-key-tk_paineis"]');
+            const wrap = doc.querySelector('div[class*="st-key-tk_paineis"]');
             if (!wrap) return false;
             const row = wrap.querySelector('div[data-testid="stHorizontalBlock"]');
             if (!row) return false;
             const cols = Array.from(row.querySelectorAll(':scope > div[data-testid="stColumn"]'));
             if (cols.length < 2) return false;
 
-            row.querySelectorAll('.tk-resizer').forEach(el => el.remove());
+            row.querySelectorAll('.tk-resizer').forEach(function(el) { el.remove(); });
 
             function aplicarLarguraSalva(chave, col) {
                 const salva = sessionStorage.getItem(chave);
@@ -702,7 +720,7 @@ def _render_estilo_paineis_redimensionaveis():
             if (cols.length >= 3) aplicarLarguraSalva('tk_larg_detalhe', cols[2]);
 
             function criarResizer(colAlvo, chave, cresceParaDireita, referencia, min, max) {
-                const barra = document.createElement('div');
+                const barra = doc.createElement('div');
                 barra.className = 'tk-resizer';
                 function posicionar() {
                     barra.style.left = (referencia.getBoundingClientRect().right
@@ -726,11 +744,11 @@ def _render_estilo_paineis_redimensionaveis():
                     function soltar() {
                         barra.classList.remove('tk-ativo');
                         sessionStorage.setItem(chave, Math.round(colAlvo.getBoundingClientRect().width));
-                        document.removeEventListener('mousemove', mover);
-                        document.removeEventListener('mouseup', soltar);
+                        doc.removeEventListener('mousemove', mover);
+                        doc.removeEventListener('mouseup', soltar);
                     }
-                    document.addEventListener('mousemove', mover);
-                    document.addEventListener('mouseup', soltar);
+                    doc.addEventListener('mousemove', mover);
+                    doc.addEventListener('mouseup', soltar);
                 });
             }
 
@@ -750,7 +768,7 @@ def _render_estilo_paineis_redimensionaveis():
         setTimeout(function() { clearInterval(tentativa); }, 6000);
     })();
     </script>
-    """), unsafe_allow_html=True)
+    """, height=0, width=0)
 
 
 # ═══════════════════════════════════════════════════════════════════
