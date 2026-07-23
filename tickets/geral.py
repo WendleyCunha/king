@@ -12,7 +12,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 
-from ..mod_motivos import motivos_pai_do_departamento
+from modulo.mod_motivos import motivos_pai_do_departamento
 from .common import (
     BRT, COLECAO, get_db, STATUS_CFG, PRIO_CFG, STATUS_ABERTOS,
     sla_foi_perdido, esc, _html, listar_departamentos, listar_usuarios,
