@@ -55,7 +55,7 @@ def pode_exportar(user: dict) -> bool:
     return "exportar" in modulos_do_usuario(user)
 
 def pode_deletar(user: dict) -> bool:
-    return user.get("role") == "adm"
+    return user.get("role") in ("adm", "supervisor")
 
 # ── Auth ──────────────────────────────────────────────────────────
 def verificar_login(usuario: str, senha: str):
