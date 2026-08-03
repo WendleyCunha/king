@@ -703,50 +703,94 @@ def _tab_inventario(pode_edit):
     st.markdown("#### 📋 Inventário de atividades")
     st.caption("Antes de qualquer entrevista: liste os tipos de atividade já conhecidos "
                "(tickets, tags do sistema, controles paralelos por fora do oficial). Também é "
-               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo. "
-               "Para excluir uma linha direto na tabela, selecione-a (clique no início da linha) "
-               "e aperte a tecla Delete/Backspace — ou use o campo abaixo.")
-    editado = _editor_tabela_simples(
-        "inventario",
-        {
-            "atividade": st.column_config.TextColumn("Atividade", width="large"),
-            "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_INVENTARIO),
-            "descricao": st.column_config.TextColumn("Descrição / exemplo", width="large"),
-            "registrada": st.column_config.SelectboxColumn("Já registrada oficialmente?", options=STATUS_REGISTRADA),
-        },
-        ["atividade", "categoria", "descricao", "registrada"],
-        pode_edit, "diag_editor_inventario",
-    )
+               "alimentado automaticamente por atividades novas lançadas no Diário de Bordo.")
+
+    inventario = _ler("inventario", [])
+
+    # ── Tabela de EDIÇÃO — apenas edita células (categoria, descrição etc).
+    # num_rows="fixed" desliga de propósito o adicionar/excluir linha DENTRO
+    # do grid: é exatamente ali que o Streamlit tem o bug de "linha excluída
+    # volta depois". Adicionar e excluir agora têm seus próprios controles
+    # abaixo, que leem/gravam direto no Firestore — sem depender de nenhum
+    # estado interno do widget.
+    if inventario:
+        df = pd.DataFrame(inventario)
+        for c in ["atividade", "categoria", "descricao", "registrada"]:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[["atividade", "categoria", "descricao", "registrada"]].fillna("")
+
+        editado = st.data_editor(
+            df, num_rows="fixed", use_container_width=True, hide_index=True,
+            key="diag_editor_inventario_fixed",
+            column_config={
+                "atividade": st.column_config.TextColumn("Atividade", width="large"),
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_INVENTARIO),
+                "descricao": st.column_config.TextColumn("Descrição / exemplo", width="large"),
+                "registrada": st.column_config.SelectboxColumn("Já registrada oficialmente?", options=STATUS_REGISTRADA),
+            },
+            disabled=not pode_edit,
+            height=_ALTURA_TABELA_PADRAO,
+        ).fillna("")
+
+        if pode_edit and not editado.equals(df):
+            _salvar("inventario", editado.to_dict("records"))
+            _opcoes_atividades_inventario.clear()
+            st.rerun()
+    else:
+        st.info("Nenhuma atividade cadastrada ainda.")
+        editado = pd.DataFrame(columns=["atividade", "categoria", "descricao", "registrada"])
 
     if pode_edit:
         st.markdown("---")
-        st.markdown("##### 🗑️ Excluir atividade")
-        atividades_atuais = sorted({(a or "").strip() for a in editado["atividade"] if (a or "").strip()})
-        if atividades_atuais:
-            c1, c2 = st.columns([3, 1])
-            escolha_excluir = c1.selectbox(
-                "Escolha a atividade para excluir", ["— selecione —"] + atividades_atuais,
-                key="diag_inventario_excluir_sel",
-            )
-            if c2.button("🗑️ Excluir", key="diag_inventario_excluir_btn", use_container_width=True,
-                         disabled=(escolha_excluir == "— selecione —")):
-                inventario_atual = _ler("inventario", [])
-                norm_alvo = normalizar_texto(escolha_excluir)
-                inventario_novo = [i for i in inventario_atual
-                                    if normalizar_texto(i.get("atividade", "")) != norm_alvo]
-                _salvar("inventario", inventario_novo)
-                _opcoes_atividades_inventario.clear()
-                st.success(f"Atividade **{escolha_excluir}** excluída do Inventário.")
-                _renovar_editor("diag_editor_inventario")
-        else:
+        st.markdown("##### ➕ Adicionar nova atividade")
+        with st.form("diag_form_add_inventario", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            nova_ativ = c1.text_input("Atividade *")
+            nova_cat = c2.selectbox("Categoria", [""] + CATEGORIAS_INVENTARIO)
+            nova_desc = st.text_input("Descrição / exemplo")
+            nova_reg = st.selectbox("Já registrada oficialmente?", [""] + STATUS_REGISTRADA)
+            if st.form_submit_button("💾 Adicionar", type="primary", use_container_width=True):
+                if nova_ativ.strip():
+                    inv_atual = _ler("inventario", [])
+                    norm_nova = normalizar_texto(nova_ativ)
+                    if norm_nova in {normalizar_texto(i.get("atividade", "")) for i in inv_atual}:
+                        st.warning(f"'{nova_ativ.strip()}' já existe no Inventário.")
+                    else:
+                        inv_atual.append({
+                            "atividade": nova_ativ.strip(), "categoria": nova_cat,
+                            "descricao": nova_desc, "registrada": nova_reg,
+                        })
+                        _salvar("inventario", inv_atual)
+                        _opcoes_atividades_inventario.clear()
+                        st.success(f"Atividade '{nova_ativ.strip()}' adicionada!")
+                        st.rerun()
+                else:
+                    st.warning("Informe o nome da atividade.")
+
+        st.markdown("---")
+        st.markdown("##### 🗑️ Excluir atividades")
+        st.caption("Clique no 🗑️ ao lado da atividade que deseja excluir — a exclusão é imediata "
+                   "e definitiva (grava direto no banco, sem depender da tabela acima).")
+        inventario_atual = _ler("inventario", [])
+        if not inventario_atual:
             st.caption("Nenhuma atividade cadastrada ainda.")
+        else:
+            for idx, item in enumerate(inventario_atual):
+                nome_ativ = (item.get("atividade") or "").strip() or f"(sem nome — linha {idx + 1})"
+                col_nome, col_cat, col_btn = st.columns([4, 2, 1])
+                col_nome.markdown(f"**{nome_ativ}**")
+                col_cat.caption(item.get("categoria") or "—")
+                if col_btn.button("🗑️ Excluir", key=f"del_inv_row_{idx}", use_container_width=True):
+                    inv_novo = [i for j, i in enumerate(inventario_atual) if j != idx]
+                    _salvar("inventario", inv_novo)
+                    _opcoes_atividades_inventario.clear()
+                    st.success(f"Atividade '{nome_ativ}' excluída.")
+                    st.rerun()
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Inventário (Excel)", "inventario_atividades", "Inventario",
-                 editado.to_dict("records"))
-
-
-# ─────────────────────────────────────────────────────────────
+                 editado.to_dict("records") if not editado.empty else inventario)# ─────────────────────────────────────────────────────────────
 # 03 · Organograma + RACI preliminar (por tipo de demanda)
 # ─────────────────────────────────────────────────────────────
 def _tab_organograma(pode_edit):
