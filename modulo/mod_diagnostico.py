@@ -14,6 +14,18 @@
 # suficiente para o volume de uma equipe de backoffice e mais simples
 # de manter do que um documento por linha.
 #
+# [v_fix_delete] BUGFIX (linha excluída "volta" depois de um rerun):
+# o st.data_editor com num_rows="dynamic" guarda, internamente, um
+# histórico de linhas adicionadas/editadas/excluídas associado à sua
+# key. Quando os dados são recarregados do Firestore (após salvar) mas
+# a key do widget continua a mesma, o Streamlit às vezes reaplica esse
+# histórico antigo sobre os dados novos — e é isso que fazia uma linha
+# excluída reaparecer no próximo rerun. Corrigido com _chave_versionada
+# / _renovar_editor: toda vez que uma exclusão é salva, a key do editor
+# muda (vira uma instância nova do widget, sem memória da anterior).
+# Aplicado a TODAS as tabelas editáveis do módulo (Inventário,
+# Organograma, Gemba, Entrevistas, Matriz, Matriz RACI, Diário de Bordo).
+#
 # Entry point: renderizar_diagnostico(papel, user) — mesmo padrão de
 # renderizar_rastreio / renderizar_tickets / renderizar_cartas.
 # =============================================================
@@ -54,6 +66,38 @@ def _salvar(chave: str, valor):
         "dados": valor,
         "atualizado_em": datetime.now(BRT).isoformat(),
     })
+
+
+# ─────────────────────────────────────────────────────────────
+# Correção do bug "linha excluída volta depois" do st.data_editor
+# ─────────────────────────────────────────────────────────────
+def _chave_versionada(editor_key: str) -> str:
+    """
+    Gera a key efetiva de um st.data_editor, incluindo uma 'versão' guardada
+    em session_state. Toda vez que uma edição é salva com sucesso (ver
+    _renovar_editor), a versão avança — isso faz o Streamlit tratar o
+    próximo render como um WIDGET NOVO, sem nenhum estado interno herdado
+    da instância anterior.
+
+    Por quê isso é necessário: o st.data_editor guarda, internamente, um
+    histórico de linhas adicionadas/editadas/excluídas associado à sua key.
+    Quando os dados são recarregados do banco (após salvar) mas a key
+    continua a mesma, o Streamlit às vezes tenta reaplicar esse histórico
+    antigo sobre os dados novos — e é exatamente isso que faz uma linha
+    excluída "voltar" depois de um rerun. Trocar a key descarta esse
+    histórico de uma vez.
+    """
+    versao = st.session_state.get(f"_editor_versao_{editor_key}", 0)
+    return f"{editor_key}_v{versao}"
+
+
+def _renovar_editor(editor_key: str):
+    """Avança a versão de um editor (ver _chave_versionada acima) e força
+    um rerun imediato, para a tela já vir reconstruída com a key nova e os
+    dados corretos, sem chance de a exclusão "voltar"."""
+    chave_versao = f"_editor_versao_{editor_key}"
+    st.session_state[chave_versao] = st.session_state.get(chave_versao, 0) + 1
+    st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -612,7 +656,7 @@ def _editor_tabela_simples(chave, colunas_config, campos_ordem, pode_edit, edito
 
     editado = st.data_editor(
         df, num_rows="dynamic", use_container_width=True, hide_index=True,
-        key=editor_key, column_config=colunas_config, disabled=not pode_edit,
+        key=_chave_versionada(editor_key), column_config=colunas_config, disabled=not pode_edit,
         height=_ALTURA_TABELA_PADRAO,
     ).fillna("")
 
@@ -622,6 +666,7 @@ def _editor_tabela_simples(chave, colunas_config, campos_ordem, pode_edit, edito
             _opcoes_atividades_inventario.clear()
         elif chave == "organograma":
             _opcoes_pessoas_organograma.clear()
+        _renovar_editor(editor_key)
     return editado
 
 
@@ -692,7 +737,7 @@ def _tab_inventario(pode_edit):
                 _salvar("inventario", inventario_novo)
                 _opcoes_atividades_inventario.clear()
                 st.success(f"Atividade **{escolha_excluir}** excluída do Inventário.")
-                st.rerun()
+                _renovar_editor("diag_editor_inventario")
         else:
             st.caption("Nenhuma atividade cadastrada ainda.")
 
@@ -968,7 +1013,7 @@ def _tab_raci_matriz(pode_edit):
 
     editado_p = st.data_editor(
         df_p, num_rows="dynamic", use_container_width=True, hide_index=True,
-        key="diag_editor_raci_pessoas",
+        key=_chave_versionada("diag_editor_raci_pessoas"),
         column_config={
             "nome": st.column_config.TextColumn("Nome / Função"),
             "grupo": st.column_config.SelectboxColumn("Grupo", options=GRUPOS_RACI),
@@ -979,6 +1024,8 @@ def _tab_raci_matriz(pode_edit):
 
     if pode_edit and not editado_p.equals(df_p):
         _salvar("raci_pessoas", editado_p.to_dict("records"))
+        if len(editado_p) != len(df_p):
+            _renovar_editor("diag_editor_raci_pessoas")
 
     # Usa o resultado já disponível em memória (editado_p) para montar as colunas da
     # matriz abaixo, em vez de reler do Firestore + forçar st.rerun(). Isso evita o
@@ -1028,12 +1075,14 @@ def _tab_raci_matriz(pode_edit):
 
     editado_m = st.data_editor(
         df_m, num_rows="dynamic", use_container_width=True, hide_index=True,
-        key="diag_editor_raci_matriz", column_config=col_config, disabled=not pode_edit,
+        key=_chave_versionada("diag_editor_raci_matriz"), column_config=col_config, disabled=not pode_edit,
         height=_ALTURA_TABELA_PADRAO,
     ).fillna("-")
 
     if pode_edit and not editado_m.equals(df_m):
         _salvar("raci_matriz", editado_m.to_dict("records"))
+        if len(editado_m) != len(df_m):
+            _renovar_editor("diag_editor_raci_matriz")
 
     with st.expander("📊 Resumo por pessoa/função"):
         resumo = resumo_raci_por_pessoa(editado_m.to_dict("records"), nomes)
@@ -1430,7 +1479,8 @@ def _tab_diario(pode_edit):
         opcoes_analista = sorted(set(pessoas_org) | (set(df["analista"]) - {""}))
 
         editado = st.data_editor(
-            df, num_rows="dynamic", use_container_width=True, hide_index=True, key="diag_editor_diario",
+            df, num_rows="dynamic", use_container_width=True, hide_index=True,
+            key=_chave_versionada("diag_editor_diario"),
             column_config={
                 "data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                 "analista": (st.column_config.SelectboxColumn("Analista", options=opcoes_analista)
@@ -1471,7 +1521,10 @@ def _tab_diario(pode_edit):
                 for r in registros_novos:
                     adicionar_atividade_inventario_se_nova(r.get("atividade", ""))
                 st.session_state["_diag_diario_assinatura"] = assinatura
-                st.rerun()
+                if len(registros_novos) != len(registros):
+                    _renovar_editor("diag_editor_diario")
+                else:
+                    st.rerun()
 
     st.caption('💡 Registre **tudo**: reuniões, e-mails, retrabalho, espera por resposta de outra área, '
                'e atividades "não oficiais" (ajudar N1, apagar incêndio, planilha paralela). '
@@ -1512,7 +1565,8 @@ def _tab_entrevistas(pode_edit):
     df["data"] = df["data"].apply(_to_date)
 
     editado = st.data_editor(
-        df, num_rows="dynamic", use_container_width=True, hide_index=True, key="diag_editor_entrevistas",
+        df, num_rows="dynamic", use_container_width=True, hide_index=True,
+        key=_chave_versionada("diag_editor_entrevistas"),
         column_config={
             "nome": st.column_config.TextColumn("Nome"),
             "data": st.column_config.DateColumn("Data da entrevista", format="DD/MM/YYYY"),
@@ -1525,6 +1579,8 @@ def _tab_entrevistas(pode_edit):
                         for _, r in editado.iterrows()]
     if pode_edit and registros_novos != registros:
         _salvar("entrevistas", registros_novos)
+        if len(registros_novos) != len(registros):
+            _renovar_editor("diag_editor_entrevistas")
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Entrevistas (Excel)", "entrevistas_estruturadas", "Entrevistas", registros_novos)
@@ -1601,7 +1657,8 @@ def _tab_matriz(pode_edit):
     df = df[colunas].fillna("")
 
     editado = st.data_editor(
-        df, num_rows="dynamic", use_container_width=True, hide_index=True, key="diag_editor_matriz",
+        df, num_rows="dynamic", use_container_width=True, hide_index=True,
+        key=_chave_versionada("diag_editor_matriz"),
         column_config={
             "atividade": st.column_config.TextColumn("Atividade", width="medium"),
             "quemfaz": st.column_config.TextColumn("Quem executa"),
@@ -1619,6 +1676,8 @@ def _tab_matriz(pode_edit):
 
     if pode_edit and not editado.equals(df):
         _salvar("matriz", editado.to_dict("records"))
+        if len(editado) != len(df):
+            _renovar_editor("diag_editor_matriz")
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Matriz de Atividades (Excel)", "matriz_atividades_tempo", "Matriz",
@@ -2188,7 +2247,7 @@ def renderizar_diagnostico(papel, user=None):
 
     st.subheader("🗺️ Diagnóstico N2 — Mapeamento de Atividades Operacionais")
     st.caption("CX · Backoffice (N2) · Área responsável: PQI · entrega prevista 05/08/2026")
-    st.caption("🔧 build: 2026-07-21-esteira-v7-seletor-unico — se você não está vendo exatamente "
+    st.caption("🔧 build: 2026-08-03-fix-delete-linha-v1 — se você não está vendo exatamente "
                "este texto, o deploy ainda não atualizou.")
     if not editar:
         st.info("Modo somente leitura — peça a um supervisor ou administrador para editar.")
