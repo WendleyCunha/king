@@ -707,12 +707,6 @@ def _tab_inventario(pode_edit):
 
     inventario = _ler("inventario", [])
 
-    # ── Tabela de EDIÇÃO — apenas edita células (categoria, descrição etc).
-    # num_rows="fixed" desliga de propósito o adicionar/excluir linha DENTRO
-    # do grid: é exatamente ali que o Streamlit tem o bug de "linha excluída
-    # volta depois". Adicionar e excluir agora têm seus próprios controles
-    # abaixo, que leem/gravam direto no Firestore — sem depender de nenhum
-    # estado interno do widget.
     if inventario:
         df = pd.DataFrame(inventario)
         for c in ["atividade", "categoria", "descricao", "registrada"]:
@@ -722,7 +716,7 @@ def _tab_inventario(pode_edit):
 
         editado = st.data_editor(
             df, num_rows="fixed", use_container_width=True, hide_index=True,
-            key="diag_editor_inventario_fixed",
+            key=_chave_versionada("diag_editor_inventario_fixed"),   # ← key versionada
             column_config={
                 "atividade": st.column_config.TextColumn("Atividade", width="large"),
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIAS_INVENTARIO),
@@ -736,7 +730,7 @@ def _tab_inventario(pode_edit):
         if pode_edit and not editado.equals(df):
             _salvar("inventario", editado.to_dict("records"))
             _opcoes_atividades_inventario.clear()
-            st.rerun()
+            _renovar_editor("diag_editor_inventario_fixed")   # ← em vez de st.rerun()
     else:
         st.info("Nenhuma atividade cadastrada ainda.")
         editado = pd.DataFrame(columns=["atividade", "categoria", "descricao", "registrada"])
@@ -764,7 +758,7 @@ def _tab_inventario(pode_edit):
                         _salvar("inventario", inv_atual)
                         _opcoes_atividades_inventario.clear()
                         st.success(f"Atividade '{nova_ativ.strip()}' adicionada!")
-                        st.rerun()
+                        _renovar_editor("diag_editor_inventario_fixed")   # ← em vez de st.rerun()
                 else:
                     st.warning("Informe o nome da atividade.")
 
@@ -786,11 +780,12 @@ def _tab_inventario(pode_edit):
                     _salvar("inventario", inv_novo)
                     _opcoes_atividades_inventario.clear()
                     st.success(f"Atividade '{nome_ativ}' excluída.")
-                    st.rerun()
+                    _renovar_editor("diag_editor_inventario_fixed")   # ← em vez de st.rerun()
 
     st.markdown("---")
     _botao_excel("⬇️ Baixar Inventário (Excel)", "inventario_atividades", "Inventario",
-                 editado.to_dict("records") if not editado.empty else inventario)# ─────────────────────────────────────────────────────────────
+                 editado.to_dict("records") if not editado.empty else inventario)
+# ─────────────────────────────────────────────────────────────
 # 03 · Organograma + RACI preliminar (por tipo de demanda)
 # ─────────────────────────────────────────────────────────────
 def _tab_organograma(pode_edit):
