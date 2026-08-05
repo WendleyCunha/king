@@ -8,6 +8,44 @@ de filas, visibilidade por papel, histórico por cliente e todo o CRUD do
 Firestore (tickets, comentários, sync Zendesk, exclusão total).
 
 Todo o resto do pacote `tickets/` importa deste arquivo.
+
+[v5 — TICKET CONTÊINER POR CLIENTE] Mudança de modelo de dados, a pedido:
+  1) `cliente_codigo` normalizado passou a ser a CHAVE do documento do
+     Firestore (um único documento por cliente — "ticket contêiner").
+  2) Abrir um chamado com o MESMO Motivo Pai de uma solicitação ainda não
+     encerrada (status fora de finalizado/cancelado) do MESMO cliente é
+     BLOQUEADO (ver `abrir_solicitacao_cliente`).
+  3) Motivos diferentes (ou o mesmo motivo já encerrado antes) são sempre
+     aceitos como NOVA "solicitação" dentro do MESMO documento contêiner.
+  4) O documento contêiner guarda um array `solicitacoes` — cada elemento é
+     uma solicitação completa (mesmos campos que um "ticket" tinha antes:
+     assunto, motivo, status, SLA, atendentes, comentários...). O histórico
+     de TODAS as solicitações do cliente vive sempre no mesmo documento.
+  5) Cada solicitação tem seu próprio `status` — encerrar uma não afeta as
+     outras do mesmo contêiner.
+
+  Para não obrigar a reescrever todo o resto do sistema (strip.py, filas.py,
+  geral.py, detalhe.py), o container nunca é exposto diretamente: toda
+  leitura passa por `_achatar(...)`, que transforma cada solicitação num
+  dict "achatado" com EXATAMENTE os mesmos campos que um ticket antigo
+  tinha (inclusive um "id" — agora um ID COMPOSTO "container#sid"). Todo o
+  código que já existia (SLA, status, badges, listagem, exportação) continua
+  funcionando sem nenhuma alteração, porque só enxerga esse dict achatado.
+
+  Documentos ANTIGOS (formato "achatado" direto na raiz, sem o array
+  `solicitacoes` — inclusive os importados do Zendesk) continuam sendo lidos
+  normalmente: são envolvidos em memória por `_normalizar_container` como um
+  contêiner de uma única solicitação. Na primeira vez que forem atualizados
+  (`atualizar_ticket`), já são regravados no formato novo automaticamente —
+  não é necessário rodar nenhuma migração manual.
+
+  `criar_ticket(dados)` continua existindo com o MESMO contrato de antes
+  (recebe dict, devolve uma string de ID) para não quebrar nenhum outro
+  módulo do sistema que já a chame diretamente (ex.: possivelmente
+  mod_home.py) — mas ela NÃO aplica o bloqueio de motivo duplicado (regra 2
+  é uma regra da TELA de abertura de chamado, não do primitivo de gravação).
+  Quem precisa do bloqueio é `abrir_solicitacao_cliente`, usada por
+  `tickets/novo.py`.
 """
 import streamlit as st
 import pandas as pd
@@ -17,6 +55,7 @@ import os
 import uuid
 import html as _htmlmod
 from datetime import datetime, timezone, timedelta
+from google.cloud import firestore as _fs
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
@@ -54,6 +93,13 @@ PRIO_CFG = {
 }
 
 STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")  # pendentes p/ SLA
+
+# Status que contam como "encerrado" para fins do bloqueio de motivo
+# duplicado (regra 2) — "resolvido" ainda NÃO conta como encerrado aqui de
+# propósito: um chamado "resolvido" mas ainda na janela de validação (24h,
+# ver JANELA_VALIDACAO_H mais abaixo) pode ser reaberto, então uma segunda
+# solicitação do MESMO motivo ainda deve ser bloqueada nesse meio-tempo.
+STATUS_ENCERRADOS_DUPLICIDADE = ("finalizado", "cancelado")
 
 # ── Paleta dourada (sem vermelho) ──────────────────────────────────
 GOLD       = "#C9A84C"   # dourado base
@@ -104,22 +150,133 @@ def texto_busca(t) -> str:
         partes.append(s.get("resposta",""))
     return " ".join(str(p) for p in partes if p).lower()
 
+def _novo_id_curto() -> str:
+    return uuid.uuid4().hex[:10]
+
+# ═══════════════════════════════════════════════════════════════════
+# TICKET CONTÊINER POR CLIENTE — helpers internos de (de)serialização
+# ═══════════════════════════════════════════════════════════════════
+def _normalizar_id_doc(cod: str) -> str:
+    """
+    Sanitiza um código de cliente para uso como ID de documento do
+    Firestore: não pode conter '/', não pode ser vazio, nem ser '.' ou '..'.
+    Também remove '#', que é o separador usado no ID COMPOSTO de solicitação
+    (ver _compor_id/_decompor_id) — assim o código do cliente nunca conflita
+    com esse separador, não importa o que o atendente digite.
+    """
+    cod = (cod or "").strip().replace("/", "_").replace("#", "_")
+    return cod[:200] or ("cliente_" + _novo_id_curto())
+
+def _compor_id(container_id: str, sid: str) -> str:
+    return f"{container_id}#{sid}"
+
+def _decompor_id(tid: str):
+    """Separa um ID composto em (container_id, sid). Usa rsplit (a partir do
+    FIM) de propósito: o sid nunca contém '#', mas o container_id (código do
+    cliente já sanitizado) também não deveria — ainda assim, rsplit garante
+    a separação correta mesmo num cenário legado/inesperado."""
+    tid = str(tid or "")
+    if "#" not in tid:
+        return tid, "legacy"
+    cid, sid = tid.rsplit("#", 1)
+    return cid, sid
+
+def _normalizar_container(raw: dict) -> dict:
+    """
+    Aceita tanto o formato NOVO (dict com uma lista em 'solicitacoes')
+    quanto um documento ANTIGO (formato achatado, sem essa lista — inclusive
+    os importados do Zendesk) e sempre devolve o formato novo em memória,
+    envolvendo o documento antigo como uma única solicitação ('sid':
+    'legacy'). Nunca escreve nada no Firestore sozinha — a gravação no
+    formato novo só acontece na próxima vez que a solicitação for
+    atualizada de verdade (migração preguiçosa, sem downtime).
+    """
+    if not raw:
+        return {"cliente_codigo": "", "cliente_nome": "", "solicitacoes": []}
+    if isinstance(raw.get("solicitacoes"), list):
+        return raw
+    sol_legado = dict(raw)
+    sol_legado.setdefault("sid", "legacy")
+    return {
+        "cliente_codigo": raw.get("cliente_codigo", ""),
+        "cliente_nome": raw.get("cliente_nome", ""),
+        "criado_em": raw.get("criado_em", ""),
+        "atualizado_em": raw.get("atualizado_em", ""),
+        "solicitacoes": [sol_legado],
+    }
+
+def _achatar(container_id: str, container: dict, sol: dict) -> dict:
+    """Achata uma solicitação em um dict com a MESMA forma que um ticket
+    antigo tinha — é isso que permite todo o resto do sistema (SLA, status,
+    badges, tirinha, exportação) continuar funcionando sem nenhuma
+    alteração, mesmo com o novo modelo de contêiner por cliente."""
+    flat = dict(sol)
+    flat["id"] = _compor_id(container_id, sol.get("sid", "legacy"))
+    flat.setdefault("cliente_codigo", container.get("cliente_codigo", ""))
+    flat.setdefault("cliente_nome", container.get("cliente_nome", ""))
+    return flat
+
+def _carregar_container(container_id: str):
+    """Leitura FRESCA (sem cache) de um contêiner pelo ID do documento."""
+    doc = get_db().collection(COLECAO).document(container_id).get()
+    if not doc.exists:
+        return None
+    return _normalizar_container(doc.to_dict())
+
+def buscar_ticket_por_id(tid: str):
+    """Busca uma solicitação específica pelo ID composto (container#sid),
+    sempre com leitura FRESCA do Firestore — usado pelo painel de detalhe,
+    que precisa refletir a mudança mais recente imediatamente após
+    qualquer ação (mesmo comportamento que a leitura direta antiga tinha)."""
+    if not tid:
+        return None
+    cid, sid = _decompor_id(tid)
+    container = _carregar_container(cid)
+    if not container:
+        return None
+    for s in container.get("solicitacoes", []):
+        if s.get("sid") == sid:
+            return _achatar(cid, container, s)
+    return None
+
 def transferir_tickets(tids: list, novo_responsavel: str):
-    """Reatribui uma lista de tickets para um novo responsável (atendente)."""
-    db = get_db()
-    batch = db.batch()
-    n = 0
+    """Reatribui uma lista de tickets (IDs compostos) para um novo
+    responsável. Agrupa por contêiner (cliente) e aplica cada mudança numa
+    transação Firestore própria por contêiner, pra não perder alterações
+    concorrentes de outras solicitações do mesmo cliente."""
+    from collections import defaultdict
+    agrupado = defaultdict(list)
     for tid in tids:
-        ref = db.collection(COLECAO).document(tid)
-        batch.update(ref, {
-            "atendentes": [novo_responsavel],
-            "atribuido_para": novo_responsavel,
-            "atualizado_em": agora_brt(),
-        })
-        n += 1
-        if n % 450 == 0:
-            batch.commit(); batch = db.batch()
-    batch.commit()
+        cid, sid = _decompor_id(tid)
+        agrupado[cid].append(sid)
+
+    db = get_db()
+    n = 0
+    for cid, sids in agrupado.items():
+        ref = db.collection(COLECAO).document(cid)
+        transaction = db.transaction()
+
+        @_fs.transactional
+        def _tx(transaction, ref=ref, sids=sids):
+            snap = ref.get(transaction=transaction)
+            if not snap.exists:
+                return 0
+            container = _normalizar_container(snap.to_dict())
+            sols = list(container.get("solicitacoes", []))
+            agora = agora_brt()
+            qt = 0
+            for i, s in enumerate(sols):
+                if s.get("sid") in sids:
+                    sols[i] = {**s, "atendentes": [novo_responsavel],
+                               "atribuido_para": novo_responsavel, "atualizado_em": agora}
+                    qt += 1
+            container["solicitacoes"] = sols
+            container["atualizado_em"] = agora
+            transaction.set(ref, container)
+            return qt
+
+        n += _tx(transaction)
+
     listar_tickets.clear()
     return n
 
@@ -253,9 +410,6 @@ def _swatch_dept(nome_dep: str) -> str:
     if r > 130 and g > 60 and b < 90:    return "🟫"
     return "🏢"
 
-def _novo_id_curto() -> str:
-    return uuid.uuid4().hex[:10]
-
 def solicitacoes_abertas(t) -> list:
     """Lista de pedidos (a outro setor) que ainda NÃO têm resposta registrada."""
     sols = t.get("solicitacoes_setor", []) or []
@@ -269,9 +423,8 @@ def ticket_tem_pendencia_para_setor(t, setor: str) -> bool:
     return bool(solicitacoes_abertas_para_setor(t, setor))
 
 def registrar_solicitacao_setor(tid: str, t: dict, setor_destino: str, mensagem: str, user: dict):
-    """Cria uma pendência para outro setor DENTRO do mesmo ticket (não cria
-    ticket novo — preserva o histórico único por cliente)."""
-    from google.cloud.firestore import ArrayUnion
+    """Cria uma pendência para outro setor DENTRO da MESMA solicitação (não
+    cria ticket novo — preserva o histórico único por cliente)."""
     pedido = {
         "id": _novo_id_curto(),
         "tipo": "pedido",
@@ -282,23 +435,17 @@ def registrar_solicitacao_setor(tid: str, t: dict, setor_destino: str, mensagem:
         "solicitado_por_nome": user.get("nome", ""),
         "solicitado_em": agora_brt(),
     }
-    get_db().collection(COLECAO).document(tid).update({
-        "solicitacoes_setor": ArrayUnion([pedido]),
-        "atualizado_em": agora_brt(),
-        "ultima_interacao_em": agora_brt(),
-        "ultima_interacao_autor": user.get("usuario", ""),
-    })
+    atualizar_ticket(tid, {}, interacao_de=user.get("usuario", ""),
+                      apensar={"solicitacoes_setor": pedido})
     # também entra no chat unificado do ticket, pra quem só olha comentários
     adicionar_comentario(
         tid, user.get("nome", ""), user.get("usuario", ""),
         f"📨 Solicitação para o setor **{setor_destino}**: {mensagem}"
     )
-    listar_tickets.clear()
 
 def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, user: dict):
     """Fecha uma pendência de setor, registrando a resposta (sem apagar o
     pedido original — o histórico completo fica sempre visível)."""
-    from google.cloud.firestore import ArrayUnion
     resposta = {
         "id": _novo_id_curto(),
         "tipo": "resposta",
@@ -310,18 +457,13 @@ def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, use
         "respondido_por_nome": user.get("nome", ""),
         "respondido_em": agora_brt(),
     }
-    get_db().collection(COLECAO).document(tid).update({
-        "solicitacoes_setor": ArrayUnion([resposta]),
-        "atualizado_em": agora_brt(),
-        "ultima_interacao_em": agora_brt(),
-        "ultima_interacao_autor": user.get("usuario", ""),
-    })
+    atualizar_ticket(tid, {}, interacao_de=user.get("usuario", ""),
+                      apensar={"solicitacoes_setor": resposta})
     adicionar_comentario(
         tid, user.get("nome", ""), user.get("usuario", ""),
         f"✅ Setor **{pedido.get('setor_destino')}** respondeu a solicitação "
         f"de **{pedido.get('setor_origem')}**: {resposta_texto}"
     )
-    listar_tickets.clear()
 
 def tickets_pendentes_do_setor(tickets: list, setor: str) -> list:
     """Tickets que o SETOR precisa tratar, pra alimentar a aba dele em
@@ -428,21 +570,43 @@ def ticket_visivel(t, user, papel) -> bool:
         return t.get("departamento","") == (user.get("departamento","") or "—")
     return _usuario_atende(t, user)
 
-# ── Histórico por CLIENTE (Regra nova) ─────────────────────────────
+# ── Histórico por CLIENTE ───────────────────────────────────────────
 def normalizar_codigo_cliente(cod) -> str:
     return str(cod or "").strip()
 
 def tickets_do_cliente(cliente_codigo: str, excluir_id: str = None) -> list:
+    """
+    Todas as OUTRAS solicitações do mesmo cliente. Desde a Regra 1
+    (cliente_codigo como chave do contêiner), a via rápida é ler
+    DIRETAMENTE o documento cujo ID é o código normalizado do cliente — 1
+    única leitura, sem varrer a coleção inteira.
+
+    Também faz uma varredura de segurança em `listar_tickets()` (cacheada,
+    portanto barata) para pegar tickets ANTIGOS/legados que porventura
+    tenham o mesmo cliente_codigo mas vivam sob um ID de documento
+    diferente (ex.: criados antes desta mudança de modelo, ou importados
+    do Zendesk) — assim nenhum histórico antigo fica de fora.
+    """
     cod = normalizar_codigo_cliente(cliente_codigo)
     if not cod:
         return []
-    todos = listar_tickets()
-    return sorted(
-        [t for t in todos
-         if normalizar_codigo_cliente(t.get("cliente_codigo")) == cod
-         and t.get("id") != excluir_id],
-        key=lambda x: x.get("criado_em",""), reverse=True
-    )
+
+    encontrados = {}
+    cid = _normalizar_id_doc(cod)
+    container = _carregar_container(cid)
+    if container:
+        for s in container.get("solicitacoes", []):
+            flat = _achatar(cid, container, s)
+            encontrados[flat["id"]] = flat
+
+    for t in listar_tickets():
+        if normalizar_codigo_cliente(t.get("cliente_codigo")) == cod:
+            encontrados.setdefault(t.get("id"), t)
+
+    if excluir_id:
+        encontrados.pop(excluir_id, None)
+
+    return sorted(encontrados.values(), key=lambda x: x.get("criado_em",""), reverse=True)
 
 def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
     for tc in lista_tickets:
@@ -465,65 +629,210 @@ def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
 # ── CRUD Firestore ─────────────────────────────────────────────────
 @st.cache_data(ttl=10, show_spinner=False)
 def listar_tickets() -> list:
+    """Lê TODOS os contêineres (um por cliente, mais os legados/Zendesk que
+    ainda vivem sob ID próprio) e devolve a lista ACHATADA de solicitações
+    — cada uma com a mesma forma que um ticket antigo tinha. É essa lista
+    achatada que o resto do sistema (SLA, filas, badges, exportação)
+    consome, sem precisar saber nada sobre o modelo de contêiner."""
     docs = get_db().collection(COLECAO).stream()
-    return sorted(
-        [d.to_dict() for d in docs],
-        key=lambda x: x.get("criado_em",""), reverse=True
-    )
+    flat = []
+    for d in docs:
+        raw = d.to_dict()
+        if not raw:
+            continue
+        container = _normalizar_container(raw)
+        for s in container.get("solicitacoes", []):
+            flat.append(_achatar(d.id, container, s))
+    return sorted(flat, key=lambda x: x.get("criado_em",""), reverse=True)
+
+def _criar_ou_anexar_solicitacao(dados: dict, bloquear_duplicado: bool = False):
+    """
+    Núcleo comum de criação: garante que TODA solicitação de um mesmo
+    cliente (mesmo `cliente_codigo`) vive dentro do MESMO documento
+    contêiner (Regra 1), e — quando `bloquear_duplicado=True` — impede
+    abrir uma nova solicitação com o MESMO Motivo Pai de outra que ainda
+    não esteja encerrada (Regra 2). Roda dentro de uma transação Firestore
+    pra não haver corrida entre duas aberturas simultâneas do mesmo cliente
+    (a checagem de duplicidade só é confiável se leitura+escrita forem
+    atômicas).
+
+    Sem `cliente_codigo` (uso interno/legado, sem tela de abertura própria
+    de cliente), cria um contêiner novo com ID aleatório — mesmo
+    comportamento que o sistema já tinha antes desta mudança.
+
+    Retorna (ok: bool, mensagem_de_erro: str, tid_composto: str | None).
+    """
+    cod = normalizar_codigo_cliente(dados.get("cliente_codigo"))
+    db  = get_db()
+
+    if cod:
+        container_id = _normalizar_id_doc(cod)
+        ref = db.collection(COLECAO).document(container_id)
+    else:
+        ref = db.collection(COLECAO).document()
+        container_id = ref.id
+
+    transaction = db.transaction()
+
+    @_fs.transactional
+    def _tx(transaction):
+        snap = ref.get(transaction=transaction)
+        raw = snap.to_dict() if snap.exists else None
+        container = _normalizar_container(raw) if raw else {"cliente_codigo": cod, "cliente_nome": "", "solicitacoes": []}
+
+        if bloquear_duplicado and cod:
+            motivo_novo = (dados.get("motivo_pai") or "").strip().lower()
+            if motivo_novo:
+                for s in container.get("solicitacoes", []):
+                    if (s.get("motivo_pai") or "").strip().lower() == motivo_novo \
+                            and s.get("status") not in STATUS_ENCERRADOS_DUPLICIDADE:
+                        status_lbl = STATUS_CFG.get(s.get("status"), (s.get("status"),))[0]
+                        return False, (
+                            f"Este cliente já tem uma solicitação em aberto para o motivo "
+                            f"\"{s.get('motivo_pai')}\" (status: {status_lbl}). Trate ou encerre "
+                            f"essa solicitação antes de abrir outra com o mesmo motivo."
+                        ), None
+
+        agora = agora_brt()
+        sid = _novo_id_curto()
+        nova_sol = {
+            "sid": sid, "criado_em": agora, "atualizado_em": agora, "origem": "interno",
+            "comentarios": [], "historico_etapas": [], "solicitacoes_setor": [],
+            "sla1_definido": False, "sla1_cumprido": None,
+            "etapa_vermelha": False, "etapa_travada": False,
+            "status": "aberto", "horas_sla": 24,
+        }
+        nova_sol.update(dados)
+        nova_sol["sid"] = sid
+        if cod:
+            nova_sol["cliente_codigo"] = cod
+
+        sols = list(container.get("solicitacoes", []))
+        sols.append(nova_sol)
+        container["solicitacoes"] = sols
+        container["cliente_codigo"] = cod
+        if dados.get("cliente_nome"):
+            container["cliente_nome"] = dados["cliente_nome"]
+        container.setdefault("criado_em", agora)
+        container["atualizado_em"] = agora
+
+        transaction.set(ref, container)
+        return True, "", _compor_id(container_id, sid)
+
+    ok, msg, tid = _tx(transaction)
+    listar_tickets.clear()
+    return ok, msg, tid
 
 def criar_ticket(dados: dict) -> str:
-    ref  = get_db().collection(COLECAO).document()
-    base = {
-        "id": ref.id, "criado_em": agora_brt(),
-        "atualizado_em": agora_brt(), "origem": "interno",
-        "comentarios": [],
-        "historico_etapas": [],
-        "solicitacoes_setor": [],
-        "sla1_definido": False,
-        "sla1_cumprido": None,
-        "etapa_vermelha": False,
-        "etapa_travada": False,
-    }
-    base.update(dados)
-    base.setdefault("status", "aberto")
-    base.setdefault("horas_sla", 24)
-    ref.set(base)
-    listar_tickets.clear()
-    return ref.id
+    """
+    [Compatibilidade] Cria/anexa uma solicitação SEM checar duplicidade de
+    motivo — mantém o MESMO contrato de antes (recebe dict, devolve string
+    de ID) para não quebrar nenhum outro módulo do sistema que já chame
+    esta função diretamente. Ainda assim, se `dados` tiver `cliente_codigo`,
+    a solicitação passa a viver no contêiner daquele cliente (Regra 1) —
+    essa parte do novo modelo é sempre aplicada, incondicionalmente.
 
-def atualizar_ticket(tid: str, dados: dict, interacao_de: str = None):
-    dados = dict(dados)
-    dados["atualizado_em"] = agora_brt()
-    if interacao_de:
-        dados["ultima_interacao_em"]     = agora_brt()
-        dados["ultima_interacao_autor"]  = interacao_de
-    get_db().collection(COLECAO).document(tid).update(dados)
+    Para a regra de bloqueio de motivo duplicado (Regra 2), usada pela tela
+    de abertura de chamado, veja `abrir_solicitacao_cliente`.
+    """
+    _, _, tid = _criar_ou_anexar_solicitacao(dados, bloquear_duplicado=False)
+    return tid
+
+def abrir_solicitacao_cliente(dados: dict) -> tuple:
+    """
+    Abre uma nova solicitação de atendimento para um cliente, aplicando as
+    regras completas do novo modelo:
+      • Regra 1: `cliente_codigo` é a CHAVE do ticket contêiner.
+      • Regra 2: bloqueia se já existir uma solicitação NÃO
+        finalizada/cancelada com o MESMO Motivo Pai para este cliente.
+      • Regras 3/4: motivos diferentes (ou o mesmo motivo já encerrado) são
+        sempre aceitos como NOVA solicitação dentro do MESMO documento —
+        nunca cria um segundo ticket pro mesmo cliente.
+    Usada pela tela de abertura de chamado (`tickets/novo.py`).
+
+    Retorna (ok: bool, mensagem_de_erro: str, tid_composto: str | None).
+    """
+    return _criar_ou_anexar_solicitacao(dados, bloquear_duplicado=True)
+
+def atualizar_ticket(tid: str, dados: dict, interacao_de: str = None, apensar: dict = None):
+    """
+    Atualiza campos de UMA solicitação específica (identificada pelo ID
+    composto `container#sid`), sem afetar as outras solicitações do mesmo
+    cliente. Roda em uma transação Firestore (lê o contêiner inteiro,
+    modifica só o elemento certo do array, regrava o documento inteiro) —
+    isso evita perder alterações concorrentes de OUTRA solicitação do
+    mesmo cliente sendo editada ao mesmo tempo por outra pessoa.
+
+    `apensar`: dict opcional {campo: item} para ADICIONAR um item a um
+    campo de lista da solicitação (ex.: {"historico_etapas": {...}}) na
+    MESMA escrita — substitui o uso antigo de `ArrayUnion` do Firestore,
+    que só funciona em updates diretos de campo, não em listas aninhadas
+    dentro de um array maior como agora é o caso.
+    """
+    cid, sid = _decompor_id(tid)
+    db = get_db()
+    ref = db.collection(COLECAO).document(cid)
+    transaction = db.transaction()
+
+    @_fs.transactional
+    def _tx(transaction):
+        snap = ref.get(transaction=transaction)
+        if not snap.exists:
+            return
+        container = _normalizar_container(snap.to_dict())
+        sols = list(container.get("solicitacoes", []))
+        idx = next((i for i, s in enumerate(sols) if s.get("sid") == sid), None)
+        if idx is None:
+            return
+        sol = dict(sols[idx])
+        sol.update(dados)
+        agora = agora_brt()
+        sol["atualizado_em"] = agora
+        if interacao_de:
+            sol["ultima_interacao_em"] = agora
+            sol["ultima_interacao_autor"] = interacao_de
+        if apensar:
+            for campo, item in apensar.items():
+                lst = list(sol.get(campo, []))
+                lst.append(item)
+                sol[campo] = lst
+        sols[idx] = sol
+        container["solicitacoes"] = sols
+        container["atualizado_em"] = agora
+        transaction.set(ref, container)
+
+    _tx(transaction)
     listar_tickets.clear()
 
 def adicionar_comentario(tid: str, autor_nome: str, autor_usuario: str, texto: str):
-    from google.cloud.firestore import ArrayUnion
-    get_db().collection(COLECAO).document(tid).update({
-        "comentarios": ArrayUnion([{
-            "autor": autor_nome, "texto": texto, "data": agora_brt()
-        }]),
-        "atualizado_em": agora_brt(),
-        "ultima_interacao_em": agora_brt(),
-        "ultima_interacao_autor": autor_usuario,
-    })
-    listar_tickets.clear()
+    atualizar_ticket(
+        tid, {}, interacao_de=autor_usuario,
+        apensar={"comentarios": {"autor": autor_nome, "texto": texto, "data": agora_brt()}},
+    )
 
 def vincular_ticket_relacionado(tid: str, novo_id: str):
-    try:
-        from google.cloud.firestore import ArrayUnion
-        get_db().collection(COLECAO).document(tid).update({
-            "tickets_relacionados": ArrayUnion([novo_id]),
-        })
-    except Exception:
-        pass
-    listar_tickets.clear()
+    """
+    [Compatibilidade — agora um no-op] Antes, cada abertura de chamado
+    criava um documento novo e esta função só registrava uma referência
+    cruzada entre "irmãos" do mesmo cliente. Desde a Regra 1 (cliente_codigo
+    como chave do ticket contêiner), TODAS as solicitações de um mesmo
+    cliente já vivem DENTRO do mesmo documento — não existe mais "ticket
+    separado" para vincular. Mantida apenas para não quebrar chamadas
+    antigas que ainda a invoquem.
+    """
+    pass
 
 # ── Sync Zendesk ───────────────────────────────────────────────────
 def sync_zendesk() -> tuple:
+    """
+    [Legado, formato inalterado] Os tickets importados do Zendesk não têm
+    `cliente_codigo` (a API do Zendesk usada aqui não devolve esse dado),
+    então continuam sendo gravados no formato "achatado" direto, um
+    documento por ticket (`zendesk_{id}`) — não fazem parte do modelo de
+    contêiner por cliente. Continuam sendo lidos normalmente por
+    `listar_tickets()`/`_normalizar_container`, que envolve qualquer
+    documento nesse formato antigo como um contêiner de uma solicitação só.
+    """
     import requests as req
     url  = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/views/{ZENDESK_VIEW_ID}/tickets.json?per_page=100"
     auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
