@@ -6,6 +6,18 @@ vez de popup): classificação Motivo Filho/Etapa (SLA1 congelado / SLA2
 travado), pendências entre setores dentro do próprio ticket, tratativa
 (status + comentário), registro de contato/observação avulsa, histórico de
 comentários e histórico de classificação, e validação de "Resolvido".
+
+[v5] Desde a mudança para "ticket contêiner por cliente" (ver
+tickets/common.py):
+  • A leitura do ticket passou a usar `buscar_ticket_por_id` (que sabe
+    decompor o ID composto container#sid e ler só a solicitação certa),
+    em vez de ler o documento do Firestore diretamente por aqui.
+  • O registro do histórico de classificação passou a usar o parâmetro
+    `apensar=` de `atualizar_ticket`, em vez de `ArrayUnion` do Firestore
+    — que só funciona em updates diretos de campo, não mais aplicável
+    agora que a gravação é sempre um read-modify-write do documento
+    inteiro do cliente (necessário pra não perder outras solicitações
+    dele que estejam sendo editadas ao mesmo tempo).
 """
 import time
 import streamlit as st
@@ -21,6 +33,7 @@ from .common import (
     solicitacoes_abertas_para_setor, ticket_tem_pendencia_para_setor,
     registrar_solicitacao_setor, responder_solicitacao_setor,
     listar_departamentos, _render_bloco_historico_cliente,
+    buscar_ticket_por_id,
 )
 
 
@@ -140,13 +153,15 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
             updates["atendentes"]     = etapa_final["atendentes_vinculados"]
             updates["atribuido_para"] = etapa_final["atendentes_vinculados"][0]
 
-        from google.cloud.firestore import ArrayUnion
-        updates["historico_etapas"] = ArrayUnion([{
+        item_historico = {
             "etapa": " › ".join(caminho), "quando": agora,
             "por": user.get("nome",""), "vermelha": vermelha,
             "data_prevista": data_prevista.isoformat() if vermelha else None,
-        }])
-        atualizar_ticket(tid, updates, interacao_de=user.get("usuario",""))
+        }
+        atualizar_ticket(
+            tid, updates, interacao_de=user.get("usuario",""),
+            apensar={"historico_etapas": item_historico},
+        )
 
         msg_extra = ""
         if dep_vinc_classificacao and dep_vinc_classificacao != dep_proprio \
@@ -303,7 +318,7 @@ def _detalhe_corpo(t, tid, user, papel):
     if relacionados:
         abertos_rel = sum(1 for x in relacionados if x.get("status") in STATUS_ABERTOS)
         with st.expander(
-            f"🗂 Histórico do cliente — {len(relacionados)} outro(s) chamado(s)"
+            f"🗂 Histórico do cliente — {len(relacionados)} outra(s) solicitação(ões)"
             + (f" ({abertos_rel} em aberto)" if abertos_rel else ""),
             expanded=False
         ):
@@ -441,11 +456,11 @@ def _detalhe_corpo(t, tid, user, papel):
 def _carregar_e_render_detalhe(tid, user, papel, modal=False):
     if not tid:
         return
-    doc = get_db().collection(COLECAO).document(tid).get()
-    if not doc.exists:
+    t = buscar_ticket_por_id(tid)
+    if not t:
         st.error("Ticket não encontrado.")
         return
-    _detalhe_corpo(doc.to_dict(), tid, user, papel)
+    _detalhe_corpo(t, tid, user, papel)
 
 
 def _render_painel_lateral_detalhe(user, papel):
