@@ -22,7 +22,7 @@ tickets/common.py), esta tela passou a:
 import time
 import streamlit as st
 
-from modulo.mod_motivos import motivos_pai_do_departamento
+from modulo.mod_motivos import motivos_pai_do_departamento, listar_motivos_filho_de
 from .common import (
     STATUS_ABERTOS, STATUS_CFG, STATUS_ENCERRADOS_DUPLICIDADE, esc, _html,
     listar_departamentos, normalizar_codigo_cliente, tickets_do_cliente,
@@ -74,6 +74,25 @@ def _render_novo(user):
 
     st.caption(f"⏱ Prazo para triagem (1º SLA): **{sla_dias} dia(s)**. O atendente que "
                f"receber o chamado tem esse prazo para analisar e classificar a Etapa correta.")
+
+    # ── Motivo Filho — escolhido já na abertura, junto com Departamento e
+    # Motivo. A Etapa continua sendo escolhida depois, pelo atendente
+    # durante a triagem (ver tickets/detalhe.py), porque algumas Etapas
+    # exigem data (2º SLA) e podem reaproveitar a árvore de outro Motivo
+    # Filho — uma decisão mais adequada para quem está de fato tratando o
+    # caso, não para quem está apenas abrindo o chamado.
+    filho_sel_nome = ""
+    if motivo_obj:
+        filhos_pai = listar_motivos_filho_de(motivo_obj["id"])
+        if not filhos_pai:
+            st.info(f"O motivo **{motivo_obj['nome']}** ainda não tem Motivos Filho cadastrados. "
+                    f"Peça ao administrador para cadastrar em Configurações → Motivos.")
+        else:
+            filho_nomes = [f["nome"] for f in filhos_pai]
+            filho_sel_nome = st.selectbox(
+                "Motivo Filho *", filho_nomes,
+                key=f"novo_motivo_filho_{motivo_obj['id']}",
+            )
 
     dep_vinculado_pai = motivo_obj.get("departamento_vinculado") if motivo_obj else None
     if dep_vinculado_pai and dep_vinculado_pai != dep_sel:
