@@ -26,6 +26,27 @@
 # Aplicado a TODAS as tabelas editáveis do módulo (Inventário,
 # Organograma, Gemba, Entrevistas, Matriz, Matriz RACI, Diário de Bordo).
 #
+# [v_fix_sessioninfo] BUGFIX ("Bad message format — Tried to use
+# SessionInfo before it was initialized" aparecendo em loop): duas
+# causas identificadas e corrigidas.
+#   1) `_botao_resiliente` chamava `st.rerun()` dentro do próprio bloco
+#      `except`, na tentativa de "curar" uma falha temporária do
+#      Streamlit. Só que, quando a causa raiz é dessincronia de sessão
+#      (WebSocket fora de ordem — exatamente o que a mensagem
+#      "SessionInfo before it was initialized" indica), esse rerun
+#      automático dispara ANTES de o navegador terminar de processar o
+#      erro anterior, criando um ciclo erro → rerun → erro de novo. A
+#      função agora só REGISTRA o erro (st.error) e deixa o próximo
+#      clique do usuário resolver — nunca mais chama st.rerun() sozinha.
+#   2) Vários widgets no modo "esteira" do Diário de Bordo usavam
+#      `idx_aberto` (a POSIÇÃO do registro na lista) na key
+#      (ex: f"diag_aberto_categoria_{idx_aberto}"). Essa posição muda
+#      toda vez que uma linha nova é adicionada, forçando o Streamlit a
+#      destruir/recriar esses widgets a cada toque — reconstrução de
+#      estado desnecessária que aumenta a chance de mensagens do
+#      WebSocket chegarem fora de ordem. Trocado por uma chave estável
+#      baseada em analista+data (não muda entre reruns do mesmo dia).
+#
 # Entry point: renderizar_diagnostico(papel, user) — mesmo padrão de
 # renderizar_rastreio / renderizar_tickets / renderizar_cartas.
 # =============================================================
@@ -1261,29 +1282,30 @@ def _encerrar_dia(analista):
 
 def _botao_resiliente(coluna, label, key, **kwargs):
     """st.button() com rede de segurança: se o Streamlit falhar ao registrar
-    o widget (ex: StreamlitDuplicateElementKey — falha intermitente observada
-    nesta combinação específica de versões), avisa e força UM rerun limpo em
-    vez de derrubar a página inteira com a tela vermelha de erro.
+    o widget (ex: StreamlitDuplicateElementKey, ou dessincronia de sessão do
+    WebSocket — "Bad message format: Tried to use SessionInfo before it was
+    initialized"), avisa e deixa o PRÓXIMO clique do usuário resolver, em vez
+    de tentar se recuperar sozinho.
 
-    Importante: só tenta esse rerun automático UMA vez por botão (rastreado em
-    session_state). Se a falha se repetir na tentativa seguinte — sinal de que
-    o problema é persistente, não intermitente —, para de insistir e mostra um
-    erro parado na tela. Sem esse limite, uma falha persistente vira looping
-    infinito de recarregamento (falha → rerun → falha → rerun → ...)."""
+    [v_fix_sessioninfo] ANTES, esta função chamava st.rerun() dentro do
+    próprio bloco except, na tentativa de "curar" a falha na hora. Isso
+    parecia razoável para falhas intermitentes comuns, mas quando a causa
+    raiz é dessincronia de sessão (o caso do "SessionInfo before it was
+    initialized"), esse rerun automático dispara ANTES de o navegador
+    terminar de processar a mensagem de erro anterior — criando um ciclo
+    erro → rerun → erro de novo, que na prática aparecia como o popup
+    "Bad message format" reabrindo sem parar. Removido o st.rerun()
+    automático: agora a função só registra o erro com st.error() e retorna
+    False, sem tentar se recuperar sozinha. Um clique novo do usuário (ou
+    um F5 manual) já resolve normalmente, sem risco de loop."""
     contador_key = f"_diag_retry_{key}"
     try:
         resultado = coluna.button(label, key=key, **kwargs)
         st.session_state.pop(contador_key, None)  # sucesso: zera o contador desse botão
         return resultado
     except Exception as e:
-        tentativas = st.session_state.get(contador_key, 0)
-        if tentativas >= 1:
-            st.error(f"⚠️ Não consegui desenhar o botão \"{label}\" (falha persistente, não tentando "
-                     f"recarregar de novo automaticamente para evitar loop). Detalhe técnico: {e}")
-            return False
-        st.session_state[contador_key] = tentativas + 1
-        st.warning("⚠️ Tive um problema temporário para desenhar este botão — atualizando a página...")
-        st.rerun()
+        st.error(f"⚠️ Não consegui desenhar o botão \"{label}\" agora. Toque nele de novo em alguns "
+                 f"segundos, ou atualize a página (F5) se o problema persistir. Detalhe técnico: {e}")
         return False
 
 
@@ -1320,6 +1342,17 @@ def _tab_diario(pode_edit):
         idx_aberto, aberto = (_registro_aberto(diario_atual, analista_atual, hoje_str)
                                if analista_atual else (None, None))
 
+        # [v_fix_sessioninfo] Chave estável para os widgets do painel "Detalhes
+        # desta atividade" abaixo — usa analista+data em vez de idx_aberto
+        # (a POSIÇÃO do registro na lista). idx_aberto muda toda vez que uma
+        # linha nova é adicionada ao Diário (ex: ao trocar de atividade), o
+        # que forçava o Streamlit a destruir/recriar esses widgets a cada
+        # toque. Essa reconstrução desnecessária de estado aumentava a chance
+        # de mensagens do WebSocket chegarem fora de ordem, contribuindo para
+        # o erro "SessionInfo before it was initialized". analista+data é
+        # estável para a atividade em aberto de uma pessoa num mesmo dia.
+        sufixo_estavel = re.sub(r"[^a-z0-9]+", "_", normalizar_texto(f"{analista_atual}_{hoje_str}")) or "sem_analista"
+
         st.markdown("&nbsp;", unsafe_allow_html=True)
         if aberto:
             decorrido = _minutos_decorridos_desde(aberto.get("hora_inicio", ""))
@@ -1350,26 +1383,26 @@ def _tab_diario(pode_edit):
                     "Categoria", [""] + CATEGORIAS_DIARIO,
                     index=([""] + CATEGORIAS_DIARIO).index(aberto.get("categoria", ""))
                     if aberto.get("categoria", "") in CATEGORIAS_DIARIO else 0,
-                    key=f"diag_aberto_categoria_{idx_aberto}",
+                    key=f"diag_aberto_categoria_{sufixo_estavel}",
                 )
                 v_origem = d2.selectbox(
                     "Origem da demanda", [""] + ORIGENS,
                     index=([""] + ORIGENS).index(aberto.get("origem", ""))
                     if aberto.get("origem", "") in ORIGENS else 0,
-                    key=f"diag_aberto_origem_{idx_aberto}",
+                    key=f"diag_aberto_origem_{sufixo_estavel}",
                 )
                 d3, d4 = st.columns(2)
                 v_sistemas = d3.text_input("Sistema(s) utilizado(s)", value=aberto.get("sistemas", ""),
-                                            key=f"diag_aberto_sistemas_{idx_aberto}")
+                                            key=f"diag_aberto_sistemas_{sufixo_estavel}")
                 v_depende = d4.selectbox(
                     "Depende de terceiros?", ["Não", "Sim"],
                     index=1 if aberto.get("depende_terceiros") == "Sim" else 0,
-                    key=f"diag_aberto_depende_{idx_aberto}",
+                    key=f"diag_aberto_depende_{sufixo_estavel}",
                 )
                 v_quem = st.text_input("Quem? (se depende de terceiros)", value=aberto.get("quem", ""),
-                                        key=f"diag_aberto_quem_{idx_aberto}")
+                                        key=f"diag_aberto_quem_{sufixo_estavel}")
                 v_obs = st.text_area("Observações", value=aberto.get("obs", ""), height=80,
-                                      key=f"diag_aberto_obs_{idx_aberto}")
+                                      key=f"diag_aberto_obs_{sufixo_estavel}")
 
                 mudou = (
                     v_categoria != aberto.get("categoria", "") or v_origem != aberto.get("origem", "") or
@@ -1406,7 +1439,6 @@ def _tab_diario(pode_edit):
                     _registrar_toque(analista_atual, atividade_escolhida)
                 except Exception as e:
                     st.error(f"Não consegui iniciar a atividade '{atividade_escolhida}': {e}")
-                    st.exception(e)
                     st.stop()
                 st.rerun()
             if _botao_resiliente(b2, "⏸️ Pausa / Interrupção", "diag_tap_pausa", use_container_width=True):
@@ -1414,7 +1446,6 @@ def _tab_diario(pode_edit):
                     _registrar_toque(analista_atual, "Pausa / Interrupção")
                 except Exception as e:
                     st.error(f"Não consegui registrar a pausa: {e}")
-                    st.exception(e)
                     st.stop()
                 st.rerun()
             if _botao_resiliente(b3, "🏁 Finalizar o dia", "diag_tap_fim", use_container_width=True):
@@ -1422,7 +1453,6 @@ def _tab_diario(pode_edit):
                     _encerrar_dia(analista_atual)
                 except Exception as e:
                     st.error(f"Não consegui finalizar o dia: {e}")
-                    st.exception(e)
                     st.stop()
                 st.rerun()
 
@@ -2286,7 +2316,7 @@ def renderizar_diagnostico(papel, user=None):
 
     st.subheader("🗺️ Diagnóstico N2 — Mapeamento de Atividades Operacionais")
     st.caption("CX · Backoffice (N2) · Área responsável: PQI · entrega prevista 05/08/2026")
-    st.caption("🔧 build: 2026-08-03-fix-delete-linha-v1 — se você não está vendo exatamente "
+    st.caption("🔧 build: 2026-08-05-fix-sessioninfo-v1 — se você não está vendo exatamente "
                "este texto, o deploy ainda não atualizou.")
     if not editar:
         st.info("Modo somente leitura — peça a um supervisor ou administrador para editar.")
