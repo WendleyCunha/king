@@ -1,5 +1,4 @@
-streamlit==1.60.0
-starlette==0.41.3
+streamlit==1.38.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 google-cloud-firestore>=2.16.0
