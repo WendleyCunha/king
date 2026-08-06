@@ -8,7 +8,8 @@ do repositório (mesma pasta do main.py, não dentro de modulo/):
 
     tickets/common.py    → constantes, helpers, SLA, CRUD Firestore,
                             pendências entre setores, classificação de
-                            filas, visibilidade, histórico do cliente
+                            filas, visibilidade, histórico do cliente,
+                            WhatsApp de verdade (Twilio)
     tickets/strip.py      → componente único de card de ticket (tirinha)
     tickets/novo.py        → abertura de novo chamado
     tickets/filas.py       → Filas de Trabalho em abas + abas por setor
@@ -58,6 +59,13 @@ do módulo:
        desmembrado neste orquestrador + pacote `tickets/`, só para
        facilitar manutenção — nenhum comportamento mudou e a chamada
        externa (`renderizar_tickets`) continua idêntica.
+
+  [17] ACABAMENTO VISUAL "DECK" + WHATSAPP (v5): CSS novo pro job bar do
+       detalhe (`.tk-jobbar`) e pros cards da "Ficha do Ticket"
+       (`.tk-deck-title` / `.tk-deck-card-title` / `div[class*="st-key-
+       tk_deck_card_"]`) — usados por `tickets/detalhe.py` na reorganização
+       em colunas "Histórico & WhatsApp" / "Ficha do Ticket". NENHUMA
+       regra de CSS/JS existente foi removida ou alterada — só adição.
 """
 import streamlit as st
 
@@ -83,6 +91,10 @@ from tickets.common import (
     _caminho_motivo, PAGE_SIZE_CARDS, _paginar, _nav_paginas,
     get_db, listar_departamentos, listar_tabulacoes, resolver_destinatario_ticket,
     listar_usuarios,
+    # [v6] WhatsApp de verdade (Twilio) — reexportado pelo mesmo motivo dos demais
+    WHATSAPP_COLECAO, JANELA_WHATSAPP_H, normalizar_telefone,
+    listar_mensagens_whatsapp, minutos_desde_ultima_mensagem_cliente,
+    whatsapp_configurado, enviar_whatsapp,
 )
 from .mod_motivos import (
     listar_motivos_pai, motivos_pai_do_departamento,
@@ -208,21 +220,79 @@ def _render_estilo_paineis_redimensionaveis():
     /* Botões de view lado a lado, quebrando linha quando não couberem
        (em vez de um por coluna fixa, que ficaria espremido com muitos
        Departamentos cadastrados). */
-    div[class*="st-key-tk_view_buttons"],
-    div[class*="st-key-tk_view_buttons"] > div[data-testid="stVerticalBlock"] {
+    div[class*="st-key-tk_view_buttons"] {
+        display: block !important;
+    }
+    div[class*="st-key-tk_view_buttons"] div[data-testid="stVerticalBlock"] {
         display: flex !important;
         flex-direction: row !important;
         flex-wrap: wrap !important;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         margin-top: 4px;
+        width: 100% !important;
     }
-    div[class*="st-key-tk_view_buttons"] [data-testid="stElementContainer"] {
+    div[class*="st-key-tk_view_buttons"] div[data-testid="stVerticalBlockBorderWrapper"] {
+        display: contents !important;
+    }
+    div[class*="st-key-tk_view_buttons"] div[data-testid="stElementContainer"],
+    div[class*="st-key-tk_view_buttons"] .stButton {
         width: auto !important;
         flex: 0 0 auto !important;
+        margin: 0 !important;
     }
     div[class*="st-key-tk_view_buttons"] button {
-        white-space: nowrap;
+        white-space: nowrap !important;
+        width: auto !important;
+        padding: 4px 12px !important;
+        font-size: 0.78rem !important;
+        min-height: 30px !important;
+        height: 30px !important;
+        border-radius: 16px !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       [v17] JOB BAR — cabeçalho do painel de Detalhe (dados do ticket,
+       status/prioridade/SLA/cliente). Mesmo conteúdo de sempre, gerado
+       em tickets/detalhe.py com a classe `tk-jobbar` — aqui só o
+       acabamento visual (fundo em degradê suave, borda dourada por
+       cima, sombra), no espírito "job bar" de painéis de atendimento.
+       ═══════════════════════════════════════════════════════════ */
+    .tk-jobbar {
+        background: linear-gradient(180deg, #ffffff 0%, #fdfaf3 100%);
+        border: 1px solid #ecdfc9;
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin-bottom: 14px;
+        box-shadow: 0 3px 12px rgba(61,31,16,0.07);
+    }
+
+    /* [v17] Títulos das duas colunas do Detalhe ("Histórico & WhatsApp" /
+       "Ficha do Ticket") — rótulo discreto, maiúsculas, no espírito dos
+       cabeçalhos de coluna do Painel de Tickets acima. */
+    .tk-deck-title {
+        font-size: 0.72rem; font-weight: 800; letter-spacing: 1px;
+        text-transform: uppercase; color: #7a5f1a;
+        margin: 4px 0 8px;
+    }
+
+    /* [v17] Título de CADA card dentro das colunas (Cliente, Classificação,
+       Pendências, WhatsApp, Histórico interno, Dados do Pedido). */
+    .tk-deck-card-title {
+        font-size: 0.92rem; font-weight: 700; color: #2c3e50;
+        margin-bottom: 8px;
+    }
+
+    /* [v17] Cada bloco dentro das colunas do Detalhe vira um card próprio
+       — fundo branco, borda suave, sombra leve, respiro interno — em vez
+       de ficar tudo "colado" na mesma coluna sem separação visual. */
+    div[class*="st-key-tk_deck_card_"] {
+        background: #ffffff;
+        border: 1px solid #ecdfc9;
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 8px rgba(61,31,16,0.05);
     }
     </style>
     """), unsafe_allow_html=True)
