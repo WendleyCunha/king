@@ -46,6 +46,34 @@ Todo o resto do pacote `tickets/` importa deste arquivo.
   é uma regra da TELA de abertura de chamado, não do primitivo de gravação).
   Quem precisa do bloqueio é `abrir_solicitacao_cliente`, usada por
   `tickets/novo.py`.
+
+[v6 — WHATSAPP DE VERDADE (Twilio)] Novidade: envio e leitura de mensagens
+  reais de WhatsApp, ligadas ao TELEFONE do cliente (campo novo
+  `cliente_telefone` na solicitação — preenchido na abertura do chamado ou
+  editável depois no painel de detalhe).
+
+  Arquitetura (ver changelog completo no topo de `tickets/detalhe.py` e no
+  arquivo separado `webhook_whatsapp/main.py`):
+    • As mensagens NÃO ficam dentro do documento do ticket (cliente_codigo).
+      Ficam numa coleção PRÓPRIA, `whatsapp_conversas`, com um documento por
+      TELEFONE normalizado — porque é assim que a Twilio te avisa de uma
+      mensagem nova (só manda o número de telefone, não sabe nada sobre
+      "ticket" ou "cliente_codigo"). O painel de detalhe lê essa coleção
+      pelo telefone salvo na solicitação.
+    • ENVIAR (agente → cliente): função `enviar_whatsapp` abaixo, chama a
+      API da Twilio direto daqui de dentro do Streamlit. Funciona sem
+      nenhuma peça extra, desde que `twilio_account_sid`,
+      `twilio_auth_token` e `twilio_whatsapp_from` estejam em `st.secrets`.
+    • RECEBER (cliente → agente): a Twilio manda um webhook HTTP — e o
+      Streamlit Cloud NÃO expõe esse tipo de endpoint. Por isso existe o
+      arquivo separado `webhook_whatsapp/main.py` (uma Cloud Function do
+      Google, publicada por fora deste app) que recebe o aviso da Twilio e
+      grava a mensagem na MESMA coleção `whatsapp_conversas` — dali, o
+      Streamlit só precisa LER (função `listar_mensagens_whatsapp`).
+    • A regra das 24h da Twilio (fora da janela da última mensagem do
+      cliente, só dá pra mandar mensagem usando um "template" aprovado pelo
+      Meta) é checada em `minutos_desde_ultima_mensagem_cliente` e usada
+      pela UI pra avisar/desabilitar o envio livre — nunca é ignorada.
 """
 import streamlit as st
 import pandas as pd
@@ -69,6 +97,11 @@ from database import (
 
 BRT     = timezone(timedelta(hours=-3))
 COLECAO = "tickets"
+
+# Coleção do histórico de WhatsApp — 1 documento por TELEFONE normalizado
+# (não por ticket/cliente_codigo — ver changelog [v6] acima).
+WHATSAPP_COLECAO = "whatsapp_conversas"
+JANELA_WHATSAPP_H = 24  # janela de envio livre da Twilio (fora dela, precisa de template)
 
 # ── Configurações Zendesk ─────────────────────────────────────────
 ZENDESK_SUBDOMAIN = "kingstarcolchoessupport"
@@ -133,6 +166,7 @@ def texto_busca(t) -> str:
         t.get("id",""), t.get("id_zendesk",""), t.get("assunto",""),
         t.get("descricao",""), t.get("solicitante_nome",""),
         t.get("cliente_nome",""), t.get("cliente_codigo",""),
+        t.get("cliente_telefone",""),
         t.get("tabulacao",""), t.get("departamento",""),
         t.get("categoria",""), t.get("subcategoria",""),
         t.get("prioridade",""), t.get("status",""),
@@ -821,6 +855,130 @@ def vincular_ticket_relacionado(tid: str, novo_id: str):
     antigas que ainda a invoquem.
     """
     pass
+
+# ═══════════════════════════════════════════════════════════════════
+# WHATSAPP DE VERDADE (Twilio) — ver changelog [v6] no topo do arquivo
+# ═══════════════════════════════════════════════════════════════════
+def normalizar_telefone(numero: str) -> str:
+    """
+    Normaliza um telefone para o formato E.164 (+55DDDNUMERO), aceitando
+    qualquer formatação de entrada (com/sem parênteses, espaço, traço,
+    DDI). Números de 10 ou 11 dígitos SEM '+' são tratados como Brasil
+    (DDD + número) e recebem o DDI 55 automaticamente. Retorna "" se não
+    houver nenhum dígito.
+    """
+    numero = (numero or "").strip()
+    digitos = "".join(c for c in numero if c.isdigit())
+    if not digitos:
+        return ""
+    if len(digitos) in (10, 11) and not numero.strip().startswith("+"):
+        digitos = "55" + digitos
+    return "+" + digitos
+
+def _whatsapp_ref(telefone_norm: str):
+    return get_db().collection(WHATSAPP_COLECAO).document(telefone_norm.lstrip("+"))
+
+def listar_mensagens_whatsapp(telefone: str) -> list:
+    """Histórico completo (enviadas + recebidas) de WhatsApp com este
+    telefone, mais antigas primeiro. Leitura FRESCA (sem cache) — o webhook
+    de recebimento (Cloud Function externa) grava direto no Firestore, sem
+    passar pelo cache do Streamlit, então uma leitura cacheada poderia
+    esconder uma mensagem nova do cliente por até alguns segundos."""
+    tel = normalizar_telefone(telefone)
+    if not tel:
+        return []
+    doc = _whatsapp_ref(tel).get()
+    if not doc.exists:
+        return []
+    data = doc.to_dict() or {}
+    return sorted(data.get("mensagens", []), key=lambda m: m.get("criado_em", ""))
+
+def minutos_desde_ultima_mensagem_cliente(telefone: str):
+    """Minutos desde a última mensagem RECEBIDA do cliente (direção 'in'),
+    ou None se ele nunca escreveu. Usado pra saber se o envio livre
+    (free-form) ainda está dentro da janela de 24h da Twilio — fora dela,
+    só um template aprovado pelo Meta funciona (ver skill de referência:
+    twilio-whatsapp-send-message)."""
+    msgs = listar_mensagens_whatsapp(telefone)
+    recebidas = [m for m in msgs if m.get("direcao") == "in"]
+    if not recebidas:
+        return None
+    ultima = recebidas[-1]
+    try:
+        dt = datetime.fromisoformat(str(ultima.get("criado_em","")).replace(" ","T")).replace(tzinfo=BRT)
+        return (datetime.now(BRT) - dt).total_seconds() / 60.0
+    except Exception:
+        return None
+
+def whatsapp_configurado() -> bool:
+    """True se as 3 chaves da Twilio estiverem em st.secrets. Usada pela UI
+    pra mostrar um aviso amigável em vez de deixar o envio quebrar."""
+    return bool(
+        st.secrets.get("twilio_account_sid")
+        and st.secrets.get("twilio_auth_token")
+        and st.secrets.get("twilio_whatsapp_from")
+    )
+
+def _twilio_client():
+    """Import local de propósito (mesmo padrão de `import requests as req`
+    já usado em sync_zendesk) — assim o módulo `twilio` só precisa estar
+    instalado se essa função for de fato chamada, sem virar uma dependência
+    obrigatória pro resto do sistema."""
+    sid = st.secrets.get("twilio_account_sid")
+    token = st.secrets.get("twilio_auth_token")
+    if not sid or not token:
+        return None
+    from twilio.rest import Client
+    return Client(sid, token)
+
+def enviar_whatsapp(telefone: str, texto: str, autor_nome: str) -> tuple:
+    """
+    Envia uma mensagem de WhatsApp de verdade via Twilio (modo 'free-form'
+    — só é aceito pela Twilio dentro da janela de 24h da última mensagem
+    RECEBIDA do cliente; fora dela, a Twilio recusa o envio. A UI que chama
+    esta função deve checar `minutos_desde_ultima_mensagem_cliente` ANTES
+    de oferecer o botão de enviar, pra não deixar o atendente tentar um
+    envio que vai falhar).
+
+    Grava tanto o envio bem-sucedido quanto a tentativa na coleção
+    `whatsapp_conversas` (mesma que o webhook de recebimento usa), pra o
+    histórico ficar completo e em ordem cronológica única.
+
+    Retorna (ok: bool, mensagem_ou_erro: str).
+    """
+    tel = normalizar_telefone(telefone)
+    if not tel:
+        return False, "Telefone do cliente não informado ou inválido."
+
+    cliente = _twilio_client()
+    if not cliente:
+        return False, ("WhatsApp não configurado — faltam `twilio_account_sid` / "
+                        "`twilio_auth_token` em Secrets.")
+
+    remetente = st.secrets.get("twilio_whatsapp_from", "")
+    if not remetente:
+        return False, "Falta `twilio_whatsapp_from` em Secrets (seu número aprovado ou o do sandbox)."
+    if not remetente.startswith("whatsapp:"):
+        remetente = f"whatsapp:{remetente}"
+
+    try:
+        msg = cliente.messages.create(from_=remetente, to=f"whatsapp:{tel}", body=texto)
+    except Exception as e:
+        return False, f"Erro ao enviar pela Twilio: {e}"
+
+    ref = _whatsapp_ref(tel)
+    doc = ref.get()
+    data = doc.to_dict() if doc.exists else {"telefone": tel, "mensagens": []}
+    mensagens = list(data.get("mensagens", []))
+    mensagens.append({
+        "direcao": "out", "texto": texto, "autor": autor_nome,
+        "message_sid": msg.sid, "status": msg.status, "criado_em": agora_brt(),
+    })
+    data["mensagens"] = mensagens
+    data["telefone"] = tel
+    data["atualizado_em"] = agora_brt()
+    ref.set(data)
+    return True, "Mensagem enviada!"
 
 # ── Sync Zendesk ───────────────────────────────────────────────────
 def sync_zendesk() -> tuple:
