@@ -18,6 +18,37 @@ tickets/common.py):
     agora que a gravação é sempre um read-modify-write do documento
     inteiro do cliente (necessário pra não perder outras solicitações
     dele que estejam sendo editadas ao mesmo tempo).
+
+[v6 — REORGANIZAÇÃO VISUAL + WHATSAPP + FICHA] A pedido, o corpo do
+  detalhe (`_detalhe_corpo`) passou a se organizar em 3 blocos visuais,
+  no espírito do "Shuffle" da Nubank (job bar → thread → deck de cards),
+  MAS reaproveitando exatamente as mesmas funções de regra de negócio que
+  já existiam — nenhuma regra mudou, só a organização visual:
+
+    1) JOB BAR — o cartão de cabeçalho que já existia (status, prioridade,
+       SLA, cliente, motivo) ganhou a classe `tk-jobbar` pra receber o
+       acabamento visual novo (ver CSS em mod_tickets.py). Conteúdo
+       idêntico a antes.
+
+    2) COLUNA "💬 Histórico & WhatsApp" (esquerda) — reúne, na mesma
+       ordem de sempre: a tratativa (status + comentário), o registro de
+       contato/observação avulsa, o histórico de comentários (bolhas) e,
+       NOVO, o bloco de WhatsApp de verdade (`_bloco_whatsapp`) — envio
+       via Twilio + leitura do histórico gravado pelo webhook externo
+       (ver `webhook_whatsapp/main.py` e o changelog [v6] em
+       `tickets/common.py`).
+
+    3) COLUNA "🗂️ Ficha do Ticket" (direita) — reúne: a Ficha do Cliente
+       (NOVO — nome/código/telefone, com o telefone editável aqui, já que
+       é ele que habilita o WhatsApp), a Classificação Motivo Filho/Etapa
+       (`_bloco_classificacao`, EXATAMENTE como antes), as Pendências
+       entre Setores (`_bloco_pendencias_setor`, EXATAMENTE como antes),
+       Dados do Pedido (NOVO — placeholder até a integração com o módulo
+       de Rastreio/Logística ser conectada) e o histórico de classificação.
+
+  A validação de "Resolvido" (Validar e encerrar / Reabrir) continua em
+  largura cheia, embaixo das duas colunas — é uma ação final, não faz
+  sentido "escondida" dentro de uma coluna lateral.
 """
 import time
 import streamlit as st
@@ -34,7 +65,105 @@ from .common import (
     registrar_solicitacao_setor, responder_solicitacao_setor,
     listar_departamentos, _render_bloco_historico_cliente,
     buscar_ticket_por_id,
+    normalizar_telefone, listar_mensagens_whatsapp,
+    minutos_desde_ultima_mensagem_cliente, whatsapp_configurado, enviar_whatsapp,
 )
+
+
+# ── Ficha do Cliente (NOVO) — nome/código/telefone, telefone editável ──
+def _bloco_ficha_cliente(t, tid, user):
+    st.markdown('<div class="tk-deck-card-title">📇 Cliente</div>', unsafe_allow_html=True)
+    col_nome, col_cod = st.columns(2)
+    col_nome.text_input("Nome", value=t.get("cliente_nome","") or "—", key=f"cli_nome_ro_{tid}", disabled=True)
+    col_cod.text_input("Código", value=t.get("cliente_codigo","") or "—", key=f"cli_cod_ro_{tid}", disabled=True)
+
+    tel_atual = t.get("cliente_telefone","") or ""
+    tel_novo = st.text_input(
+        "Telefone / WhatsApp", value=tel_atual, key=f"cli_tel_{tid}",
+        placeholder="Ex: (11) 91234-5678",
+        help="É este número que habilita o envio de WhatsApp de verdade, no bloco à esquerda.",
+    )
+    if tel_novo.strip() != tel_atual:
+        atualizar_ticket(tid, {"cliente_telefone": tel_novo.strip()})
+        st.rerun()
+
+
+# ── Dados do Pedido (NOVO — placeholder) ───────────────────────────
+def _bloco_dados_pedido(t):
+    st.markdown('<div class="tk-deck-card-title">📦 Dados do Pedido</div>', unsafe_allow_html=True)
+    st.markdown(_html(f"""
+    <div style="background:#FBF3D9;border:1px solid #D4A12C;border-radius:10px;
+                padding:10px 14px;color:#7A5C12;font-size:0.82rem;">
+        🚧 Ainda não conectado ao módulo de Rastreio/Logística. Assim que essa
+        integração for feita, este card vai mostrar automaticamente o pedido/entrega
+        vinculado ao código do cliente <b>{esc(t.get('cliente_codigo') or '—')}</b>.
+    </div>"""), unsafe_allow_html=True)
+
+
+# ── WhatsApp de verdade (NOVO) ──────────────────────────────────────
+def _bloco_whatsapp(t, tid, user):
+    st.markdown('<div class="tk-deck-card-title">📱 WhatsApp</div>', unsafe_allow_html=True)
+
+    if not whatsapp_configurado():
+        st.info("WhatsApp ainda não configurado. Peça ao administrador para adicionar "
+                "`twilio_account_sid`, `twilio_auth_token` e `twilio_whatsapp_from` em "
+                "Secrets (veja o guia de configuração da Twilio).")
+        return
+
+    telefone = t.get("cliente_telefone", "")
+    if not telefone:
+        st.caption("Nenhum telefone cadastrado para este cliente — preencha em "
+                   "📇 Cliente, no painel ao lado, para habilitar o envio.")
+        return
+
+    mensagens = listar_mensagens_whatsapp(telefone)
+    with st.container(height=260):
+        if not mensagens:
+            st.caption("Nenhuma mensagem de WhatsApp com este número ainda.")
+        else:
+            for m in mensagens[-40:]:  # só as últimas 40, pra não pesar a tela
+                saida = m.get("direcao") == "out"
+                alinha = "right" if saida else "left"
+                bg = "#DCF8C6" if saida else "#ffffff"
+                rodape = esc(str(m.get("criado_em",""))[11:16])
+                if saida and m.get("autor"):
+                    rodape += f" · {esc(m['autor'])}"
+                st.markdown(_html(f"""
+                <div style="text-align:{alinha};margin:4px 0;">
+                    <div style="display:inline-block;background:{bg};border:1px solid #e2e8f0;
+                                padding:7px 11px;border-radius:9px;max-width:82%;text-align:left;
+                                font-size:0.85rem;">
+                        {esc(m.get("texto",""))}
+                        <div style="font-size:0.64rem;color:#8a8a8a;margin-top:3px;text-align:right;">
+                            {rodape}
+                        </div>
+                    </div>
+                </div>"""), unsafe_allow_html=True)
+
+    minutos = minutos_desde_ultima_mensagem_cliente(telefone)
+    dentro_da_janela = minutos is not None and minutos < (24 * 60)
+    if not dentro_da_janela:
+        st.caption("⚠️ Fora da janela de 24h da última mensagem do cliente (ou ele nunca "
+                   "escreveu) — a Twilio só aceita envio livre dentro dessa janela; fora "
+                   "dela, precisa de um **template aprovado pelo Meta**.")
+
+    with st.form(f"form_whats_{tid}", clear_on_submit=True):
+        texto_whats = st.text_area("Mensagem", height=68, key=f"whats_txt_{tid}",
+                                    placeholder="Escrever mensagem de WhatsApp...",
+                                    label_visibility="collapsed")
+        enviar_whats = st.form_submit_button(
+            "📤 Enviar WhatsApp", type="primary", use_container_width=True,
+            disabled=not dentro_da_janela,
+        )
+
+    if enviar_whats:
+        if texto_whats.strip():
+            ok, msg = enviar_whatsapp(telefone, texto_whats.strip(), user.get("nome",""))
+            (st.success if ok else st.error)(msg)
+            if ok:
+                time.sleep(.4); st.rerun()
+        else:
+            st.warning("Escreva algo antes de enviar.")
 
 
 # ── Classificação Motivo Filho / Etapa (SLA1 + SLA2) ───────────────
@@ -43,8 +172,8 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
     if not motivo_pai_nome:
         return  # ticket antigo/legado (sem árvore de motivos) — não se aplica
 
-    st.markdown("---")
-    st.markdown("#### 🗂️ Classificação (Motivo Filho / Etapa)")
+    st.markdown('<div class="tk-deck-card-title">🗂️ Classificação (Motivo Filho / Etapa)</div>',
+                unsafe_allow_html=True)
 
     if t.get("etapa_travada"):
         st.markdown(_html(f"""
@@ -180,8 +309,8 @@ def _bloco_classificacao(t, tid, user, papel, pode_agir):
 
 # ── Pendências entre Setores (dentro do ticket) ────────────────────
 def _bloco_pendencias_setor(t, tid, user, papel):
-    st.markdown("---")
-    st.markdown("#### 📨 Pendências entre Setores")
+    st.markdown('<div class="tk-deck-card-title">📨 Pendências entre Setores</div>',
+                unsafe_allow_html=True)
     st.caption("Peça pra outro setor resolver algo sem abrir um chamado novo — fica "
                "tudo registrado aqui, dentro deste mesmo ticket.")
 
@@ -254,96 +383,9 @@ def _bloco_pendencias_setor(t, tid, user, papel):
                         st.warning("Escreva o que você precisa antes de enviar.")
 
 
-def _detalhe_corpo(t, tid, user, papel):
-    sl, spct, svenc = sla_restante(t)
-    sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
-    pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
-    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
-    pendente_vencido = ticket_vencido_pendente(t)
-
-    if pendente_vencido:
-        st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o prazo VENCIDO!</div>'),
-                    unsafe_allow_html=True)
-
-    if tem_interacao_nao_vista(t, user):
-        st.markdown(
-            '<span class="tk-blink-info">🔵 Houve uma nova interação neste ticket que você '
-            'ainda não respondeu</span>', unsafe_allow_html=True
-        )
-
-    id_vis = esc(t.get("id_zendesk", tid[:8]))
-    titulo = esc(t.get("assunto","—"))
-    dep    = esc(t.get("departamento") or t.get("categoria") or "—")
-    caminho_mot = esc(_caminho_motivo(t)) or esc(t.get("motivo_pai") or "—")
-    criado = esc(t.get("criado_em","")[:16])
-    atend  = t.get("atendentes", [])
-    atend_str = esc(", ".join(atend)) if atend else "🌐 Todo o departamento"
-    cli_cod  = esc(t.get("cliente_codigo") or "—")
-    cli_nome = esc(t.get("cliente_nome") or "—")
-    solicit  = esc(t.get("solicitante_nome") or "—")
-
-    sla1_badge = ""
-    if t.get("sla1_definido"):
-        if t.get("sla1_cumprido"):
-            sla1_badge = '<span class="tk-badge-sla1-ok">🎯 Triagem: dentro do prazo</span>'
-        else:
-            sla1_badge = '<span class="tk-badge-sla1-perd">🎯 Triagem: prazo perdido</span>'
-
-    pendencias_badges = ""
-    for pend in solicitacoes_abertas(t):
-        cor_pend = cor_departamento(pend.get("setor_destino",""))
-        pendencias_badges += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
-                              f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
-
-    st.markdown(_html(f"""
-    <div style="background:#fff;border:1px solid #e2e8f0;border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};
-                border-radius:12px;padding:18px 20px;margin-bottom:16px;">
-        <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
-        <div style="margin-bottom:10px;">
-            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}{pendencias_badges}
-            <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
-                🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
-            </span>
-        </div>
-        <div style="font-size:0.8rem;color:#2c3e50;margin-bottom:6px;">
-            🧾 Cliente: <b>{cli_nome}</b> &nbsp;·&nbsp; Código: <b>{cli_cod}</b>
-        </div>
-        <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
-            🙋 Solicitante: {solicit} &nbsp;·&nbsp; 👥 Atendentes: {atend_str}
-            &nbsp;·&nbsp; ⏱ {esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b>
-        </div>
-    </div>"""), unsafe_allow_html=True)
-
-    relacionados = tickets_do_cliente(t.get("cliente_codigo"), excluir_id=tid)
-    if relacionados:
-        abertos_rel = sum(1 for x in relacionados if x.get("status") in STATUS_ABERTOS)
-        with st.expander(
-            f"🗂 Histórico do cliente — {len(relacionados)} outra(s) solicitação(ões)"
-            + (f" ({abertos_rel} em aberto)" if abertos_rel else ""),
-            expanded=False
-        ):
-            _render_bloco_historico_cliente(relacionados)
-
-    st.markdown("**📝 Descrição**")
-    st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
-                 height=140, disabled=True, label_visibility="collapsed",
-                 key=f"desc_{tid}")
-
-    status_atual = t.get("status", "aberto")
-    terminal     = status_atual in ("finalizado", "cancelado")
-    finalizado   = status_atual == "finalizado"
-    pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
-    status_edit  = pode_agir and not terminal
-    STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
-
-    # ── Classificação Motivo Filho / Etapa (SLA1 congelado / SLA2 travado) ──
-    _bloco_classificacao(t, tid, user, papel, pode_agir and not terminal)
-
-    # ── Pendências entre Setores (não cria ticket novo, mesmo histórico) ──
-    if not terminal:
-        _bloco_pendencias_setor(t, tid, user, papel)
-
-    st.markdown("---")
+# ── Tratativa (status + comentário) + observação avulsa + histórico ──
+def _bloco_tratativa_e_historico(t, tid, user, papel, status_atual, terminal, finalizado, status_edit, STATUS_OPC,
+                                  sv, sbg, sc, pv, pbg, pc):
     if finalizado:
         st.info("🔒 Este chamado está **finalizado** e foi encerrado definitivamente. "
                  "Não é mais possível comentar ou alterar o status — consulte o "
@@ -406,33 +448,149 @@ def _detalhe_corpo(t, tid, user, papel):
                 else:
                     st.warning("Escreva algo antes de registrar.")
 
-    st.markdown("#### 💬 Histórico")
+    st.markdown('<div class="tk-deck-card-title">💬 Histórico interno</div>', unsafe_allow_html=True)
     comentarios = t.get("comentarios", [])
     if not comentarios:
         st.caption("Nenhum comentário ainda.")
     else:
-        for c in comentarios:
-            alinha = "right" if c.get("autor") == user.get("nome") else "left"
-            bg_com = "#EFF6FF" if alinha == "right" else "#f8f9fa"
-            bord   = "#2563EB" if alinha == "right" else "#C9A84C"
-            st.markdown(_html(
-                f'<div style="text-align:{alinha};margin:6px 0;">'
-                f'<div style="display:inline-block;background:{bg_com};'
-                f'border-left:3px solid {bord};padding:8px 12px;'
-                f'border-radius:8px;max-width:80%;text-align:left;">'
-                f'<b style="font-size:0.8rem;">{esc(c.get("autor",""))}</b>'
-                f'<span style="color:#64778d;font-size:0.72rem;margin-left:6px;">{esc(c.get("data","")[:16])}</span>'
-                f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
-                f'</div></div>'), unsafe_allow_html=True)
+        with st.container(height=260):
+            for c in comentarios:
+                alinha = "right" if c.get("autor") == user.get("nome") else "left"
+                bg_com = "#EFF6FF" if alinha == "right" else "#f8f9fa"
+                bord   = "#2563EB" if alinha == "right" else "#C9A84C"
+                st.markdown(_html(
+                    f'<div style="text-align:{alinha};margin:6px 0;">'
+                    f'<div style="display:inline-block;background:{bg_com};'
+                    f'border-left:3px solid {bord};padding:8px 12px;'
+                    f'border-radius:8px;max-width:80%;text-align:left;">'
+                    f'<b style="font-size:0.8rem;">{esc(c.get("autor",""))}</b>'
+                    f'<span style="color:#64778d;font-size:0.72rem;margin-left:6px;">{esc(c.get("data","")[:16])}</span>'
+                    f'<br><span style="font-size:0.88rem;">{esc(c.get("texto",""))}</span>'
+                    f'</div></div>'), unsafe_allow_html=True)
 
-    if t.get("historico_etapas"):
-        with st.expander("🗂️ Histórico de classificação (Motivo Filho / Etapa)"):
-            for h in t["historico_etapas"]:
-                marca = "🔴" if h.get("vermelha") else "⚫"
-                prazo = f" · prazo: {h.get('data_prevista')}" if h.get("vermelha") else ""
-                st.caption(f"{marca} {h.get('etapa','')} — por {h.get('por','')} "
-                           f"em {str(h.get('quando',''))[:16]}{prazo}")
 
+def _detalhe_corpo(t, tid, user, papel):
+    sl, spct, svenc = sla_restante(t)
+    sv, sbg, sc, _  = STATUS_CFG.get(t.get("status","aberto"),("—","#fff","#000","#000"))
+    pv, pbg, pc     = PRIO_CFG.get(t.get("prioridade","normal"),("—","#fff","#000"))
+    sla_cor = GOLD_VENC if svenc else ("#CA8A04" if spct>70 else GREEN_OK)
+    pendente_vencido = ticket_vencido_pendente(t)
+
+    if pendente_vencido:
+        st.markdown(_html('<div class="tk-banner">⚠️ Este ticket está com o prazo VENCIDO!</div>'),
+                    unsafe_allow_html=True)
+
+    if tem_interacao_nao_vista(t, user):
+        st.markdown(
+            '<span class="tk-blink-info">🔵 Houve uma nova interação neste ticket que você '
+            'ainda não respondeu</span>', unsafe_allow_html=True
+        )
+
+    id_vis = esc(t.get("id_zendesk", tid[:8]))
+    titulo = esc(t.get("assunto","—"))
+    dep    = esc(t.get("departamento") or t.get("categoria") or "—")
+    caminho_mot = esc(_caminho_motivo(t)) or esc(t.get("motivo_pai") or "—")
+    criado = esc(t.get("criado_em","")[:16])
+    atend  = t.get("atendentes", [])
+    atend_str = esc(", ".join(atend)) if atend else "🌐 Todo o departamento"
+    cli_cod  = esc(t.get("cliente_codigo") or "—")
+    cli_nome = esc(t.get("cliente_nome") or "—")
+    solicit  = esc(t.get("solicitante_nome") or "—")
+
+    sla1_badge = ""
+    if t.get("sla1_definido"):
+        if t.get("sla1_cumprido"):
+            sla1_badge = '<span class="tk-badge-sla1-ok">🎯 Triagem: dentro do prazo</span>'
+        else:
+            sla1_badge = '<span class="tk-badge-sla1-perd">🎯 Triagem: prazo perdido</span>'
+
+    pendencias_badges = ""
+    for pend in solicitacoes_abertas(t):
+        cor_pend = cor_departamento(pend.get("setor_destino",""))
+        pendencias_badges += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
+                              f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
+
+    # ── (1) JOB BAR — mesmo conteúdo de sempre, classe nova (tk-jobbar)
+    # só pro acabamento visual (ver CSS em mod_tickets.py). ──
+    st.markdown(_html(f"""
+    <div class="tk-jobbar" style="border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};">
+        <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
+        <div style="margin-bottom:10px;">
+            {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}{pendencias_badges}
+            <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
+                🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
+            </span>
+        </div>
+        <div style="font-size:0.8rem;color:#2c3e50;margin-bottom:6px;">
+            🧾 Cliente: <b>{cli_nome}</b> &nbsp;·&nbsp; Código: <b>{cli_cod}</b>
+        </div>
+        <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
+            🙋 Solicitante: {solicit} &nbsp;·&nbsp; 👥 Atendentes: {atend_str}
+            &nbsp;·&nbsp; ⏱ {esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b>
+        </div>
+    </div>"""), unsafe_allow_html=True)
+
+    relacionados = tickets_do_cliente(t.get("cliente_codigo"), excluir_id=tid)
+    if relacionados:
+        abertos_rel = sum(1 for x in relacionados if x.get("status") in STATUS_ABERTOS)
+        with st.expander(
+            f"🗂 Histórico do cliente — {len(relacionados)} outra(s) solicitação(ões)"
+            + (f" ({abertos_rel} em aberto)" if abertos_rel else ""),
+            expanded=False
+        ):
+            _render_bloco_historico_cliente(relacionados)
+
+    st.markdown("**📝 Descrição**")
+    st.text_area("Descrição", value=str(t.get("descricao") or t.get("assunto","—")),
+                 height=140, disabled=True, label_visibility="collapsed",
+                 key=f"desc_{tid}")
+
+    status_atual = t.get("status", "aberto")
+    terminal     = status_atual in ("finalizado", "cancelado")
+    finalizado   = status_atual == "finalizado"
+    pode_agir    = (papel in ("supervisor", "adm")) or _atribuido_a(t, user)
+    status_edit  = pode_agir and not terminal
+    STATUS_OPC   = [k for k in STATUS_CFG.keys() if k != "finalizado"]
+
+    st.markdown("---")
+
+    # ── (2) COLUNA ESQUERDA "Histórico & WhatsApp" / (3) COLUNA DIREITA
+    # "Ficha do Ticket" — mesmas funções de regra de negócio de sempre,
+    # só organizadas lado a lado (ver docstring do módulo, changelog [v6]). ──
+    col_thread, col_deck = st.columns([1, 1.05])
+
+    with col_thread:
+        st.markdown('<div class="tk-deck-title">💬 Histórico &amp; WhatsApp</div>', unsafe_allow_html=True)
+        with st.container(key=f"tk_deck_card_{tid}_trat"):
+            _bloco_tratativa_e_historico(
+                t, tid, user, papel, status_atual, terminal, finalizado, status_edit, STATUS_OPC,
+                sv, sbg, sc, pv, pbg, pc,
+            )
+        if not terminal:
+            with st.container(key=f"tk_deck_card_{tid}_whats"):
+                _bloco_whatsapp(t, tid, user)
+
+    with col_deck:
+        st.markdown('<div class="tk-deck-title">🗂️ Ficha do Ticket</div>', unsafe_allow_html=True)
+        with st.container(key=f"tk_deck_card_{tid}_cliente"):
+            _bloco_ficha_cliente(t, tid, user)
+        with st.container(key=f"tk_deck_card_{tid}_classif"):
+            _bloco_classificacao(t, tid, user, papel, pode_agir and not terminal)
+        if not terminal:
+            with st.container(key=f"tk_deck_card_{tid}_pend"):
+                _bloco_pendencias_setor(t, tid, user, papel)
+        with st.container(key=f"tk_deck_card_{tid}_pedido"):
+            _bloco_dados_pedido(t)
+
+        if t.get("historico_etapas"):
+            with st.expander("🗂️ Histórico de classificação (Motivo Filho / Etapa)"):
+                for h in t["historico_etapas"]:
+                    marca = "🔴" if h.get("vermelha") else "⚫"
+                    prazo = f" · prazo: {h.get('data_prevista')}" if h.get("vermelha") else ""
+                    st.caption(f"{marca} {h.get('etapa','')} — por {h.get('por','')} "
+                               f"em {str(h.get('quando',''))[:16]}{prazo}")
+
+    # ── Validação de "Resolvido" — largura cheia, é uma ação final ──
     if status_atual == "resolvido" and t.get("aberto_por") == user.get("usuario"):
         st.markdown("---")
         st.markdown(_html(
