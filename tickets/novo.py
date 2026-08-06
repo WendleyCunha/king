@@ -18,6 +18,11 @@ tickets/common.py), esta tela passou a:
   • Não usa mais `vincular_ticket_relacionado` nem `tickets_relacionados`:
     como toda solicitação do mesmo cliente já vive no MESMO documento
     contêiner, não existe mais "ticket separado" para linkar.
+
+[v6] Novo campo "Telefone / WhatsApp do cliente" — opcional na abertura
+     (pode ser preenchido/corrigido depois, no painel de detalhe), mas é
+     ele que habilita o envio de WhatsApp de verdade (ver tickets/common.py,
+     bloco WHATSAPP DE VERDADE).
 """
 import time
 import streamlit as st
@@ -108,6 +113,13 @@ def _render_novo(user):
     cli_codigo = cl1.text_input("Código do cliente *", placeholder="Ex: 10234", key="novo_cli_codigo")
     cli_nome   = cl2.text_input("Nome do cliente *", placeholder="Ex: João da Silva", key="novo_cli_nome")
 
+    cli_telefone = st.text_input(
+        "Telefone / WhatsApp do cliente", placeholder="Ex: (11) 91234-5678",
+        key="novo_cli_telefone",
+        help="Opcional aqui, mas é ele que habilita o envio de WhatsApp de verdade dentro do "
+             "ticket. Pode ser preenchido ou corrigido depois, no painel de detalhe.",
+    )
+
     cod_norm = normalizar_codigo_cliente(cli_codigo)
     tickets_cliente = tickets_do_cliente(cod_norm) if cod_norm else []
 
@@ -123,6 +135,16 @@ def _render_novo(user):
         </div>"""), unsafe_allow_html=True)
         with st.expander(f"📜 Ver histórico deste cliente ({len(tickets_cliente)} solicitação(ões))"):
             _render_bloco_historico_cliente(tickets_cliente)
+
+        # Se algum registro anterior já tiver telefone salvo e o campo desta
+        # tela ainda estiver vazio, sugere o mesmo telefone (mais provável
+        # de estar certo do que pedir pro atendente redigitar).
+        if not cli_telefone.strip():
+            tel_anterior = next((x.get("cliente_telefone") for x in tickets_cliente
+                                 if x.get("cliente_telefone")), "")
+            if tel_anterior:
+                st.caption(f"💡 Telefone já registrado para este cliente: **{tel_anterior}** "
+                           f"(preencha o campo acima se quiser reaproveitar).")
 
         if motivo_obj:
             conflito = _solicitacao_conflitante(tickets_cliente, motivo_obj["nome"])
@@ -162,11 +184,13 @@ def _render_novo(user):
                     "categoria": dep_sel,
                     "motivo_pai": motivo_obj["nome"] if motivo_obj else "",
                     "motivo_pai_id": motivo_obj["id"] if motivo_obj else "",
+                    "motivo_filho": filho_sel_nome,
                     "sla1_prazo_dias": sla_dias,
                     "prioridade": (motivo_obj.get("prioridade", "normal") if motivo_obj else "normal"),
                     "atendentes": [],
                     "cliente_codigo": cod_norm,
                     "cliente_nome": cli_nome.strip(),
+                    "cliente_telefone": cli_telefone.strip(),
                     "solicitante_nome": user.get("nome",""),
                     "aberto_por": user.get("usuario",""),
                 })
