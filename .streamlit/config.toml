@@ -9,3 +9,15 @@ textColor = "#2C3E50"
 [server]
 # Mantém a sessão estável (evita recarregar a página inteira)
 runOnSave = false
+
+# --- AJUSTES CONTRA QUEDAS E DESCONEXÕES (NGROK / INATIVIDADE) ---
+# Aumenta o tempo limite de ping do WebSocket para 10 minutos (600s)
+# Evita que o Ngrok/Streamlit encerre a conexão por falta de tráfego
+websocketPingTimeout = 600
+
+# Desativa verificações rigorosas de origem cruzada que o Ngrok costuma quebrar
+enableCORS = false
+enableXsrfProtection = false
+
+# Garante que o navegador tente reconectar o WebSocket sem derrubar o processo
+headless = true
