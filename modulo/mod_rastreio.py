@@ -49,9 +49,9 @@ except Exception as _erro_import_logistica:
 # Import isolado: Rastreio ao Vivo (mapa em tempo real do motorista, com
 # distância/ETA e alerta de proximidade). Se qualquer peça dessa
 # funcionalidade nova ainda não estiver no seu database.py / faltando o
-# arquivo mod_rastreio_live.py, a seção "📍 Rastreio ao vivo" simplesmente
-# não aparece — o resto do Rastreio (Dashboard, Exportar, Cadastros,
-# baixa de entrega) continua 100% funcional.
+# arquivo mod_rastreio_live.py, a aba "📍 Ao Vivo" avisa e explica o que
+# falta, mas o resto do Rastreio (Dashboard, Exportar, Cadastros, baixa de
+# entrega) continua 100% funcional.
 try:
     from database import (iniciar_rastreio_live_db, obter_config_entrega_live_db,
                           geocodificar_endereco_db, desativar_rastreio_live_db)
@@ -196,93 +196,6 @@ def _body_html(rota, tot, ok, fail, nt, pct_n, pct_o):
     </div>""")
 
 
-# ── NOVO: Rastreio ao vivo de UMA entrega específica ───────────────
-# Renderiza, dentro da aba "Fila de Clientes" de um motorista, um seletor
-# de entrega + o botão de ativação (com geocodificação automática e
-# fallback manual) + o mapa em tempo real, uma vez ativado.
-def _secao_rastreio_ao_vivo(dr, ch):
-    if not _RASTREIO_LIVE_OK:
-        st.caption(
-            "📍 Rastreio ao vivo indisponível no momento (faltam funções novas "
-            "no database.py ou o arquivo modulo/mod_rastreio_live.py)."
-        )
-        with st.expander("Detalhe técnico"):
-            st.code(_erro_rastreio_live_msg, language="text")
-        return
-
-    if "_doc_id" not in dr.columns:
-        st.caption(
-            "📍 Rastreio ao vivo precisa do database_logistica.py ativo "
-            "(é ele que fornece o identificador de cada entrega)."
-        )
-        return
-
-    st.markdown("##### 📍 Rastreio ao vivo")
-
-    candidatas = dr[dr["_doc_id"].notna() & (dr["_doc_id"] != "")]
-    if candidatas.empty:
-        st.caption("Nenhuma entrega com identificador disponível para rastrear.")
-        return
-
-    opcoes = {
-        f"#{row.get('order','—')} · {row.get('title','—')}": row.get("_doc_id")
-        for _, row in candidatas.iterrows()
-    }
-    escolha_label = st.selectbox(
-        "Selecione a entrega para acompanhar", list(opcoes.keys()), key=f"sel_live_{ch}"
-    )
-    ticket_id = opcoes[escolha_label]
-    linha = candidatas[candidatas["_doc_id"] == ticket_id].iloc[0]
-
-    config = obter_config_entrega_live_db(ticket_id)
-
-    if config:
-        # Já ativado — mostra o mapa e a opção de encerrar.
-        renderizar_mapa_ao_vivo(ticket_id)
-        link_motorista = f"{URL_MOTORISTA_GPS}?ticket={ticket_id}"
-        st.caption(f"🔗 Link para o motorista compartilhar localização: `{link_motorista}`")
-        if st.button("🛑 Encerrar rastreio ao vivo desta entrega", key=f"desativar_live_{ticket_id}"):
-            desativar_rastreio_live_db(ticket_id)
-            st.success("Rastreio ao vivo encerrado.")
-            time.sleep(_PAUSA_TOAST)
-            st.rerun()
-        return
-
-    # Ainda não ativado — oferece ativação com geocodificação automática.
-    endereco = str(linha.get("address", "") or "")
-    telefone = str(linha.get("contact_phone", "") or "")
-    st.caption(f"Endereço da entrega: {endereco or '—'}")
-
-    usar_manual_key = f"live_manual_{ticket_id}"
-    if st.button("📍 Ativar rastreio ao vivo", key=f"ativar_live_{ticket_id}"):
-        lat, lng = geocodificar_endereco_db(endereco)
-        if lat is None:
-            st.session_state[usar_manual_key] = True
-        else:
-            iniciar_rastreio_live_db(ticket_id, lat, lng, telefone)
-            st.success("Rastreio ao vivo ativado! Envie o link de compartilhamento ao motorista.")
-            time.sleep(_PAUSA_TOAST)
-            st.rerun()
-
-    if st.session_state.get(usar_manual_key):
-        st.warning(
-            "Não consegui localizar esse endereço automaticamente. "
-            "Informe a latitude/longitude do destino manualmente:"
-        )
-        mc1, mc2 = st.columns(2)
-        lat_manual = mc1.number_input("Latitude", format="%.6f", key=f"lat_manual_{ticket_id}")
-        lng_manual = mc2.number_input("Longitude", format="%.6f", key=f"lng_manual_{ticket_id}")
-        if st.button("Confirmar coordenadas e ativar", key=f"confirmar_manual_{ticket_id}"):
-            if lat_manual == 0 and lng_manual == 0:
-                st.warning("Informe coordenadas válidas antes de confirmar.")
-            else:
-                iniciar_rastreio_live_db(ticket_id, lat_manual, lng_manual, telefone)
-                st.session_state.pop(usar_manual_key, None)
-                st.success("Rastreio ao vivo ativado com coordenadas manuais!")
-                time.sleep(_PAUSA_TOAST)
-                st.rerun()
-
-
 # ── Conteúdo do POPUP de um motorista ──────────────────────────────
 def _conteudo_motorista(rota, df, data_consulta, user):
     dr, tot, ok, fail, nt, pct_n, pct_o = _stats_rota(df, rota)
@@ -346,9 +259,6 @@ def _conteudo_motorista(rota, df, data_consulta, user):
             "Obs":      get_series(dr,"checkout_observation"),
             "Tracking": get_series(dr,"tracking_id"),
         }), use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        _secao_rastreio_ao_vivo(dr, ch)
 
     with abas[1]:
         df_err = dr[dr["_status_visual"] == "❌ Falhou"]
@@ -706,6 +616,160 @@ def _aba_cadastros(datas_db):
                  f"mas o restante do Rastreio continua funcionando. Detalhe: {e}")
 
 
+# ── ABA NOVA: Rastreio ao Vivo ──────────────────────────────────────
+# Aba própria dentro do módulo Rastreio (mesmo nível que Dashboard,
+# Exportar, Cadastros e Chat) — não fica mais escondida dentro do popup
+# de um motorista específico. Mostra, nesta ordem:
+#   1) Um atalho para criar uma ENTREGA DE TESTE rapidamente (sem precisar
+#      montar planilha), só pra você conseguir validar o rastreio ao vivo
+#      mesmo sem nenhuma entrega real ainda.
+#   2) O seletor de entrega (entre TODAS as entregas do dia, de qualquer
+#      motorista) + ativação/mapa.
+def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
+    if not _RASTREIO_LIVE_OK:
+        st.error(
+            "⚠️ O Rastreio ao Vivo está indisponível no momento — faltam as "
+            "funções novas no seu database.py ou o arquivo modulo/mod_rastreio_live.py."
+        )
+        with st.expander("Detalhe técnico"):
+            st.code(_erro_rastreio_live_msg, language="text")
+        return
+
+    motoristas = [u for u in listar_usuarios() if u.get("role") == "motorista"]
+
+    # ── 1) Criar entrega de teste rapidamente ───────────────────────
+    if pode_editar(user):
+        sem_entregas = df_dia is None or df_dia.empty
+        with st.expander("🧪 Criar entrega de teste", expanded=sem_entregas):
+            st.caption(
+                "Cria uma entrega avulsa na data selecionada, só pra você testar o "
+                "rastreio ao vivo sem precisar montar planilha nenhuma."
+            )
+            if not motoristas:
+                st.warning(
+                    "⚠️ Cadastre pelo menos um motorista na aba **🧑‍✈️ Cadastros** "
+                    "antes de criar uma entrega de teste."
+                )
+            elif not _LOGISTICA_OK:
+                st.warning(
+                    "⚠️ A criação de entregas depende do database_logistica.py, "
+                    "que está indisponível no momento (ver aba Cadastros para detalhe)."
+                )
+            else:
+                with st.form("form_entrega_teste"):
+                    tc1, tc2 = st.columns(2)
+                    opcoes_mot = {f"{m['nome']} ({m['usuario']})": m["usuario"] for m in motoristas}
+                    escolha_mot = tc1.selectbox("Motorista", list(opcoes_mot.keys()), key="teste_live_motorista")
+                    teste_cliente = tc2.text_input("Nome do cliente", value="Cliente Teste",
+                                                    key="teste_live_cliente")
+                    teste_endereco = st.text_input(
+                        "Endereço completo (rua, número, bairro, cidade)",
+                        placeholder="Ex: Avenida Paulista 1000, Bela Vista, São Paulo, SP",
+                        key="teste_live_endereco",
+                    )
+                    teste_telefone = st.text_input(
+                        "Telefone do cliente (com DDI, ex: +5511999998888)",
+                        key="teste_live_telefone",
+                    )
+                    if st.form_submit_button("Criar entrega de teste", type="primary"):
+                        if not teste_endereco.strip():
+                            st.warning("Informe um endereço — é a partir dele que o destino é localizado no mapa.")
+                        else:
+                            login_mot = opcoes_mot[escolha_mot]
+                            entrega_teste = [{
+                                "route": f"Rota - {login_mot}",
+                                "title": teste_cliente.strip() or "Cliente Teste",
+                                "address": teste_endereco.strip(),
+                                "contact_phone": teste_telefone.strip() or "—",
+                                "order": 1,
+                                "cliente_codigo": "TESTE",
+                                "planned_date": data_consulta,
+                            }]
+                            try:
+                                salvar_entregas_db(entrega_teste, data_consulta)
+                                st.success("✅ Entrega de teste criada! Selecione-a abaixo para ativar o rastreio.")
+                                time.sleep(_PAUSA_TOAST)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Não consegui criar a entrega de teste: {e}")
+
+    st.markdown("---")
+
+    # ── 2) Seletor de entrega + ativação/mapa ───────────────────────
+    if df_dia is None or df_dia.empty or "_doc_id" not in df_dia.columns:
+        st.info(
+            "⏳ Nenhuma entrega com identificador disponível para rastrear ainda. "
+            "Crie uma entrega de teste acima, ou importe/aguarde a chegada de entregas reais."
+        )
+        return
+
+    candidatas = df_dia[df_dia["_doc_id"].notna() & (df_dia["_doc_id"] != "")]
+    if candidatas.empty:
+        st.info("⏳ Nenhuma entrega com identificador disponível para rastrear ainda.")
+        return
+
+    opcoes = {
+        f"#{row.get('order','—')} · {row.get('title','—')} · {nome_motorista(row.get('route',''))}": row.get("_doc_id")
+        for _, row in candidatas.iterrows()
+    }
+    escolha_label = st.selectbox("📦 Selecione a entrega para acompanhar", list(opcoes.keys()), key="sel_live_global")
+    ticket_id = opcoes[escolha_label]
+    linha = candidatas[candidatas["_doc_id"] == ticket_id].iloc[0]
+
+    config = obter_config_entrega_live_db(ticket_id)
+
+    if config:
+        # Já ativado — mostra o mapa e a opção de encerrar.
+        renderizar_mapa_ao_vivo(ticket_id)
+        link_motorista = f"{URL_MOTORISTA_GPS}?ticket={ticket_id}"
+        st.caption(f"🔗 Link para o motorista compartilhar localização: `{link_motorista}`")
+        if pode_editar(user):
+            if st.button("🛑 Encerrar rastreio ao vivo desta entrega", key=f"desativar_live_{ticket_id}"):
+                desativar_rastreio_live_db(ticket_id)
+                st.success("Rastreio ao vivo encerrado.")
+                time.sleep(_PAUSA_TOAST)
+                st.rerun()
+        return
+
+    if not pode_editar(user):
+        st.info("Esta entrega ainda não tem rastreio ao vivo ativado. Peça a um supervisor/adm para ativar.")
+        return
+
+    # Ainda não ativado — oferece ativação com geocodificação automática.
+    endereco = str(linha.get("address", "") or "")
+    telefone = str(linha.get("contact_phone", "") or "")
+    st.caption(f"Endereço da entrega: {endereco or '—'}")
+
+    usar_manual_key = f"live_manual_{ticket_id}"
+    if st.button("📍 Ativar rastreio ao vivo", key=f"ativar_live_{ticket_id}"):
+        lat, lng = geocodificar_endereco_db(endereco)
+        if lat is None:
+            st.session_state[usar_manual_key] = True
+        else:
+            iniciar_rastreio_live_db(ticket_id, lat, lng, telefone)
+            st.success("Rastreio ao vivo ativado! Envie o link de compartilhamento ao motorista.")
+            time.sleep(_PAUSA_TOAST)
+            st.rerun()
+
+    if st.session_state.get(usar_manual_key):
+        st.warning(
+            "Não consegui localizar esse endereço automaticamente. "
+            "Informe a latitude/longitude do destino manualmente:"
+        )
+        mc1, mc2 = st.columns(2)
+        lat_manual = mc1.number_input("Latitude", format="%.6f", key=f"lat_manual_{ticket_id}")
+        lng_manual = mc2.number_input("Longitude", format="%.6f", key=f"lng_manual_{ticket_id}")
+        if st.button("Confirmar coordenadas e ativar", key=f"confirmar_manual_{ticket_id}"):
+            if lat_manual == 0 and lng_manual == 0:
+                st.warning("Informe coordenadas válidas antes de confirmar.")
+            else:
+                iniciar_rastreio_live_db(ticket_id, lat_manual, lng_manual, telefone)
+                st.session_state.pop(usar_manual_key, None)
+                st.success("Rastreio ao vivo ativado com coordenadas manuais!")
+                time.sleep(_PAUSA_TOAST)
+                st.rerun()
+
+
 # ── VISÃO EXCLUSIVA DO MOTORISTA ────────────────────────────────
 # Sem seletor de período, sem busca, sem filtros de status/notificação,
 # sem abas — só as entregas de hoje, num layout limpo e direto.
@@ -916,45 +980,49 @@ def renderizar_rastreio(papel: str, user: dict = None,
     # o database_logistica.py estiver disponível — é o mesmo '_doc_id' que
     # o Rastreio ao Vivo precisa pra saber qual entrega ativar/desativar.
     # Sem o database_logistica.py, cai no obter_tickets_db de sempre (sem
-    # doc_id) e a seção "📍 Rastreio ao vivo" avisa que está indisponível,
-    # sem quebrar o resto da tela.
+    # doc_id) e a aba "📍 Ao Vivo" avisa que está indisponível, sem quebrar
+    # o resto da tela.
     tickets_raw = obter_tickets_com_id_db(data_consulta) if _LOGISTICA_OK else obter_tickets_db(data_consulta)
     df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
+    sem_dados_no_dia = df.empty
 
-    if df.empty:
-        st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
-        if pode_editar(user):
-            st.markdown("---")
-            _aba_cadastros(datas_db)
-        return is_hoje
+    # IMPORTANTE: ao contrário de versões anteriores, NÃO retornamos mais
+    # cedo quando não há nenhuma entrega no dia — isso impedia até as abas
+    # (inclusive "📍 Ao Vivo" e "🧑‍✈️ Cadastros") de aparecerem. Agora as
+    # abas sempre são montadas; cada uma trata a ausência de dados por conta
+    # própria (mensagem no Dashboard/Exportar, formulário de teste no Ao Vivo).
+    if not sem_dados_no_dia:
+        df = garantir_colunas(df.copy())
 
-    df = garantir_colunas(df.copy())
+        # ── Motorista só vê as próprias entregas ───────────────────
+        # (mantido por segurança/compatibilidade, embora este branch de
+        # renderizar_rastreio só seja chamado para papel != "motorista")
+        if papel == "motorista":
+            try:
+                minha_chave = user.get("usuario", "")
+                df_filtrado = df[df["route"].apply(extrair_chave) == minha_chave]
+                df = df_filtrado
+                if df.empty:
+                    st.info("⏳ Nenhuma entrega atribuída a você para o dia selecionado.")
+                    return is_hoje
+            except Exception:
+                pass  # mantém o comportamento anterior em vez de quebrar a tela
 
-    # ── Motorista só vê as próprias entregas ───────────────────────
-    # Protegido por try/except: se algo der errado aqui, cai no
-    # comportamento antigo (mostra tudo) em vez de travar a tela.
-    if papel == "motorista":
-        try:
-            minha_chave = user.get("usuario", "")
-            df_filtrado = df[df["route"].apply(extrair_chave) == minha_chave]
-            df = df_filtrado
-            if df.empty:
-                st.info("⏳ Nenhuma entrega atribuída a você para o dia selecionado.")
-                return is_hoje
-        except Exception:
-            pass  # mantém o comportamento anterior em vez de quebrar a tela
-
-    # Aplica filtros
-    df_f = aplicar_busca(df, termo)
-    if f_st != "Todos":  df_f = df_f[df_f["_status_visual"] == f_st]
-    if f_nt == "Sim":    df_f = df_f[df_f["_notificado"] == True]
-    elif f_nt == "Não":  df_f = df_f[df_f["_notificado"] == False]
-    if termo and df_f.empty:
-        st.warning(f"Nenhum resultado para **{termo}**."); return is_hoje
+        # Aplica filtros
+        df_f = aplicar_busca(df, termo)
+        if f_st != "Todos":  df_f = df_f[df_f["_status_visual"] == f_st]
+        if f_nt == "Sim":    df_f = df_f[df_f["_notificado"] == True]
+        elif f_nt == "Não":  df_f = df_f[df_f["_notificado"] == False]
+        if termo and df_f.empty:
+            st.warning(f"Nenhum resultado para **{termo}**."); return is_hoje
+    else:
+        df_f = df  # dataframe vazio — cada aba abaixo trata isso por conta própria
 
     # ── Abas ──────────────────────────────────────────────────────
     abas_nomes = ["🏠 Dashboard"]
     if pode_exp: abas_nomes.append("📥 Exportar")
+    abas_nomes.append("📍 Ao Vivo")
+    idx_ao_vivo = len(abas_nomes) - 1
     mostra_cadastros = pode_editar(user)
     if mostra_cadastros:
         abas_nomes.append("🧑‍✈️ Cadastros")
@@ -963,100 +1031,112 @@ def renderizar_rastreio(papel: str, user: dict = None,
 
     # ══ DASHBOARD ════════════════════════════════════════════════
     with abas[0]:
-        total    = len(df)
-        notif    = int(df["_notificado"].sum())
-        sucesso  = int((df["_status_visual"]=="✅ Sucesso").sum())
-        falhou   = int((df["_status_visual"]=="❌ Falhou").sum())
-        pendente = total - sucesso - falhou
-        motores  = len([r for r in df["route"].unique()
-                        if r and "não identificada" not in str(r).lower()])
+        if sem_dados_no_dia:
+            st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
+            st.caption("Use a aba **📍 Ao Vivo** para criar uma entrega de teste, "
+                       "ou a aba **🧑‍✈️ Cadastros** para importar uma planilha real.")
+        else:
+            total    = len(df)
+            notif    = int(df["_notificado"].sum())
+            sucesso  = int((df["_status_visual"]=="✅ Sucesso").sum())
+            falhou   = int((df["_status_visual"]=="❌ Falhou").sum())
+            pendente = total - sucesso - falhou
+            motores  = len([r for r in df["route"].unique()
+                            if r and "não identificada" not in str(r).lower()])
 
-        k1,k2,k3,k4,k5,k6 = st.columns(6)
-        k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga do dia</div></div>',unsafe_allow_html=True)
-        k2.markdown(f'<div class="kpi-card green"><div class="kpi-label">📱 Notificados</div><div class="kpi-value">{notif}</div><div class="kpi-sub">{round(notif/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
-        k3.markdown(f'<div class="kpi-card blue"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
-        k4.markdown(f'<div class="kpi-card red"><div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
-        k5.markdown(f'<div class="kpi-card gray"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendente}</div><div class="kpi-sub">Na rua</div></div>',unsafe_allow_html=True)
-        k6.markdown(f'<div class="kpi-card gold"><div class="kpi-label">🧑 Motoristas</div><div class="kpi-value">{motores}</div><div class="kpi-sub">Em operação</div></div>',unsafe_allow_html=True)
+            k1,k2,k3,k4,k5,k6 = st.columns(6)
+            k1.markdown(f'<div class="kpi-card gold"><div class="kpi-label">📦 Total</div><div class="kpi-value">{total}</div><div class="kpi-sub">Carga do dia</div></div>',unsafe_allow_html=True)
+            k2.markdown(f'<div class="kpi-card green"><div class="kpi-label">📱 Notificados</div><div class="kpi-value">{notif}</div><div class="kpi-sub">{round(notif/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+            k3.markdown(f'<div class="kpi-card blue"><div class="kpi-label">✅ Sucessos</div><div class="kpi-value">{sucesso}</div><div class="kpi-sub">{round(sucesso/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+            k4.markdown(f'<div class="kpi-card red"><div class="kpi-label">❌ Falhas</div><div class="kpi-value">{falhou}</div><div class="kpi-sub">{round(falhou/total*100,1) if total else 0}%</div></div>',unsafe_allow_html=True)
+            k5.markdown(f'<div class="kpi-card gray"><div class="kpi-label">⏳ Pendentes</div><div class="kpi-value">{pendente}</div><div class="kpi-sub">Na rua</div></div>',unsafe_allow_html=True)
+            k6.markdown(f'<div class="kpi-card gold"><div class="kpi-label">🧑 Motoristas</div><div class="kpi-value">{motores}</div><div class="kpi-sub">Em operação</div></div>',unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        if termo: st.info(f"🔍 {len(df_f)} resultado(s) para **{termo}**")
+            st.markdown("<br>", unsafe_allow_html=True)
+            if termo: st.info(f"🔍 {len(df_f)} resultado(s) para **{termo}**")
 
-        rotas = [r for r in sorted(df_f["route"].unique())
-                 if r and "não identificada" not in str(r).lower()] if "route" in df_f.columns else []
-        if rotas:
-            st.markdown("### 🧑 Motoristas em Operação")
-            st.caption("Clique no nome do motorista para abrir os detalhes (fila, ocorrências, notificados, edição e rastreio ao vivo).")
-            cols = st.columns(min(len(rotas), 4))
-            for idx, rota in enumerate(rotas):
-                with cols[idx % 4]:
-                    _card_motorista(rota, df_f, idx, "dash", data_consulta, user)
+            rotas = [r for r in sorted(df_f["route"].unique())
+                     if r and "não identificada" not in str(r).lower()] if "route" in df_f.columns else []
+            if rotas:
+                st.markdown("### 🧑 Motoristas em Operação")
+                st.caption("Clique no nome do motorista para abrir os detalhes (fila, ocorrências, notificados e edição).")
+                cols = st.columns(min(len(rotas), 4))
+                for idx, rota in enumerate(rotas):
+                    with cols[idx % 4]:
+                        _card_motorista(rota, df_f, idx, "dash", data_consulta, user)
 
-        st.markdown("---")
-        st.markdown(f"**{len(df_f)} entregas**")
-        st.dataframe(pd.DataFrame({
-            "Ordem":    get_series(df_f,"order"),
-            "Motorista":get_series(df_f,"route").apply(nome_motorista),
-            "Cliente":  get_series(df_f,"title"),
-            "Endereço": get_series(df_f,"address"),
-            "Status":   df_f["_status_visual"],
-            "Notif.":   df_f["_notificado"].apply(lambda x:"Sim" if x else "Não"),
-            "Notif. em":get_series(df_f,"on_its_way").apply(formatar_data),
-            "Check-out":get_series(df_f,"checkout_time").apply(formatar_data),
-            "Telefone": get_series(df_f,"contact_phone"),
-            "Tracking": get_series(df_f,"tracking_id"),
-        }), use_container_width=True, hide_index=True)
+            st.markdown("---")
+            st.markdown(f"**{len(df_f)} entregas**")
+            st.dataframe(pd.DataFrame({
+                "Ordem":    get_series(df_f,"order"),
+                "Motorista":get_series(df_f,"route").apply(nome_motorista),
+                "Cliente":  get_series(df_f,"title"),
+                "Endereço": get_series(df_f,"address"),
+                "Status":   df_f["_status_visual"],
+                "Notif.":   df_f["_notificado"].apply(lambda x:"Sim" if x else "Não"),
+                "Notif. em":get_series(df_f,"on_its_way").apply(formatar_data),
+                "Check-out":get_series(df_f,"checkout_time").apply(formatar_data),
+                "Telefone": get_series(df_f,"contact_phone"),
+                "Tracking": get_series(df_f,"tracking_id"),
+            }), use_container_width=True, hide_index=True)
 
     # ══ EXPORTAR ══════════════════════════════════════════════════
     if pode_exp:
         with abas[1]:
-            st.markdown("### 💾 Exportação de Dados")
+            if sem_dados_no_dia:
+                st.info("⏳ Nenhum dado de entrega para exportar neste dia.")
+            else:
+                st.markdown("### 💾 Exportação de Dados")
 
-            def montar(df_src):
-                return pd.DataFrame({
-                    "Ordem":      get_series(df_src,"order"),
-                    "Motorista":  get_series(df_src,"route").apply(nome_motorista),
-                    "Cliente":    get_series(df_src,"title"),
-                    "Endereço":   get_series(df_src,"address"),
-                    "Status":     get_series(df_src,"_status_visual","⏳ Pendente"),
-                    "Notificado": get_series(df_src,"_notificado").apply(lambda x:"Sim" if x else "Não"),
-                    "Notif. em":  get_series(df_src,"on_its_way").apply(formatar_data),
-                    "Check-in":   get_series(df_src,"checkin_time").apply(formatar_data),
-                    "Check-out":  get_series(df_src,"checkout_time").apply(formatar_data),
-                    "ETA":        get_series(df_src,"estimated_time_arrival"),
-                    "Obs":        get_series(df_src,"checkout_observation"),
-                    "Tracking":   get_series(df_src,"tracking_id"),
-                })
+                def montar(df_src):
+                    return pd.DataFrame({
+                        "Ordem":      get_series(df_src,"order"),
+                        "Motorista":  get_series(df_src,"route").apply(nome_motorista),
+                        "Cliente":    get_series(df_src,"title"),
+                        "Endereço":   get_series(df_src,"address"),
+                        "Status":     get_series(df_src,"_status_visual","⏳ Pendente"),
+                        "Notificado": get_series(df_src,"_notificado").apply(lambda x:"Sim" if x else "Não"),
+                        "Notif. em":  get_series(df_src,"on_its_way").apply(formatar_data),
+                        "Check-in":   get_series(df_src,"checkin_time").apply(formatar_data),
+                        "Check-out":  get_series(df_src,"checkout_time").apply(formatar_data),
+                        "ETA":        get_series(df_src,"estimated_time_arrival"),
+                        "Obs":        get_series(df_src,"checkout_observation"),
+                        "Tracking":   get_series(df_src,"tracking_id"),
+                    })
 
-            ec1, ec2 = st.columns(2)
-            with ec1:
-                st.markdown(f"#### 📅 Dia: `{data_consulta}`")
-                out = io.BytesIO()
-                with pd.ExcelWriter(out, engine="openpyxl") as w: montar(df).to_excel(w, index=False)
-                st.download_button(f"📥 Baixar {data_consulta}", out.getvalue(),
-                    f"KingStar_{data_consulta}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary", use_container_width=True)
-            with ec2:
-                mes     = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%Y-%m")
-                mes_lbl = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%B/%Y")
-                st.markdown(f"#### 🗓️ Mês: `{mes_lbl}`")
-                if st.button(f"Carregar {mes_lbl}", use_container_width=True):
-                    datas_mes = [d["data"] for d in datas_db if d["data"].startswith(mes)]
-                    frames=[]; prog=st.progress(0)
-                    for i, dt in enumerate(sorted(datas_mes)):
-                        t = obter_tickets_db(dt)
-                        if t: frames.append(pd.DataFrame(t))
-                        prog.progress((i+1)/len(datas_mes))
-                    prog.empty()
-                    if frames:
-                        df_mes = pd.concat(frames, ignore_index=True)
-                        out2   = io.BytesIO()
-                        with pd.ExcelWriter(out2,engine="openpyxl") as w: montar(df_mes).to_excel(w,index=False)
-                        st.download_button(f"📥 {mes_lbl} ({len(df_mes)} entregas)", out2.getvalue(),
-                            f"KingStar_{mes}.xlsx",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary", use_container_width=True)
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    st.markdown(f"#### 📅 Dia: `{data_consulta}`")
+                    out = io.BytesIO()
+                    with pd.ExcelWriter(out, engine="openpyxl") as w: montar(df).to_excel(w, index=False)
+                    st.download_button(f"📥 Baixar {data_consulta}", out.getvalue(),
+                        f"KingStar_{data_consulta}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary", use_container_width=True)
+                with ec2:
+                    mes     = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%Y-%m")
+                    mes_lbl = datetime.strptime(data_consulta,"%Y-%m-%d").strftime("%B/%Y")
+                    st.markdown(f"#### 🗓️ Mês: `{mes_lbl}`")
+                    if st.button(f"Carregar {mes_lbl}", use_container_width=True):
+                        datas_mes = [d["data"] for d in datas_db if d["data"].startswith(mes)]
+                        frames=[]; prog=st.progress(0)
+                        for i, dt in enumerate(sorted(datas_mes)):
+                            t = obter_tickets_db(dt)
+                            if t: frames.append(pd.DataFrame(t))
+                            prog.progress((i+1)/len(datas_mes))
+                        prog.empty()
+                        if frames:
+                            df_mes = pd.concat(frames, ignore_index=True)
+                            out2   = io.BytesIO()
+                            with pd.ExcelWriter(out2,engine="openpyxl") as w: montar(df_mes).to_excel(w,index=False)
+                            st.download_button(f"📥 {mes_lbl} ({len(df_mes)} entregas)", out2.getvalue(),
+                                f"KingStar_{mes}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                type="primary", use_container_width=True)
+
+    # ══ RASTREIO AO VIVO (aba própria) ═════════════════════════════
+    with abas[idx_ao_vivo]:
+        _aba_rastreio_ao_vivo(df_f if not sem_dados_no_dia else pd.DataFrame(), data_consulta, user)
 
     # ══ CADASTROS + CHAT (novas abas, só ADM/Supervisor) ══════════
     if mostra_cadastros:
