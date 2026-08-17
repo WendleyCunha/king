@@ -1,7 +1,7 @@
 import streamlit as st
 from google.cloud import firestore
 from google.oauth2 import service_account
-import json, hashlib
+import json, hashlib, requests
 from datetime import datetime, timezone, timedelta
 
 BRT = timezone(timedelta(hours=-3))
@@ -433,7 +433,8 @@ def obter_tickets_com_id_db(data_alvo: str) -> list:
     """
     Igual a obter_tickets_db, mas cada item vem com o campo '_doc_id'
     (o ID do documento no Firestore). Necessário para o motorista poder
-    dar baixa numa entrega específica (foto obrigatória + status).
+    dar baixa numa entrega específica (foto obrigatória + status), e
+    também usado pelo Rastreio ao vivo para saber qual entrega ativar.
     """
     docs = get_db().collection("entregas") \
                    .where("data_entrega","==",data_alvo).stream()
@@ -861,3 +862,120 @@ def listar_diario_bordo_db(usuario: str = None, data_ini=None, data_fim=None) ->
 
 def deletar_registro_diario_db(id_registro: str):
     get_db().collection("diario_bordo").document(id_registro).delete()
+
+
+# ══════════════════════════════════════════════════════════════════
+# RASTREIO AO VIVO (posição do motorista + alerta de proximidade)
+# NOVO — adicionado para dar suporte ao mapa em tempo real (estilo
+# Uber/Waze) dentro do módulo Rastreio.
+#
+# Coleções:
+#   /posicoes_motoristas/{ticket_id} → { lat, lng, velocidade_kmh,
+#                                         precisao_m, atualizado_em }
+#       Gravado pelo motor_api.py (FastAPI/Render) a cada ping do celular
+#       do motorista — o Streamlit NUNCA escreve aqui, só lê.
+#
+#   /entregas_rastreio_live/{ticket_id} → { destino_lat, destino_lng,
+#                                            cliente_telefone,
+#                                            alerta_5km_enviado,
+#                                            ativado_em }
+#       Criado quando o ADM/Supervisor ativa o rastreio ao vivo para
+#       uma entrega específica.
+#
+# ticket_id = o '_doc_id' da entrega (mesmo id usado em
+# obter_tickets_com_id_db / dar_baixa_entrega_db).
+# ══════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocodificar_endereco_db(endereco: str):
+    """
+    Converte um endereço em texto para (lat, lng) usando o Nominatim
+    (OpenStreetMap) — serviço gratuito, sem necessidade de chave de API.
+
+    Retorna (lat, lng) como floats, ou (None, None) se não conseguir
+    localizar o endereço (endereço incompleto, typo, CEP genérico etc.).
+    Nesse caso, a tela que chamou esta função deve oferecer inputs
+    manuais de latitude/longitude como alternativa.
+
+    Cacheado por 24h (ttl=86400): o mesmo endereço tende a ser consultado
+    várias vezes (toda vez que alguém abre o rastreio ao vivo daquela
+    entrega) e coordenadas de um endereço não mudam de um dia pro outro.
+
+    Nominatim exige um User-Agent identificável na política de uso deles
+    — por isso o header abaixo. Ajuste o e-mail se quiser.
+    """
+    endereco = (endereco or "").strip()
+    if not endereco:
+        return None, None
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": endereco, "format": "json", "limit": 1},
+            headers={"User-Agent": "KingStar-Rastreio/1.0 (contato@kingstarcolchoes.com.br)"},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        resultados = resp.json()
+        if not resultados:
+            return None, None
+        return float(resultados[0]["lat"]), float(resultados[0]["lon"])
+    except Exception:
+        # Timeout, endereço não encontrado, serviço fora do ar, etc. —
+        # nunca deixa isso quebrar a tela do Rastreio; quem chamou decide
+        # o que fazer (normalmente: oferecer input manual de lat/lng).
+        return None, None
+
+
+def iniciar_rastreio_live_db(ticket_id: str, destino_lat: float, destino_lng: float,
+                              cliente_telefone: str = ""):
+    """
+    Ativa o rastreio ao vivo para uma entrega. Chame isso quando o ADM/
+    Supervisor clicar em "Ativar rastreio ao vivo" na tela do Rastreio.
+
+    destino_lat/destino_lng: coordenadas do endereço de entrega — vêm de
+    geocodificar_endereco_db() ou de input manual, quando a geocodificação
+    automática não encontrar o endereço.
+    """
+    get_db().collection("entregas_rastreio_live").document(ticket_id).set({
+        "destino_lat": destino_lat,
+        "destino_lng": destino_lng,
+        "cliente_telefone": cliente_telefone,
+        "alerta_5km_enviado": False,
+        "ativado_em": datetime.now(BRT).isoformat(),
+    })
+
+
+def obter_config_entrega_live_db(ticket_id: str):
+    """Retorna a config de rastreio ao vivo de uma entrega, ou None se o
+    rastreio ainda não foi ativado para ela."""
+    doc = get_db().collection("entregas_rastreio_live").document(ticket_id).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def obter_posicao_motorista_db(ticket_id: str):
+    """
+    Retorna a última posição conhecida do motorista para esta entrega,
+    ou None se ele ainda não começou a compartilhar localização.
+
+    Sem cache de propósito: a posição muda a cada poucos segundos (o
+    celular manda um ping novo via motor_api.py), então um
+    @st.cache_data aqui mostraria o motorista "parado" na tela mesmo
+    ele já tendo avançado.
+    """
+    doc = get_db().collection("posicoes_motoristas").document(ticket_id).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def marcar_alerta_5km_enviado_db(ticket_id: str):
+    """Marca que o alerta de proximidade já foi disparado para esta
+    entrega, para o gatilho não repetir o WhatsApp a cada ping novo."""
+    get_db().collection("entregas_rastreio_live").document(ticket_id).update(
+        {"alerta_5km_enviado": True}
+    )
+
+
+def desativar_rastreio_live_db(ticket_id: str):
+    """Chame quando a entrega for concluída (baixa dada), para não deixar
+    o mapa ao vivo 'aberto' indefinidamente para uma entrega já finalizada."""
+    get_db().collection("entregas_rastreio_live").document(ticket_id).delete()
+    get_db().collection("posicoes_motoristas").document(ticket_id).delete()
