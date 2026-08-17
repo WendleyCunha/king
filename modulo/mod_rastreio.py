@@ -46,8 +46,30 @@ except Exception as _erro_import_logistica:
     def obter_tickets_com_id_db(data_alvo):
         return obter_tickets_db(data_alvo)  # fallback sem _doc_id (sem dar baixa)
 
+# Import isolado: Rastreio ao Vivo (mapa em tempo real do motorista, com
+# distância/ETA e alerta de proximidade). Se qualquer peça dessa
+# funcionalidade nova ainda não estiver no seu database.py / faltando o
+# arquivo mod_rastreio_live.py, a seção "📍 Rastreio ao vivo" simplesmente
+# não aparece — o resto do Rastreio (Dashboard, Exportar, Cadastros,
+# baixa de entrega) continua 100% funcional.
+try:
+    from database import (iniciar_rastreio_live_db, obter_config_entrega_live_db,
+                          geocodificar_endereco_db, desativar_rastreio_live_db)
+    from modulo.mod_rastreio_live import renderizar_mapa_ao_vivo
+    _RASTREIO_LIVE_OK = True
+    _erro_rastreio_live_msg = ""
+except Exception as _erro_rastreio_live:
+    _RASTREIO_LIVE_OK = False
+    _erro_rastreio_live_msg = f"{type(_erro_rastreio_live).__name__}: {_erro_rastreio_live}"
+
 BRT           = timezone(timedelta(hours=-3))
 TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/tracking/"
+
+# URL pública onde o motorista_gps_tracker.html está hospedado. Ajuste
+# para o endereço real (pode ser uma rota estática do próprio motor_api.py
+# no Render, GitHub Pages, etc.) — usado só para montar o link que você
+# manda pro motorista, não afeta o resto do módulo se ficar desatualizado.
+URL_MOTORISTA_GPS = "https://kingstarcolchoes.com.br/motorista_gps_tracker.html"
 
 # st.dialog disponível? (popup nativo). Senão, cai no st.popover.
 _HAS_DIALOG = bool(getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None))
@@ -174,6 +196,93 @@ def _body_html(rota, tot, ok, fail, nt, pct_n, pct_o):
     </div>""")
 
 
+# ── NOVO: Rastreio ao vivo de UMA entrega específica ───────────────
+# Renderiza, dentro da aba "Fila de Clientes" de um motorista, um seletor
+# de entrega + o botão de ativação (com geocodificação automática e
+# fallback manual) + o mapa em tempo real, uma vez ativado.
+def _secao_rastreio_ao_vivo(dr, ch):
+    if not _RASTREIO_LIVE_OK:
+        st.caption(
+            "📍 Rastreio ao vivo indisponível no momento (faltam funções novas "
+            "no database.py ou o arquivo modulo/mod_rastreio_live.py)."
+        )
+        with st.expander("Detalhe técnico"):
+            st.code(_erro_rastreio_live_msg, language="text")
+        return
+
+    if "_doc_id" not in dr.columns:
+        st.caption(
+            "📍 Rastreio ao vivo precisa do database_logistica.py ativo "
+            "(é ele que fornece o identificador de cada entrega)."
+        )
+        return
+
+    st.markdown("##### 📍 Rastreio ao vivo")
+
+    candidatas = dr[dr["_doc_id"].notna() & (dr["_doc_id"] != "")]
+    if candidatas.empty:
+        st.caption("Nenhuma entrega com identificador disponível para rastrear.")
+        return
+
+    opcoes = {
+        f"#{row.get('order','—')} · {row.get('title','—')}": row.get("_doc_id")
+        for _, row in candidatas.iterrows()
+    }
+    escolha_label = st.selectbox(
+        "Selecione a entrega para acompanhar", list(opcoes.keys()), key=f"sel_live_{ch}"
+    )
+    ticket_id = opcoes[escolha_label]
+    linha = candidatas[candidatas["_doc_id"] == ticket_id].iloc[0]
+
+    config = obter_config_entrega_live_db(ticket_id)
+
+    if config:
+        # Já ativado — mostra o mapa e a opção de encerrar.
+        renderizar_mapa_ao_vivo(ticket_id)
+        link_motorista = f"{URL_MOTORISTA_GPS}?ticket={ticket_id}"
+        st.caption(f"🔗 Link para o motorista compartilhar localização: `{link_motorista}`")
+        if st.button("🛑 Encerrar rastreio ao vivo desta entrega", key=f"desativar_live_{ticket_id}"):
+            desativar_rastreio_live_db(ticket_id)
+            st.success("Rastreio ao vivo encerrado.")
+            time.sleep(_PAUSA_TOAST)
+            st.rerun()
+        return
+
+    # Ainda não ativado — oferece ativação com geocodificação automática.
+    endereco = str(linha.get("address", "") or "")
+    telefone = str(linha.get("contact_phone", "") or "")
+    st.caption(f"Endereço da entrega: {endereco or '—'}")
+
+    usar_manual_key = f"live_manual_{ticket_id}"
+    if st.button("📍 Ativar rastreio ao vivo", key=f"ativar_live_{ticket_id}"):
+        lat, lng = geocodificar_endereco_db(endereco)
+        if lat is None:
+            st.session_state[usar_manual_key] = True
+        else:
+            iniciar_rastreio_live_db(ticket_id, lat, lng, telefone)
+            st.success("Rastreio ao vivo ativado! Envie o link de compartilhamento ao motorista.")
+            time.sleep(_PAUSA_TOAST)
+            st.rerun()
+
+    if st.session_state.get(usar_manual_key):
+        st.warning(
+            "Não consegui localizar esse endereço automaticamente. "
+            "Informe a latitude/longitude do destino manualmente:"
+        )
+        mc1, mc2 = st.columns(2)
+        lat_manual = mc1.number_input("Latitude", format="%.6f", key=f"lat_manual_{ticket_id}")
+        lng_manual = mc2.number_input("Longitude", format="%.6f", key=f"lng_manual_{ticket_id}")
+        if st.button("Confirmar coordenadas e ativar", key=f"confirmar_manual_{ticket_id}"):
+            if lat_manual == 0 and lng_manual == 0:
+                st.warning("Informe coordenadas válidas antes de confirmar.")
+            else:
+                iniciar_rastreio_live_db(ticket_id, lat_manual, lng_manual, telefone)
+                st.session_state.pop(usar_manual_key, None)
+                st.success("Rastreio ao vivo ativado com coordenadas manuais!")
+                time.sleep(_PAUSA_TOAST)
+                st.rerun()
+
+
 # ── Conteúdo do POPUP de um motorista ──────────────────────────────
 def _conteudo_motorista(rota, df, data_consulta, user):
     dr, tot, ok, fail, nt, pct_n, pct_o = _stats_rota(df, rota)
@@ -237,6 +346,9 @@ def _conteudo_motorista(rota, df, data_consulta, user):
             "Obs":      get_series(dr,"checkout_observation"),
             "Tracking": get_series(dr,"tracking_id"),
         }), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        _secao_rastreio_ao_vivo(dr, ch)
 
     with abas[1]:
         df_err = dr[dr["_status_visual"] == "❌ Falhou"]
@@ -686,6 +798,14 @@ def _visualizacao_motorista(user):
         </div>
         """), unsafe_allow_html=True)
 
+        # ── Compartilhar localização (motorista) ─────────────────────
+        # Se essa entrega já tem rastreio ao vivo ativado pela gestão,
+        # mostra o link para o motorista abrir e começar a compartilhar
+        # a posição dele (motorista_gps_tracker.html).
+        if _RASTREIO_LIVE_OK and doc_id and obter_config_entrega_live_db(doc_id):
+            link_gps = f"{URL_MOTORISTA_GPS}?ticket={doc_id}"
+            st.link_button("📍 Compartilhar minha localização", link_gps, use_container_width=True)
+
         # ── Dar baixa (só entregas pendentes) ─────────────────────────
         if status == "⏳ Pendente":
             if not (_LOGISTICA_OK and doc_id):
@@ -714,6 +834,13 @@ def _visualizacao_motorista(user):
                             ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto_bytes, motivo)
                             (st.success if ok else st.error)(msg)
                             if ok:
+                                # Entrega concluída — encerra o rastreio ao vivo
+                                # dela também, se estava ativo.
+                                if _RASTREIO_LIVE_OK and doc_id:
+                                    try:
+                                        desativar_rastreio_live_db(doc_id)
+                                    except Exception:
+                                        pass
                                 time.sleep(_PAUSA_TOAST)
                                 st.rerun()
 
@@ -785,10 +912,13 @@ def renderizar_rastreio(papel: str, user: dict = None,
         except: data_consulta = hoje
     is_hoje = (data_consulta == hoje)
 
-    # Carrega dados (obter_tickets_db agora é cacheado no database.py —
-    # digitar na busca ou trocar de aba não bate mais no Firestore de novo
-    # a cada tecla, só quando o cache expira ou é limpo por uma mutação real).
-    tickets_raw = obter_tickets_db(data_consulta)
+    # Carrega dados. Usa obter_tickets_com_id_db (com '_doc_id') sempre que
+    # o database_logistica.py estiver disponível — é o mesmo '_doc_id' que
+    # o Rastreio ao Vivo precisa pra saber qual entrega ativar/desativar.
+    # Sem o database_logistica.py, cai no obter_tickets_db de sempre (sem
+    # doc_id) e a seção "📍 Rastreio ao vivo" avisa que está indisponível,
+    # sem quebrar o resto da tela.
+    tickets_raw = obter_tickets_com_id_db(data_consulta) if _LOGISTICA_OK else obter_tickets_db(data_consulta)
     df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
 
     if df.empty:
@@ -856,7 +986,7 @@ def renderizar_rastreio(papel: str, user: dict = None,
                  if r and "não identificada" not in str(r).lower()] if "route" in df_f.columns else []
         if rotas:
             st.markdown("### 🧑 Motoristas em Operação")
-            st.caption("Clique no nome do motorista para abrir os detalhes (fila, ocorrências, notificados e edição).")
+            st.caption("Clique no nome do motorista para abrir os detalhes (fila, ocorrências, notificados, edição e rastreio ao vivo).")
             cols = st.columns(min(len(rotas), 4))
             for idx, rota in enumerate(rotas):
                 with cols[idx % 4]:
