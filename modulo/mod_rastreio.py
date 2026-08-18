@@ -71,6 +71,13 @@ TRACKING_BASE = "https://livetracking.simpliroute.com/widget/account/88033/track
 # manda pro motorista, não afeta o resto do módulo se ficar desatualizado.
 URL_MOTORISTA_GPS = "https://kingstarcolchoes.com.br/motorista_gps_tracker.html"
 
+# [NOVO] URL base do motor_api.py no Render — a mesma que recebe os pings
+# de GPS em POST /gps/{ticket_id}. É onde a nova página pública do CLIENTE
+# (GET /rastreio/{ticket_id}, sem login nenhum) foi adicionada. Troque pelo
+# domínio real do seu serviço no Render (Dashboard → seu serviço → a URL
+# aparece no topo, algo como https://kingstar-motor-xxxx.onrender.com).
+URL_BASE_MOTOR_API = "https://SEU-SERVICO.onrender.com"
+
 # st.dialog disponível? (popup nativo). Senão, cai no st.popover.
 _HAS_DIALOG = bool(getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None))
 
@@ -332,8 +339,6 @@ def _card_motorista(rota, df, idx, ctx, data_consulta, user):
 
 
 # ── ABA NOVA: Cadastros & Upload (só ADM/Supervisor) ───────────────
-# Tudo aqui dentro é protegido por try/except — um erro nesta aba nunca
-# deve derrubar o Dashboard nem a Exportação.
 def _aba_cadastros(datas_db):
     if not _LOGISTICA_OK:
         st.error(
@@ -352,8 +357,6 @@ def _aba_cadastros(datas_db):
         st.markdown("### 📤 Importar Planilha de Entregas")
         st.caption("Envie a planilha já roteirizada (uma linha por entrega, com a coluna do motorista).")
 
-        # Buscado 1x e reaproveitado no resto da função (upload + lista de
-        # cadastrados), em vez de chamar listar_usuarios() de novo lá embaixo.
         todos_usuarios = listar_usuarios()
         motoristas = [u for u in todos_usuarios if u.get("role") == "motorista"]
 
@@ -395,14 +398,13 @@ def _aba_cadastros(datas_db):
                         key="modo_atrib_upload",
                     )
 
-                    login_por_linha = None   # função/dict que resolve o login por linha, quando modo = placa
-                    login_unico = None       # login fixo, quando modo = motorista único
+                    login_por_linha = None
+                    login_unico = None
                     pronto_para_importar = True
 
                     if modo_atrib.startswith("🚗"):
                         col_placa = st.selectbox("Coluna com a placa/veículo", colunas, key="map_placa")
 
-                        # placas cadastradas -> login do motorista
                         placas_cadastradas = {}
                         for m in motoristas:
                             p = _normalizar_placa(m.get("placa", ""))
@@ -413,7 +415,7 @@ def _aba_cadastros(datas_db):
                             str(v).strip() for v in df_up[col_placa].dropna().unique() if str(v).strip()
                         })
 
-                        mapa_placa_login = {}   # placa_normalizada -> login (auto ou manual)
+                        mapa_placa_login = {}
                         nao_identificadas = []
 
                         for placa_orig in placas_planilha:
@@ -476,7 +478,7 @@ def _aba_cadastros(datas_db):
 
                                 if not login_linha:
                                     sem_motorista += 1
-                                    continue  # linha com placa sem motorista resolvido — pula
+                                    continue
 
                                 entregas.append({
                                     "route": f"Rota - {login_linha}",
@@ -512,11 +514,6 @@ def _aba_cadastros(datas_db):
                     st.warning("Preencha nome, login e senha.")
                 else:
                     try:
-                        # criar_usuario normaliza o login (sem espaços, minúsculo)
-                        # e retorna a versão final — é essa que precisa ser usada
-                        # daqui pra frente (vínculo de rota e mensagem pro admin),
-                        # pra não haver risco de o login exibido aqui ser diferente
-                        # do que fica de fato salvo no banco.
                         login_final = criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
                                                      modulos=["rastreio"], placa=nm_placa)
                         login_final = login_final or nm_login.strip().lower()
@@ -527,10 +524,6 @@ def _aba_cadastros(datas_db):
                         time.sleep(1)
                         st.rerun()
                     except TypeError:
-                        # Fallback: seu database.py ainda não tem o parâmetro placa=""
-                        # em criar_usuario (versão antiga, sem normalização de login
-                        # nem retorno do login final). Cadastra sem a placa em vez
-                        # de travar a tela, mas recomenda atualizar o database.py.
                         criar_usuario(nm_nome, nm_login, nm_senha, role="motorista",
                                       modulos=["rastreio"])
                         salvar_vinculo_db(nm_login, nm_nome)
@@ -553,10 +546,6 @@ def _aba_cadastros(datas_db):
         else:
             for m in motoristas:
                 login_m = m.get("usuario", "—")
-                # Mantém o expander ABERTO depois de qualquer ação (salvar
-                # nome/placa, redefinir senha, excluir) — sem isso, a tela
-                # recarrega, o expander volta a ficar fechado por padrão, e
-                # dá a falsa impressão de que a ação "não salvou nada".
                 exp_key = f"exp_aberto_mot_{login_m}"
                 with st.expander(
                     f"🧑‍✈️ **{m.get('nome','—')}** · `{login_m}` · placa {m.get('placa') or '—'}",
@@ -575,7 +564,6 @@ def _aba_cadastros(datas_db):
                         else:
                             try:
                                 atualizar_dados_usuario(login_m, nome=novo_nome, placa=nova_placa)
-                                # mantém o nome exibido no Dashboard/cards sincronizado
                                 salvar_vinculo_db(login_m, novo_nome)
                                 st.session_state[exp_key] = True
                                 st.success("Dados atualizados!")
@@ -606,7 +594,7 @@ def _aba_cadastros(datas_db):
                     if st.checkbox("Liberar exclusão deste motorista", key=f"ed_chk_del_{login_m}"):
                         if st.button("🗑️ Excluir motorista", key=f"ed_del_{login_m}"):
                             deletar_usuario(login_m)
-                            st.session_state.pop(exp_key, None)  # motorista sumiu da lista
+                            st.session_state.pop(exp_key, None)
                             st.success("Motorista excluído.")
                             time.sleep(_PAUSA_TOAST)
                             st.rerun()
@@ -617,14 +605,6 @@ def _aba_cadastros(datas_db):
 
 
 # ── ABA NOVA: Rastreio ao Vivo ──────────────────────────────────────
-# Aba própria dentro do módulo Rastreio (mesmo nível que Dashboard,
-# Exportar, Cadastros e Chat) — não fica mais escondida dentro do popup
-# de um motorista específico. Mostra, nesta ordem:
-#   1) Um atalho para criar uma ENTREGA DE TESTE rapidamente (sem precisar
-#      montar planilha), só pra você conseguir validar o rastreio ao vivo
-#      mesmo sem nenhuma entrega real ainda.
-#   2) O seletor de entrega (entre TODAS as entregas do dia, de qualquer
-#      motorista) + ativação/mapa.
 def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
     if not _RASTREIO_LIVE_OK:
         st.error(
@@ -637,7 +617,6 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
 
     motoristas = [u for u in listar_usuarios() if u.get("role") == "motorista"]
 
-    # ── 1) Criar entrega de teste rapidamente ───────────────────────
     if pode_editar(user):
         sem_entregas = df_dia is None or df_dia.empty
         with st.expander("🧪 Criar entrega de teste", expanded=sem_entregas):
@@ -695,7 +674,6 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
 
     st.markdown("---")
 
-    # ── 2) Seletor de entrega + ativação/mapa ───────────────────────
     if df_dia is None or df_dia.empty or "_doc_id" not in df_dia.columns:
         st.info(
             "⏳ Nenhuma entrega com identificador disponível para rastrear ainda. "
@@ -721,8 +699,22 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
     if config:
         # Já ativado — mostra o mapa e a opção de encerrar.
         renderizar_mapa_ao_vivo(ticket_id)
+
+        # [NOVO] Os dois links prontos para compartilhar: um pro MOTORISTA
+        # (compartilhar a própria posição) e um pro CLIENTE (acompanhar a
+        # entrega, sem login nenhum — é a página pública nova do
+        # motor_api.py, GET /rastreio/{ticket_id}).
         link_motorista = f"{URL_MOTORISTA_GPS}?ticket={ticket_id}"
-        st.caption(f"🔗 Link para o motorista compartilhar localização: `{link_motorista}`")
+        link_cliente   = f"{URL_BASE_MOTOR_API}/rastreio/{ticket_id}"
+
+        col_link1, col_link2 = st.columns(2)
+        with col_link1:
+            st.caption("🔗 Link para o MOTORISTA compartilhar a localização dele:")
+            st.code(link_motorista, language=None)
+        with col_link2:
+            st.caption("📍 Link para o CLIENTE acompanhar a entrega (sem login):")
+            st.code(link_cliente, language=None)
+
         if pode_editar(user):
             if st.button("🛑 Encerrar rastreio ao vivo desta entrega", key=f"desativar_live_{ticket_id}"):
                 desativar_rastreio_live_db(ticket_id)
@@ -735,7 +727,6 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
         st.info("Esta entrega ainda não tem rastreio ao vivo ativado. Peça a um supervisor/adm para ativar.")
         return
 
-    # Ainda não ativado — oferece ativação com geocodificação automática.
     endereco = str(linha.get("address", "") or "")
     telefone = str(linha.get("contact_phone", "") or "")
     st.caption(f"Endereço da entrega: {endereco or '—'}")
@@ -747,7 +738,7 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
             st.session_state[usar_manual_key] = True
         else:
             iniciar_rastreio_live_db(ticket_id, lat, lng, telefone)
-            st.success("Rastreio ao vivo ativado! Envie o link de compartilhamento ao motorista.")
+            st.success("Rastreio ao vivo ativado! Envie os links de compartilhamento ao motorista e ao cliente.")
             time.sleep(_PAUSA_TOAST)
             st.rerun()
 
@@ -771,8 +762,6 @@ def _aba_rastreio_ao_vivo(df_dia, data_consulta, user):
 
 
 # ── VISÃO EXCLUSIVA DO MOTORISTA ────────────────────────────────
-# Sem seletor de período, sem busca, sem filtros de status/notificação,
-# sem abas — só as entregas de hoje, num layout limpo e direto.
 def _visualizacao_motorista(user):
     hoje = datetime.now(BRT).date().isoformat()
     minha_chave = user.get("usuario", "")
@@ -827,8 +816,6 @@ def _visualizacao_motorista(user):
         st.warning("⚠️ A confirmação de entrega com foto está indisponível no momento "
                    "(módulo de logística não carregado). Fale com o administrador.")
 
-    # Filtra a LISTA (os KPIs acima continuam mostrando os totais reais,
-    # sem filtro, pra você sempre saber o panorama completo do dia)
     if filtro == "feitas":
         df_lista = df[df["_status_visual"] == "✅ Sucesso"]
     elif filtro == "pendentes":
@@ -862,15 +849,10 @@ def _visualizacao_motorista(user):
         </div>
         """), unsafe_allow_html=True)
 
-        # ── Compartilhar localização (motorista) ─────────────────────
-        # Se essa entrega já tem rastreio ao vivo ativado pela gestão,
-        # mostra o link para o motorista abrir e começar a compartilhar
-        # a posição dele (motorista_gps_tracker.html).
         if _RASTREIO_LIVE_OK and doc_id and obter_config_entrega_live_db(doc_id):
             link_gps = f"{URL_MOTORISTA_GPS}?ticket={doc_id}"
             st.link_button("📍 Compartilhar minha localização", link_gps, use_container_width=True)
 
-        # ── Dar baixa (só entregas pendentes) ─────────────────────────
         if status == "⏳ Pendente":
             if not (_LOGISTICA_OK and doc_id):
                 st.caption("⚠️ Não é possível dar baixa nesta entrega agora.")
@@ -898,8 +880,6 @@ def _visualizacao_motorista(user):
                             ok, msg = dar_baixa_entrega_db(doc_id, status_db, foto_bytes, motivo)
                             (st.success if ok else st.error)(msg)
                             if ok:
-                                # Entrega concluída — encerra o rastreio ao vivo
-                                # dela também, se estava ativo.
                                 if _RASTREIO_LIVE_OK and doc_id:
                                     try:
                                         desativar_rastreio_live_db(doc_id)
@@ -911,12 +891,6 @@ def _visualizacao_motorista(user):
 
 # ── ABA NOVA: Chat embutido dentro do Rastreio, ao lado de Cadastros ──
 def _aba_chat_no_rastreio(papel, user):
-    # Import LOCAL (dentro da função) de propósito: o mod_chat.py importa
-    # coisas do mod_rastreio.py (pros links de rastreio no popover), então
-    # importar mod_chat no topo deste arquivo criaria um import circular
-    # (A importa B que importa A). Importando aqui dentro, só na hora de
-    # usar, os dois módulos já estão totalmente carregados e isso não
-    # acontece.
     try:
         from modulo.mod_chat import renderizar_chat
         renderizar_chat(papel, user)
@@ -935,8 +909,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
 
     _injetar_css()
 
-    # Motorista tem uma visão totalmente separada e simplificada — não
-    # passa por nenhum dos filtros, abas ou lógica de ADM/Supervisor abaixo.
     if papel == "motorista":
         _visualizacao_motorista(user)
         return True
@@ -945,7 +917,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
     ontem = (datetime.now(BRT).date() - timedelta(days=1)).isoformat()
     datas_disp = [d["data"] for d in datas_db]
 
-    # ── Seletor de data + busca numa linha ───────────────────────
     fc1, fc2, fc3, fc4 = st.columns([2, 2, 1.5, 1.5])
     with fc1:
         opcoes = []
@@ -968,7 +939,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
         f_nt = st.selectbox("Notificação", ["Todas","Sim","Não"],
                             label_visibility="visible", key="f_notif")
 
-    # Resolve data
     if   "Hoje"  in data_sel: data_consulta = hoje
     elif "Ontem" in data_sel: data_consulta = ontem
     else:
@@ -976,27 +946,13 @@ def renderizar_rastreio(papel: str, user: dict = None,
         except: data_consulta = hoje
     is_hoje = (data_consulta == hoje)
 
-    # Carrega dados. Usa obter_tickets_com_id_db (com '_doc_id') sempre que
-    # o database_logistica.py estiver disponível — é o mesmo '_doc_id' que
-    # o Rastreio ao Vivo precisa pra saber qual entrega ativar/desativar.
-    # Sem o database_logistica.py, cai no obter_tickets_db de sempre (sem
-    # doc_id) e a aba "📍 Ao Vivo" avisa que está indisponível, sem quebrar
-    # o resto da tela.
     tickets_raw = obter_tickets_com_id_db(data_consulta) if _LOGISTICA_OK else obter_tickets_db(data_consulta)
     df = pd.DataFrame(tickets_raw) if tickets_raw else pd.DataFrame()
     sem_dados_no_dia = df.empty
 
-    # IMPORTANTE: ao contrário de versões anteriores, NÃO retornamos mais
-    # cedo quando não há nenhuma entrega no dia — isso impedia até as abas
-    # (inclusive "📍 Ao Vivo" e "🧑‍✈️ Cadastros") de aparecerem. Agora as
-    # abas sempre são montadas; cada uma trata a ausência de dados por conta
-    # própria (mensagem no Dashboard/Exportar, formulário de teste no Ao Vivo).
     if not sem_dados_no_dia:
         df = garantir_colunas(df.copy())
 
-        # ── Motorista só vê as próprias entregas ───────────────────
-        # (mantido por segurança/compatibilidade, embora este branch de
-        # renderizar_rastreio só seja chamado para papel != "motorista")
         if papel == "motorista":
             try:
                 minha_chave = user.get("usuario", "")
@@ -1006,9 +962,8 @@ def renderizar_rastreio(papel: str, user: dict = None,
                     st.info("⏳ Nenhuma entrega atribuída a você para o dia selecionado.")
                     return is_hoje
             except Exception:
-                pass  # mantém o comportamento anterior em vez de quebrar a tela
+                pass
 
-        # Aplica filtros
         df_f = aplicar_busca(df, termo)
         if f_st != "Todos":  df_f = df_f[df_f["_status_visual"] == f_st]
         if f_nt == "Sim":    df_f = df_f[df_f["_notificado"] == True]
@@ -1016,9 +971,8 @@ def renderizar_rastreio(papel: str, user: dict = None,
         if termo and df_f.empty:
             st.warning(f"Nenhum resultado para **{termo}**."); return is_hoje
     else:
-        df_f = df  # dataframe vazio — cada aba abaixo trata isso por conta própria
+        df_f = df
 
-    # ── Abas ──────────────────────────────────────────────────────
     abas_nomes = ["🏠 Dashboard"]
     if pode_exp: abas_nomes.append("📥 Exportar")
     abas_nomes.append("📍 Ao Vivo")
@@ -1029,7 +983,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
         abas_nomes.append("💬 Chat")
     abas = st.tabs(abas_nomes)
 
-    # ══ DASHBOARD ════════════════════════════════════════════════
     with abas[0]:
         if sem_dados_no_dia:
             st.info("⏳ Nenhum dado de entrega para o dia selecionado.")
@@ -1080,7 +1033,6 @@ def renderizar_rastreio(papel: str, user: dict = None,
                 "Tracking": get_series(df_f,"tracking_id"),
             }), use_container_width=True, hide_index=True)
 
-    # ══ EXPORTAR ══════════════════════════════════════════════════
     if pode_exp:
         with abas[1]:
             if sem_dados_no_dia:
@@ -1134,16 +1086,13 @@ def renderizar_rastreio(papel: str, user: dict = None,
                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary", use_container_width=True)
 
-    # ══ RASTREIO AO VIVO (aba própria) ═════════════════════════════
     with abas[idx_ao_vivo]:
         _aba_rastreio_ao_vivo(df_f if not sem_dados_no_dia else pd.DataFrame(), data_consulta, user)
 
-    # ══ CADASTROS + CHAT (novas abas, só ADM/Supervisor) ══════════
     if mostra_cadastros:
         with abas[-2]:
             _aba_cadastros(datas_db)
         with abas[-1]:
             _aba_chat_no_rastreio(papel, user)
 
-    # Auto-refresh controlado pelo main.py
     return is_hoje
