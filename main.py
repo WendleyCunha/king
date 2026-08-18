@@ -348,7 +348,29 @@ if st.session_state.user is None:
         usuario = st.text_input("Usuário")
         senha   = st.text_input("Senha", type="password")
         if st.button("Entrar", type="primary", use_container_width=True):
-            u = verificar_login(usuario, senha)
+            # [CORREÇÃO] Antes, `verificar_login` rodava sem nenhuma
+            # proteção — se o Firestore falhasse aqui (cota estourada,
+            # serviço fora do ar, etc.), o usuário via um traceback técnico
+            # cru (ResourceExhausted, com stack trace do gRPC) bem na tela
+            # de login, antes mesmo de entrar no sistema. Agora qualquer
+            # falha de leitura vira uma mensagem simples e direta.
+            u = None
+            banco_indisponivel = False
+            try:
+                u = verificar_login(usuario, senha)
+            except _ResourceExhausted:
+                banco_indisponivel = True
+                st.error(
+                    "🚫 O sistema está temporariamente indisponível "
+                    "(banco de dados fora do ar). Tente novamente em alguns minutos."
+                )
+            except Exception:
+                banco_indisponivel = True
+                st.error(
+                    "🚫 O sistema está temporariamente indisponível. "
+                    "Tente novamente em alguns instantes."
+                )
+
             if u:
                 st.session_state.user = u
                 # Regra: após o login, a primeira página é a Home (Meu Dia) —
@@ -356,7 +378,10 @@ if st.session_state.user is None:
                 # vão direto para o Rastreio (suas próprias entregas).
                 st.session_state.modulo_ativo = "rastreio" if u.get("role") == "motorista" else "home"
                 st.rerun()
-            else:
+            elif not banco_indisponivel:
+                # Só mostra "credenciais inválidas" se o problema NÃO foi
+                # indisponibilidade do banco (nesse caso a mensagem certa
+                # já apareceu acima).
                 st.error("Credenciais inválidas.")
     st.stop()
 
