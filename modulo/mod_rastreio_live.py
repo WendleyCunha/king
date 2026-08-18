@@ -1,70 +1,135 @@
-# ══════════════════════════════════════════════════════════════════
-# RASTREIO AO VIVO (posição do motorista + alerta de proximidade)
-# Coleções:
-#   /posicoes_motoristas/{ticket_id} → { lat, lng, velocidade_kmh,
-#                                         precisao_m, atualizado_em }
-#       Gravado pelo motor_api.py (FastAPI/Render) a cada ping do celular
-#       do motorista — o Streamlit NUNCA escreve aqui, só lê.
-#
-#   /entregas_rastreio_live/{ticket_id} → { destino_lat, destino_lng,
-#                                            cliente_telefone,
-#                                            alerta_5km_enviado,
-#                                            ativado_em }
-#       Criado quando o ADM/Supervisor ativa o rastreio ao vivo para
-#       uma entrega específica (botão "Ativar rastreio ao vivo").
-# ══════════════════════════════════════════════════════════════════
+"""
+modulo/mod_rastreio_live.py
+Mapa ao vivo (visão do ADM/Supervisor, dentro do Streamlit) da posição do
+motorista para UMA entrega específica. Usa Leaflet + OpenStreetMap (sem
+chave de API), embutido via st.components.v1.html — mesmo motor de mapa
+usado na página pública do cliente (GET /rastreio/{ticket_id} em
+motor_api.py), só que esta versão fica dentro do painel autenticado.
 
-def iniciar_rastreio_live_db(ticket_id: str, destino_lat: float, destino_lng: float,
-                              cliente_telefone: str = ""):
+Lê (nunca escreve) as coleções gravadas pelo motor_api.py:
+  /posicoes_motoristas/{ticket_id}       → posição atual do motorista
+  /entregas_rastreio_live/{ticket_id}    → destino + config da entrega
+
+Ponto de entrada usado por modulo/mod_rastreio.py:
+  renderizar_mapa_ao_vivo(ticket_id)
+
+[CORREÇÃO — cota do Firestore] A primeira versão usava `run_every=6`
+(atualização automática a cada 6 segundos, o tempo TODO que a aba "📍 Ao
+Vivo" ficasse aberta) — isso, somado ao chat (que já atualiza a cada 2s) e
+a vários testes seguidos, estourou a cota diária gratuita do Firestore
+("Spark", 50.000 leituras/dia), derrubando o app inteiro com
+`ResourceExhausted`. Agora:
+  - O intervalo subiu para 20s (bem menos leituras por minuto).
+  - A atualização automática vem DESLIGADA por padrão — só liga com um
+    toggle, e só enquanto alguém estiver de fato olhando a tela. Sem o
+    toggle ligado, é preciso clicar em "🔄 Atualizar posição" manualmente.
+Se mesmo assim a cota estourar de novo, o problema é volume de uso real
+(vários motoristas/entregas simultâneas) — nesse caso o caminho é migrar
+o projeto Firestore do plano Spark (gratuito) para o Blaze (pago por uso;
+as primeiras 50k leituras/dia continuam grátis, só o excedente é cobrado).
+"""
+import streamlit as st
+import streamlit.components.v1 as components
+
+from database import obter_posicao_motorista_db, obter_config_entrega_live_db
+
+# Intervalo de atualização automática, em segundos. Subido de 6 para 20 —
+# ver nota de correção acima. Ajuste aqui se quiser mais rápido/lento.
+_INTERVALO_AUTO_REFRESH = 20
+
+_FRAGMENT_DECORATOR = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+_TEM_FRAGMENT = _FRAGMENT_DECORATOR is not None
+
+
+def _desenhar_mapa(ticket_id, posicao, config):
+    lat_m = posicao.get("lat")
+    lng_m = posicao.get("lng")
+    lat_d = config.get("destino_lat")
+    lng_d = config.get("destino_lng")
+
+    if lat_m is None or lng_m is None or lat_d is None or lng_d is None:
+        st.warning("Dados de posição/destino incompletos — não foi possível desenhar o mapa.")
+        return
+
+    html = f"""
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <div id="mapa_live_{ticket_id}" style="height:420px;border-radius:10px;overflow:hidden;"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      var mapa = L.map('mapa_live_{ticket_id}');
+      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+        attribution: '&copy; OpenStreetMap contributors'
+      }}).addTo(mapa);
+
+      var iconeMotorista = L.divIcon({{ html: '<div style="font-size:26px;">🚚</div>', className: '', iconSize: [26, 26] }});
+      var iconeDestino   = L.divIcon({{ html: '<div style="font-size:26px;">📍</div>', className: '', iconSize: [26, 26] }});
+
+      L.marker([{lat_m}, {lng_m}], {{ icon: iconeMotorista }}).addTo(mapa);
+      L.marker([{lat_d}, {lng_d}], {{ icon: iconeDestino }}).addTo(mapa);
+      mapa.fitBounds([[{lat_m}, {lng_m}], [{lat_d}, {lng_d}]], {{ padding: [30, 30] }});
+    </script>
     """
-    Ativa o rastreio ao vivo para uma entrega. Chame isso quando o ADM/
-    Supervisor clicar em "Ativar rastreio ao vivo" na tela do Rastreio —
-    é o que faz `renderizar_mapa_ao_vivo()` parar de mostrar
-    "Aguardando o motorista iniciar" e passar a funcionar.
+    components.html(html, height=440)
 
-    destino_lat/destino_lng: coordenadas do endereço de entrega (vêm de
-    geocodificação do campo 'address', feita uma vez na importação da
-    planilha ou informada manualmente aqui).
+    col1, col2, col3 = st.columns(3)
+    vel = posicao.get("velocidade_kmh")
+    precisao = posicao.get("precisao_m")
+    col1.metric("🚚 Velocidade", f"{vel:.0f} km/h" if vel else "—")
+    col2.metric("🎯 Precisão do GPS", f"{precisao:.0f} m" if precisao else "—")
+    col3.metric("🚨 Alerta 5km", "✅ Já enviado" if config.get("alerta_5km_enviado") else "⏳ Ainda não")
+    st.caption(f"📡 Última atualização recebida: {posicao.get('atualizado_em', '—')}")
+
+
+def _renderizar_conteudo(ticket_id: str):
+    """Uma única leitura do Firestore por chamada — usada tanto no modo
+    manual (1 leitura por clique) quanto dentro do fragment auto-refresh
+    (1 leitura a cada _INTERVALO_AUTO_REFRESH segundos, nunca mais que isso)."""
+    config = obter_config_entrega_live_db(ticket_id)
+    if not config:
+        st.info("Rastreio ao vivo ainda não foi ativado para esta entrega.")
+        return
+
+    posicao = obter_posicao_motorista_db(ticket_id)
+    if not posicao:
+        st.info(
+            "⏳ Aguardando o motorista iniciar o compartilhamento de localização "
+            "(ele precisa abrir o link e permitir acesso ao GPS no celular)."
+        )
+        return
+
+    _desenhar_mapa(ticket_id, posicao, config)
+
+
+def _renderizar_conteudo_auto(ticket_id: str):
+    _renderizar_conteudo(ticket_id)
+
+
+def renderizar_mapa_ao_vivo(ticket_id: str):
     """
-    get_db().collection("entregas_rastreio_live").document(ticket_id).set({
-        "destino_lat": destino_lat,
-        "destino_lng": destino_lng,
-        "cliente_telefone": cliente_telefone,
-        "alerta_5km_enviado": False,
-        "ativado_em": datetime.now(BRT).isoformat(),
-    })
-
-
-def obter_config_entrega_live_db(ticket_id: str):
-    """Retorna a config de rastreio ao vivo de uma entrega, ou None se o
-    rastreio ainda não foi ativado para ela."""
-    doc = get_db().collection("entregas_rastreio_live").document(ticket_id).get()
-    return doc.to_dict() if doc.exists else None
-
-
-def obter_posicao_motorista_db(ticket_id: str):
+    [CORREÇÃO — cota do Firestore] Atualização automática agora é OPCIONAL
+    e vem DESLIGADA por padrão (evita gastar cota de leitura enquanto
+    ninguém está olhando a tela). Marque o toggle abaixo só quando
+    quiser acompanhar em tempo real; sem ele, use o botão manual.
     """
-    Retorna a última posição conhecida do motorista para esta entrega,
-    ou None se ele ainda não começou a compartilhar localização.
-
-    Sem cache de propósito: a posição muda a cada poucos segundos (o
-    celular manda um ping novo), então um @st.cache_data aqui mostraria
-    o motorista "parado" na tela mesmo ele já tendo avançado.
-    """
-    doc = get_db().collection("posicoes_motoristas").document(ticket_id).get()
-    return doc.to_dict() if doc.exists else None
-
-
-def marcar_alerta_5km_enviado_db(ticket_id: str):
-    """Marca que o alerta de proximidade já foi disparado para esta
-    entrega, para o gatilho não repetir o WhatsApp a cada refresh da tela."""
-    get_db().collection("entregas_rastreio_live").document(ticket_id).update(
-        {"alerta_5km_enviado": True}
+    chave_toggle = f"live_auto_{ticket_id}"
+    auto_ligado = st.toggle(
+        f"🔄 Atualização automática a cada {_INTERVALO_AUTO_REFRESH}s "
+        "(consome cota do Firestore continuamente — desligue quando não precisar)",
+        value=st.session_state.get(chave_toggle, False),
+        key=chave_toggle,
     )
 
+    if auto_ligado and _TEM_FRAGMENT:
+        _FRAGMENT_DECORATOR(run_every=_INTERVALO_AUTO_REFRESH)(_renderizar_conteudo_auto)(ticket_id)
+        return
 
-def desativar_rastreio_live_db(ticket_id: str):
-    """Chame quando a entrega for concluída (baixa dada), para não deixar
-    o mapa ao vivo 'aberto' indefinidamente para uma entrega já finalizada."""
-    get_db().collection("entregas_rastreio_live").document(ticket_id).delete()
-    get_db().collection("posicoes_motoristas").document(ticket_id).delete()
+    if auto_ligado and not _TEM_FRAGMENT:
+        st.caption(
+            "⚠️ Sua versão do Streamlit não suporta `st.fragment` — não dá pra "
+            "atualizar automaticamente sem recarregar a página inteira. "
+            "Atualize `streamlit>=1.35.0` no requirements.txt, ou use o botão manual abaixo."
+        )
+
+    _renderizar_conteudo(ticket_id)
+    if st.button("🔄 Atualizar posição agora", key=f"refresh_live_{ticket_id}"):
+        st.rerun()
