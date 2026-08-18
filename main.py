@@ -74,6 +74,44 @@ except Exception:
     def listar_conversas_com_nao_lidas(_lista):
         return []
 
+# [NOVO — blindagem de runtime] Diferente da proteção de IMPORT lá em cima
+# (que só cobre "o arquivo do módulo carregou certo?"), esta função protege
+# a EXECUÇÃO de cada módulo. Um erro que só acontece quando o módulo roda de
+# verdade — Firestore fora do ar, cota estourada (ResourceExhausted), índice
+# faltando, etc. — antes derrubava a página inteira, mesmo com o import
+# protegido. Agora cada chamada de módulo no roteamento passa por aqui: se
+# der erro, mostra um aviso amigável SÓ naquela tela, e o resto do sistema
+# (sidebar, outros módulos) continua clicável normalmente.
+from google.api_core.exceptions import ResourceExhausted as _ResourceExhausted
+
+def _executar_modulo_protegido(nome_modulo: str, func, *args, **kwargs):
+    """Roda `func(*args, **kwargs)` protegido — devolve o valor de retorno
+    de `func` em caso de sucesso, ou None se der erro (depois de já ter
+    mostrado o aviso na tela)."""
+    try:
+        return func(*args, **kwargs)
+    except _ResourceExhausted:
+        st.error(
+            f"🚫 **{nome_modulo}** não pôde carregar agora: a cota diária gratuita "
+            "de leituras do Firestore foi esgotada (limite do plano Spark, não é "
+            "um bug do sistema)."
+        )
+        st.info(
+            "**Como resolver:** espere o reset automático da cota (meia-noite "
+            "horário do Pacífico, ≈ 4h-5h da manhã em Brasília), ou migre o "
+            "projeto no Firebase para o plano **Blaze** "
+            "(console.firebase.google.com → ⚙️ → Uso e faturamento → Modificar "
+            "plano) — as primeiras 50k leituras/dia continuam grátis, o erro "
+            "some assim que o plano muda. Os outros itens da sidebar continuam "
+            "funcionando normalmente até lá, se não precisarem ler o Firestore "
+            "agora."
+        )
+        return None
+    except Exception as e:
+        st.error(f"⚠️ **{nome_modulo}** encontrou um erro e não pôde carregar agora.")
+        st.exception(e)
+        return None
+
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
     layout="wide", page_icon="🚚",
@@ -519,33 +557,7 @@ if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
 if modulo_ativo == "rastreio" and not datas_db:
     datas_db = obter_datas_disponiveis_db()
 
-# ── ROTEAMENTO ────────────────────────────────────────────────────
-if modulo_ativo == "home":
-    renderizar_home(papel, user)
-
-elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
-    is_hoje = renderizar_rastreio(
-        papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
-    )
-    # Atualização manual em vez de streamlit-autorefresh: esse componente
-    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
-    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
-    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
-    # manual é 100% seguro e não tem esse risco.
-    if is_hoje:
-        if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
-            st.rerun()
-
-elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
-    renderizar_tickets(papel, user)
-
-elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
-    renderizar_cartas(papel, user)
-
-elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
-    renderizar_diagnostico(papel, user)
-
-elif modulo_ativo == "config" and papel == "adm":
+def _renderizar_bloco_configuracoes():
     st.subheader("⚙️ Configurações")
 
     # ── Helpers de gerenciamento (sub-abas por departamento) ──────────
@@ -771,6 +783,42 @@ elif modulo_ativo == "config" and papel == "adm":
         except Exception as _erro_import_motivos:
             st.error("⚠️ Falha ao carregar o cadastro de Motivos. Detalhe técnico abaixo:")
             st.exception(_erro_import_motivos)
+
+
+# ── ROTEAMENTO ────────────────────────────────────────────────────
+# [NOVO] Cada chamada abaixo passa por `_executar_modulo_protegido` — ver
+# nota de blindagem de runtime logo acima. Um erro em qualquer módulo
+# (cota do Firestore, índice faltando, bug pontual) mostra um aviso só
+# naquela tela; a sidebar e os outros módulos continuam acessíveis.
+if modulo_ativo == "home":
+    _executar_modulo_protegido("Meu Dia", renderizar_home, papel, user)
+
+elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
+    is_hoje = _executar_modulo_protegido(
+        "Rastreio", renderizar_rastreio,
+        papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
+    )
+    # Atualização manual em vez de streamlit-autorefresh: esse componente
+    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
+    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
+    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
+    # manual é 100% seguro e não tem esse risco.
+    if is_hoje:
+        if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
+            st.rerun()
+
+elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
+    _executar_modulo_protegido("Tickets", renderizar_tickets, papel, user)
+
+elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
+    _executar_modulo_protegido("Cartas", renderizar_cartas, papel, user)
+
+elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
+    _executar_modulo_protegido("Diagnóstico N2", renderizar_diagnostico, papel, user)
+
+elif modulo_ativo == "config" and papel == "adm":
+    _executar_modulo_protegido("Configurações", _renderizar_bloco_configuracoes)
+
 
 
 else:
