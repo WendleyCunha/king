@@ -13,9 +13,20 @@ Variáveis de ambiente OPCIONAIS (se não configuradas, o envio de WhatsApp
   TWILIO_ACCOUNT_SID   = seu Account SID do Twilio
   TWILIO_AUTH_TOKEN    = seu Auth Token do Twilio
   TWILIO_WHATSAPP_FROM = número WhatsApp do Twilio, formato: whatsapp:+14155238886
+
+NOVO — Link de rastreio para o CLIENTE (GET /rastreio/{ticket_id}):
+Página HTML pública (sem login nenhum, ao contrário do Streamlit) com um
+mapa que mostra a posição do motorista e o destino, atualizando sozinho a
+cada 8 segundos. É o link que você manda pro cliente pelo WhatsApp — ex:
+  https://SEU-SERVICO.onrender.com/rastreio/{ticket_id}
+Usa só o endpoint GET /gps/{ticket_id} que já existia (já era público) —
+nenhuma coleção nova no Firestore, nenhum dado sensível do painel exposto
+(não mostra nome do motorista, outras entregas, etc.). O mapa em si é
+Leaflet + OpenStreetMap, sem chave de API nem custo.
 """
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 import uvicorn
 import json
 import os
@@ -299,7 +310,7 @@ async def receber_gps(ticket_id: str, request: Request):
     precisao_m     = body.get("precisao_m")
     atualizado_em  = body.get("atualizado_em") or agora_brt()
 
-    # 1) Grava a posição — é isso que o Streamlit lê para desenhar o mapa.
+    # 1) Grava a posição — é isso que o Streamlit e a página do cliente leem.
     db.collection("posicoes_motoristas").document(ticket_id).set({
         "lat": lat,
         "lng": lng,
@@ -359,13 +370,152 @@ async def receber_gps(ticket_id: str, request: Request):
 def consultar_gps(ticket_id: str):
     """Endpoint auxiliar de leitura — útil para testar rapidamente pelo
     navegador/Postman se um ticket_id já tem posição e config gravadas,
-    sem precisar abrir o Streamlit."""
+    sem precisar abrir o Streamlit. Também é o endpoint que a página
+    pública /rastreio/{ticket_id} (abaixo) consulta a cada poucos segundos
+    para desenhar o mapa do cliente."""
     pos_doc = db.collection("posicoes_motoristas").document(ticket_id).get()
     cfg_doc = db.collection("entregas_rastreio_live").document(ticket_id).get()
     return {
         "posicao": pos_doc.to_dict() if pos_doc.exists else None,
         "config": cfg_doc.to_dict() if cfg_doc.exists else None,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# [NOVO] PÁGINA PÚBLICA DE RASTREIO PARA O CLIENTE
+#
+# GET /rastreio/{ticket_id} — sem login nenhum (diferente do Streamlit).
+# É o link que você manda pro cliente pelo WhatsApp assim que ativar o
+# rastreio ao vivo de uma entrega, ex:
+#     https://SEU-SERVICO.onrender.com/rastreio/{ticket_id}
+#
+# Mostra um mapa (Leaflet + OpenStreetMap, sem chave de API/custo) com a
+# posição do motorista e o destino, atualizando sozinho a cada 8s via
+# JavaScript, consultando o mesmo GET /gps/{ticket_id} que já existia
+# (já era público). Não expõe nome do motorista, outras entregas nem
+# nenhum dado interno do painel — só a posição, o destino, e uma
+# distância/ETA aproximados calculados no PRÓPRIO NAVEGADOR do cliente
+# (o backend não precisa fazer esse cálculo pra essa página).
+# ═══════════════════════════════════════════════════════════════════
+
+_HTML_RASTREIO_CLIENTE_TEMPLATE = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rastreio da sua entrega — KingStar</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  body { margin:0; font-family: Arial, sans-serif; background:#f4f6f9; }
+  #topo { background:#fff; border-bottom:3px solid #C9A84C; padding:14px 18px; box-sizing:border-box; }
+  #topo h1 { margin:0; font-size:1.05rem; color:#2c3e50; }
+  #status { font-size:0.85rem; color:#64778d; margin-top:4px; }
+  #mapa { height: calc(100vh - 72px); width:100%; }
+  #aguardando {
+    display:none; align-items:center; justify-content:center; height: calc(100vh - 72px);
+    text-align:center; color:#64778d; font-size:1rem; padding:20px; box-sizing:border-box;
+  }
+  .marcador-emoji { font-size: 26px; line-height: 26px; text-align:center; }
+</style>
+</head>
+<body>
+  <div id="topo">
+    <h1>🚚 Rastreio da sua entrega</h1>
+    <div id="status">Carregando...</div>
+  </div>
+  <div id="aguardando"></div>
+  <div id="mapa"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const TICKET_ID = __TICKET_ID_JSON__;
+    let mapa = null, marcadorMotorista = null, marcadorDestino = null;
+
+    function haversineKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const toRad = (v) => v * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function mostrarMapa() {
+      document.getElementById('mapa').style.display = 'block';
+      document.getElementById('aguardando').style.display = 'none';
+    }
+    function mostrarAguardando(msg) {
+      document.getElementById('mapa').style.display = 'none';
+      const el = document.getElementById('aguardando');
+      el.style.display = 'flex';
+      el.innerText = msg;
+    }
+
+    function desenharMapa(latM, lngM, latD, lngD) {
+      mostrarMapa();
+      if (!mapa) {
+        mapa = L.map('mapa');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(mapa);
+      }
+      if (marcadorMotorista) mapa.removeLayer(marcadorMotorista);
+      if (marcadorDestino) mapa.removeLayer(marcadorDestino);
+
+      const iconeMotorista = L.divIcon({ html: '<div class="marcador-emoji">🚚</div>', className: '', iconSize: [26, 26] });
+      const iconeDestino   = L.divIcon({ html: '<div class="marcador-emoji">📍</div>', className: '', iconSize: [26, 26] });
+
+      marcadorMotorista = L.marker([latM, lngM], { icon: iconeMotorista }).addTo(mapa);
+      marcadorDestino   = L.marker([latD, lngD], { icon: iconeDestino }).addTo(mapa);
+      mapa.fitBounds([[latM, lngM], [latD, lngD]], { padding: [40, 40] });
+    }
+
+    async function atualizar() {
+      try {
+        const resp = await fetch('/gps/' + TICKET_ID);
+        const dados = await resp.json();
+
+        if (!dados.config) {
+          document.getElementById('status').innerText = 'Rastreio ainda não ativado.';
+          mostrarAguardando('Este link de rastreio ainda não foi ativado. Fale com a loja.');
+          return;
+        }
+        if (!dados.posicao) {
+          document.getElementById('status').innerText = 'Aguardando o motorista iniciar...';
+          mostrarAguardando('Aguardando o motorista começar a compartilhar a localização...');
+          return;
+        }
+
+        const lat = dados.posicao.lat;
+        const lng = dados.posicao.lng;
+        const destinoLat = dados.config.destino_lat;
+        const destinoLng = dados.config.destino_lng;
+        desenharMapa(lat, lng, destinoLat, destinoLng);
+
+        const distKm = haversineKm(lat, lng, destinoLat, destinoLng) * 1.35;
+        const velRaw = dados.posicao.velocidade_kmh;
+        const vel = (velRaw && velRaw > 3) ? velRaw : 30;
+        const etaMin = Math.max(1, Math.round((distKm / vel) * 60));
+        document.getElementById('status').innerText =
+          '📍 A ' + distKm.toFixed(1) + ' km de você — chegada estimada em ' + etaMin + ' min';
+      } catch (e) {
+        document.getElementById('status').innerText = 'Não foi possível atualizar agora — tentando de novo...';
+      }
+    }
+
+    atualizar();
+    setInterval(atualizar, 8000);
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/rastreio/{ticket_id}", response_class=HTMLResponse)
+def pagina_rastreio_cliente(ticket_id: str):
+    html = _HTML_RASTREIO_CLIENTE_TEMPLATE.replace(
+        "__TICKET_ID_JSON__", json.dumps(ticket_id)
+    )
+    return HTMLResponse(content=html)
 
 
 @app.get("/health")
