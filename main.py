@@ -14,7 +14,24 @@ from database import (
     atualizar_departamento_usuario, redefinir_senha_usuario,
     atualizar_perfil_usuario, renomear_login_usuario,
 )
-from modulo.mod_rastreio import renderizar_rastreio
+
+# [CORREÇÃO — ponto único de falha] Antes, este import não tinha proteção
+# nenhuma: `from modulo.mod_rastreio import renderizar_rastreio` direto,
+# diferente de TODOS os outros módulos abaixo (Home, Tickets, Cartas, Chat,
+# Diagnóstico), que já usam try/except com uma função de fallback. Como o
+# Rastreio é o módulo mais complexo do sistema (importa database_logistica,
+# mod_rastreio_live, e dentro dele ainda importa mod_chat), qualquer
+# problema em QUALQUER ponto dessa cadeia derrubava o `main.py` inteiro na
+# hora do import — inclusive a TELA DE LOGIN, antes de qualquer usuário
+# conseguir entrar. Agora segue o mesmo padrão de proteção dos demais.
+try:
+    from modulo.mod_rastreio import renderizar_rastreio
+except Exception as _erro_import_rastreio:
+    def renderizar_rastreio(papel, user=None, datas_db=None, pode_exp=False,
+                             _erro=_erro_import_rastreio):
+        st.error("⚠️ Falha ao carregar o módulo de Rastreio. Detalhe técnico abaixo:")
+        st.exception(_erro)
+        return False
 
 try:
     from modulo.mod_home import renderizar_home
