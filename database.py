@@ -455,12 +455,22 @@ def obter_datas_disponiveis_db() -> list:
     return [{"data":k,"total":v} for k,v in sorted(datas.items(), reverse=True)]
 
 # ── De-Para motoristas ────────────────────────────────────────────
+# [CORREÇÃO — estouro de cota] `obter_vinculo_db` é chamada via
+# `.apply(nome_motorista)` em CADA LINHA de toda tabela de entregas
+# desenhada no Dashboard (mod_rastreio.py) — sem cache, isso é 1 leitura
+# nova no Firestore por linha, em TODO rerun da tela. Com várias entregas
+# na tabela, isso sozinho já soma bastante. O vínculo placa/rota → nome do
+# motorista muda raríssimas vezes (só quando alguém edita o nome do
+# condutor), então um cache curto de 30s já elimina quase toda releitura
+# redundante sem deixar a tela desatualizada de forma perceptível.
+@st.cache_data(ttl=30, show_spinner=False)
 def obter_vinculo_db(chave: str) -> str:
     doc = get_db().collection("de_para_motoristas").document(chave).get()
     return doc.to_dict().get("nome_motorista", chave) if doc.exists else chave
 
 def salvar_vinculo_db(chave: str, nome: str):
     get_db().collection("de_para_motoristas").document(chave).set({"nome_motorista": nome})
+    obter_vinculo_db.clear()
 
 def deletar_rota_db(rota: str, data: str):
     """
@@ -884,6 +894,14 @@ def deletar_registro_diario_db(id_registro: str):
 #
 # ticket_id = o '_doc_id' da entrega (mesmo id usado em
 # obter_tickets_com_id_db / dar_baixa_entrega_db).
+#
+# CORREÇÃO — estouro de cota do Firestore: `obter_config_entrega_live_db`
+# é chamada em vários lugares sem cache — na tela do motorista, ela roda
+# 1 VEZ POR ENTREGA, EM LOOP, a cada rerun da tela; no Ao Vivo, roda a
+# cada clique; e dentro do fragment do mapa, a cada ciclo de atualização.
+# A config de uma entrega (destino, telefone) só muda quando o rastreio é
+# ativado ou desativado — nunca "ao vivo" de verdade — então um cache
+# curto (8s) corta a maior parte dessas releituras sem atraso perceptível.
 # ══════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -943,11 +961,14 @@ def iniciar_rastreio_live_db(ticket_id: str, destino_lat: float, destino_lng: fl
         "alerta_5km_enviado": False,
         "ativado_em": datetime.now(BRT).isoformat(),
     })
+    obter_config_entrega_live_db.clear()
 
 
+@st.cache_data(ttl=8, show_spinner=False)
 def obter_config_entrega_live_db(ticket_id: str):
     """Retorna a config de rastreio ao vivo de uma entrega, ou None se o
-    rastreio ainda não foi ativado para ela."""
+    rastreio ainda não foi ativado para ela. Cacheada por 8s — ver nota de
+    correção logo acima do bloco de Rastreio ao Vivo."""
     doc = get_db().collection("entregas_rastreio_live").document(ticket_id).get()
     return doc.to_dict() if doc.exists else None
 
@@ -960,7 +981,9 @@ def obter_posicao_motorista_db(ticket_id: str):
     Sem cache de propósito: a posição muda a cada poucos segundos (o
     celular manda um ping novo via motor_api.py), então um
     @st.cache_data aqui mostraria o motorista "parado" na tela mesmo
-    ele já tendo avançado.
+    ele já tendo avançado. (Isso já está protegido do lado de quem chama:
+    o toggle de auto-atualização em mod_rastreio_live.py vem desligado por
+    padrão, e o intervalo mínimo é de 20s quando ligado.)
     """
     doc = get_db().collection("posicoes_motoristas").document(ticket_id).get()
     return doc.to_dict() if doc.exists else None
@@ -972,6 +995,7 @@ def marcar_alerta_5km_enviado_db(ticket_id: str):
     get_db().collection("entregas_rastreio_live").document(ticket_id).update(
         {"alerta_5km_enviado": True}
     )
+    obter_config_entrega_live_db.clear()
 
 
 def desativar_rastreio_live_db(ticket_id: str):
@@ -979,3 +1003,4 @@ def desativar_rastreio_live_db(ticket_id: str):
     o mapa ao vivo 'aberto' indefinidamente para uma entrega já finalizada."""
     get_db().collection("entregas_rastreio_live").document(ticket_id).delete()
     get_db().collection("posicoes_motoristas").document(ticket_id).delete()
+    obter_config_entrega_live_db.clear()
