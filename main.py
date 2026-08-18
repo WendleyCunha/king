@@ -521,13 +521,36 @@ with hc2:
 # ── DADOS ─────────────────────────────────────────────────────────
 modulo_ativo = st.session_state.modulo_ativo
 
+def _obter_datas_disponiveis_protegido():
+    """
+    [CORREÇÃO — ponto de falha desprotegido] Esta chamada rodava FORA de
+    `_executar_modulo_protegido`, direto no meio do script — se o
+    Firestore falhasse aqui (cota estourada, índice faltando, etc.), a
+    página inteira quebrava antes mesmo de chegar no roteamento, mesmo já
+    com a blindagem dos módulos em vigor. Agora qualquer erro aqui vira só
+    um aviso, e `datas_db` volta como lista vazia (o Rastreio ainda abre,
+    só sem o histórico de dias anteriores no seletor de período).
+    """
+    try:
+        return obter_datas_disponiveis_db()
+    except _ResourceExhausted:
+        st.warning(
+            "⚠️ Não foi possível carregar o histórico de dias do Rastreio agora "
+            "(cota de leitura do Firestore esgotada — ver Firebase Console → "
+            "Uso e faturamento). O Rastreio ainda abre, mostrando só o dia de hoje."
+        )
+        return []
+    except Exception as e:
+        st.warning("⚠️ Não foi possível carregar o histórico de dias do Rastreio agora.")
+        return []
+
 # OTIMIZAÇÃO: obter_datas_disponiveis_db() varre a coleção 'entregas'
 # inteira (todo o histórico de entregas já feitas) só para montar a
 # lista de datas do seletor do Rastreio. Antes rodava incondicionalmente
 # em TODA renderização (Tickets, Cartas, Configurações...), mesmo quando
 # a tela em questão nunca usa esse dado. Agora só busca quando o módulo
 # Rastreio está de fato aberto (também é cacheada por 60s em database.py).
-datas_db = obter_datas_disponiveis_db() if modulo_ativo == "rastreio" else []
+datas_db = _obter_datas_disponiveis_protegido() if modulo_ativo == "rastreio" else []
 
 # Motorista não tem acesso ao módulo Home — se a sessão dele ainda
 # apontar pra lá (ex: login antigo, antes dessa regra existir), redireciona.
@@ -555,7 +578,7 @@ if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
 # outra aba antes deste ponto, garante que datas_db já esteja resolvido
 # (evita usar variável desatualizada quando modulo_ativo mudou acima).
 if modulo_ativo == "rastreio" and not datas_db:
-    datas_db = obter_datas_disponiveis_db()
+    datas_db = _obter_datas_disponiveis_protegido()
 
 def _renderizar_bloco_configuracoes():
     st.subheader("⚙️ Configurações")
