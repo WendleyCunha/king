@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from database import listar_usuarios, obter_tickets_db
 from database_chat import (
-    enviar_mensagem_chat, obter_mensagens_chat, marcar_mensagens_lidas,
+    enviar_mensagem_chat, obter_mensagens_chat, obter_mensagens_novas_chat,
+    marcar_mensagens_lidas,
     listar_conversas_com_nao_lidas, marcar_presenca_adm,
     listar_admins_online, obter_status_conversa, finalizar_conversa_chat,
     reabrir_ou_criar_conversa,
@@ -399,6 +400,11 @@ def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: di
         with hc3:
             if st.button("✅ Finalizar", use_container_width=True, key=f"finalizar_{motorista_sel}"):
                 finalizar_conversa_chat(motorista_sel, usuario)
+                # Limpa o cache de mensagens dessa conversa (ver bloco de
+                # busca incremental abaixo) — evita acumular memória de
+                # conversas antigas numa sessão longa do admin.
+                st.session_state.pop(f"msgs_cache_{motorista_sel}", None)
+                st.session_state.pop(f"msgs_last_ts_{motorista_sel}", None)
                 st.session_state.chat_motorista_sel = None
                 st.success(f"Conversa com {nome_m} finalizada!")
                 time.sleep(.5)
@@ -425,8 +431,33 @@ def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: di
                 rotulo_ativo = mes_ref_ativo.strftime("%m/%Y")
                 sufixo_ativo = mes_ref_ativo.strftime("%Y%m")
 
+        # ── [NOVO — economia de cota] Busca incremental de mensagens ──────
+        # Antes: `obter_mensagens_chat(motorista_sel)` relia a conversa
+        # INTEIRA (até 200 mensagens) a cada ciclo do fragment (a cada 2s).
+        # Numa conversa de 30 mensagens, isso era ~900 leituras/minuto só
+        # de uma conversa aberta — a causa mais provável dos picos de
+        # dezenas de milhares de leituras/dia vistos no Firebase Console.
+        # Agora: a conversa inteira só é buscada UMA VEZ (quando abre ou
+        # troca de conversa); nos ciclos seguintes, busca só o que é mais
+        # novo que a última mensagem já vista (normalmente 0 ou 1 mensagem).
+        cache_key    = f"msgs_cache_{motorista_sel}"
+        last_ts_key  = f"msgs_last_ts_{motorista_sel}"
+
+        if cache_key not in st.session_state:
+            st.session_state[cache_key] = obter_mensagens_chat(motorista_sel)
+            st.session_state[last_ts_key] = (
+                st.session_state[cache_key][-1]["timestamp"] if st.session_state[cache_key] else None
+            )
+        else:
+            novas = obter_mensagens_novas_chat(
+                motorista_sel, desde_timestamp=st.session_state[last_ts_key]
+            )
+            if novas:
+                st.session_state[cache_key].extend(novas)
+                st.session_state[last_ts_key] = novas[-1]["timestamp"]
+
         marcar_mensagens_lidas(motorista_sel, "motorista")
-        msgs_todas = obter_mensagens_chat(motorista_sel)
+        msgs_todas = st.session_state[cache_key]
         msgs = _filtrar_msgs_por_periodo(msgs_todas, modo_periodo_ativo, dia_sel_ativo, ano_mes_sel_ativo)
 
         with st.container(height=380, border=True):
