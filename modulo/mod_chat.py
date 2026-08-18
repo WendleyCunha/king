@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import time
@@ -30,6 +31,21 @@ try:
 except Exception:
     _BUSCA_ENTREGAS_OK = False
     def buscar_entregas_por_codigo_db(*a, **k): return []
+
+# Import isolado: geração de PDF de verdade (reportlab). Se não estiver
+# instalado (falta em requirements.txt), o botão de PDF simplesmente não
+# aparece — a exportação em HTML (Ctrl+P → Salvar como PDF) continua
+# funcionando normalmente como alternativa, em vez de quebrar o Chat.
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.lib.enums import TA_CENTER
+    _REPORTLAB_OK = True
+except Exception:
+    _REPORTLAB_OK = False
 
 BRT = timezone(timedelta(hours=-3))
 
@@ -121,9 +137,38 @@ def _filtrar_msgs_por_periodo(msgs: list, modo: str, dia=None, ano_mes=None) -> 
     return filtradas
 
 
+# ── [NOVO] Busca de TEXTO dentro do conteúdo das conversas ──────────
+# Diferente da busca do Histórico (que só filtra pelo NOME/LOGIN do
+# motorista para achar a conversa certa), esta função varre o CONTEÚDO
+# de cada mensagem, de TODOS os motoristas (conversas ativas E
+# finalizadas), e devolve as ocorrências encontradas — usada pela nova
+# caixa "🔎 Buscar dentro de todas as conversas" na aba Atendimento.
+def _buscar_em_todas_conversas(motoristas: list, info_motoristas: dict, termo: str) -> list:
+    termo_norm = termo.strip().lower()
+    if not termo_norm:
+        return []
+    resultados = []
+    for login_m in motoristas:
+        info = info_motoristas.get(login_m, {})
+        nome_m = info.get("nome") or login_m
+        msgs = obter_mensagens_chat(login_m)
+        for m in msgs:
+            texto = str(m.get("texto", ""))
+            if termo_norm in texto.lower():
+                quem = nome_m if m["remetente_tipo"] == "motorista" else m.get("remetente", "ADM")
+                resultados.append({
+                    "motorista": login_m, "nome": nome_m, "mensagem": texto,
+                    "quem": quem, "quando": m.get("timestamp"),
+                })
+    resultados.sort(key=lambda r: r["quando"].timestamp() if r["quando"] else 0, reverse=True)
+    return resultados
+
+
 def _gerar_html_transcript(nome_m: str, login_m: str, msgs: list, rotulo_periodo: str = "") -> bytes:
     """Gera um HTML autônomo da conversa (ou de um recorte dela) — abre no
-    navegador e pode ser impresso/salvo como PDF via Ctrl+P > Salvar como PDF."""
+    navegador e pode ser impresso/salvo como PDF via Ctrl+P > Salvar como PDF.
+    Mantido como alternativa ao PDF nativo abaixo (útil se reportlab não
+    estiver instalado, ou se você preferir o HTML mesmo)."""
     linhas = []
     for m in msgs:
         quem = nome_m if m["remetente_tipo"] == "motorista" else m.get("remetente", "ADM")
@@ -152,6 +197,54 @@ def _gerar_html_transcript(nome_m: str, login_m: str, msgs: list, rotulo_periodo
 {''.join(linhas) if linhas else '<p>Nenhuma mensagem neste período.</p>'}
 </body></html>"""
     return html.encode("utf-8")
+
+
+# ── [NOVO] PDF de verdade (reportlab) — não precisa mais de Ctrl+P ──
+def _gerar_pdf_transcript(nome_m: str, login_m: str, msgs: list, rotulo_periodo: str = "") -> bytes:
+    buf = io.BytesIO()
+    styles = getSampleStyleSheet()
+
+    s_titulo = ParagraphStyle("titulo", fontName="Helvetica-Bold", fontSize=15,
+        textColor=colors.HexColor("#8A6D1F"), alignment=TA_CENTER, spaceAfter=4)
+    s_sub = ParagraphStyle("sub", fontName="Helvetica", fontSize=8.5,
+        textColor=colors.HexColor("#888888"), alignment=TA_CENTER, spaceAfter=12)
+    s_quem = ParagraphStyle("quem", fontName="Helvetica-Bold", fontSize=9,
+        textColor=colors.HexColor("#2c3e50"), spaceBefore=6, spaceAfter=1)
+    s_msg = ParagraphStyle("msg", fontName="Helvetica", fontSize=9.5, leading=13,
+        textColor=colors.HexColor("#2c3e50"), leftIndent=6, spaceAfter=4)
+
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm,
+                             topMargin=1.8*cm, bottomMargin=1.8*cm)
+    story = [
+        Paragraph(f"KingStar · Conversa com {nome_m}", s_titulo),
+        Paragraph(
+            f"Login: {login_m} · Exportado em {datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}"
+            + (f" · Período: {rotulo_periodo}" if rotulo_periodo else ""), s_sub
+        ),
+        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#C9A84C")),
+        Spacer(1, 10),
+    ]
+    if not msgs:
+        story.append(Paragraph("Nenhuma mensagem neste período.", styles["Normal"]))
+    for m in msgs:
+        quem = nome_m if m["remetente_tipo"] == "motorista" else m.get("remetente", "ADM")
+        hora = _fmt_hora(m.get("timestamp"))
+        data_msg = ""
+        ts = m.get("timestamp")
+        if ts:
+            try:
+                data_msg = ts.astimezone(BRT).strftime("%d/%m/%Y")
+            except Exception:
+                pass
+        texto = (str(m.get("texto", ""))
+                 .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        story.append(Paragraph(
+            f"{quem} <font color='#999999' size=7.5>&nbsp;&nbsp;{data_msg} {hora}</font>", s_quem
+        ))
+        story.append(Paragraph(texto, s_msg))
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 def _card_conversa(c: dict, info_motoristas: dict, selecionado_atual):
@@ -200,6 +293,39 @@ def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: di
     if not motoristas:
         st.info("Nenhum motorista cadastrado ainda.")
         return
+
+    # ── [NOVO] Busca de TEXTO dentro de todas as conversas ──────────
+    # Diferente da busca por código de entrega logo abaixo, esta procura
+    # dentro do CONTEÚDO das mensagens (ativas e finalizadas), não só
+    # pelo nome do motorista.
+    with st.expander("🔎 Buscar dentro de todas as conversas"):
+        termo_global = st.text_input(
+            "Texto a procurar nas mensagens", key="busca_texto_conversas",
+            placeholder="Ex: atraso, endereço errado, chave...",
+        )
+        if termo_global.strip():
+            resultados_busca = _buscar_em_todas_conversas(motoristas, info_motoristas, termo_global)
+            if not resultados_busca:
+                st.caption("Nenhuma mensagem encontrada com esse texto.")
+            else:
+                st.caption(f"{len(resultados_busca)} mensagem(ns) encontrada(s):")
+                for i, r in enumerate(resultados_busca[:30]):
+                    quando_fmt = _fmt_hora(r["quando"])
+                    data_fmt = ""
+                    if r["quando"]:
+                        try:
+                            data_fmt = r["quando"].astimezone(BRT).strftime("%d/%m/%Y")
+                        except Exception:
+                            pass
+                    col_txt, col_btn = st.columns([5, 1])
+                    col_txt.markdown(
+                        f"**🚚 {r['nome']}** — {r['quem']} · _{data_fmt} {quando_fmt}_  \n{r['mensagem']}"
+                    )
+                    if col_btn.button("Abrir", key=f"abrir_busca_{i}_{r['motorista']}"):
+                        st.session_state.chat_motorista_sel = r["motorista"]
+                        st.rerun()
+                    st.markdown("<hr style='margin:4px 0;border:none;border-top:1px solid #eee;'>",
+                                unsafe_allow_html=True)
 
     if _BUSCA_ENTREGAS_OK:
         with st.expander("🔍 Buscar entrega por código do cliente (todo o histórico)"):
@@ -278,14 +404,57 @@ def _render_atendimento_impl(usuario: str, motoristas: list, info_motoristas: di
                 time.sleep(.5)
                 st.rerun()
 
+        # ── [NOVO] Filtro por período também na conversa ATIVA ─────────
+        # Antes, filtrar por dia/mês só existia no Histórico (conversas já
+        # finalizadas). Agora dá pra restringir a visualização (e o que sai
+        # no PDF/HTML abaixo) por dia ou mês também numa conversa em
+        # andamento, sem precisar finalizá-la primeiro.
+        with st.expander("📅 Filtrar esta conversa por período"):
+            modo_periodo_ativo = st.radio(
+                "Período", ["Toda a conversa", "Dia específico", "Mês específico"],
+                key=f"periodo_ativo_modo_{motorista_sel}", horizontal=True,
+            )
+            dia_sel_ativo, ano_mes_sel_ativo, rotulo_ativo, sufixo_ativo = None, None, "", "completa"
+            if modo_periodo_ativo == "Dia específico":
+                dia_sel_ativo = st.date_input("Dia", key=f"periodo_ativo_dia_{motorista_sel}")
+                rotulo_ativo = dia_sel_ativo.strftime("%d/%m/%Y")
+                sufixo_ativo = dia_sel_ativo.strftime("%Y%m%d")
+            elif modo_periodo_ativo == "Mês específico":
+                mes_ref_ativo = st.date_input("Mês (qualquer dia dele)", key=f"periodo_ativo_mes_{motorista_sel}")
+                ano_mes_sel_ativo = (mes_ref_ativo.year, mes_ref_ativo.month)
+                rotulo_ativo = mes_ref_ativo.strftime("%m/%Y")
+                sufixo_ativo = mes_ref_ativo.strftime("%Y%m")
+
         marcar_mensagens_lidas(motorista_sel, "motorista")
-        msgs = obter_mensagens_chat(motorista_sel)
+        msgs_todas = obter_mensagens_chat(motorista_sel)
+        msgs = _filtrar_msgs_por_periodo(msgs_todas, modo_periodo_ativo, dia_sel_ativo, ano_mes_sel_ativo)
+
         with st.container(height=380, border=True):
             if not msgs:
-                st.caption("Sem mensagens ainda nesta conversa.")
+                st.caption("Sem mensagens ainda nesta conversa (ou nenhuma no período filtrado).")
             for m in msgs:
                 quem = ("🚚 " + nome_m) if m["remetente_tipo"] == "motorista" else ("🛠️ " + m["remetente"])
                 st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
+
+        # ── [NOVO] Baixar a conversa ATIVA (respeitando o filtro acima) ──
+        col_dl1, col_dl2 = st.columns(2)
+        if _REPORTLAB_OK:
+            pdf_bytes_ativo = _gerar_pdf_transcript(nome_m, motorista_sel, msgs, rotulo_ativo)
+            col_dl1.download_button(
+                "📄 Baixar PDF", data=pdf_bytes_ativo,
+                file_name=f"Conversa_{motorista_sel}_{sufixo_ativo}.pdf",
+                mime="application/pdf", key=f"dl_ativo_pdf_{motorista_sel}_{modo_periodo_ativo}",
+                use_container_width=True,
+            )
+        html_bytes_ativo = _gerar_html_transcript(nome_m, motorista_sel, msgs, rotulo_ativo)
+        col_dl2.download_button(
+            "📃 Baixar HTML" if _REPORTLAB_OK else "📃 Baixar (.html — Ctrl+P → Salvar como PDF)",
+            data=html_bytes_ativo,
+            file_name=f"Conversa_{motorista_sel}_{sufixo_ativo}.html",
+            mime="text/html", key=f"dl_ativo_html_{motorista_sel}_{modo_periodo_ativo}",
+            use_container_width=True,
+        )
+
         txt = st.chat_input(f"Responder para {nome_m}...", key="chat_input_adm")
         if txt:
             enviar_mensagem_chat(motorista_sel, usuario, txt, "adm")
@@ -369,13 +538,26 @@ def _render_historico(motoristas: list, info_motoristas: dict):
                     st.markdown(f"**{quem}** · _{_fmt_hora(m.get('timestamp'))}_  \n{m['texto']}")
 
             if msgs_filtradas:
+                col_dl1, col_dl2 = st.columns(2)
+                # [NOVO] PDF de verdade — some sozinho se reportlab não
+                # estiver instalado (ver import isolado no topo do arquivo).
+                if _REPORTLAB_OK:
+                    pdf_bytes = _gerar_pdf_transcript(nome_m, login_m, msgs_filtradas, rotulo_periodo)
+                    col_dl1.download_button(
+                        "📄 Baixar PDF",
+                        data=pdf_bytes,
+                        file_name=f"Conversa_{login_m}_{sufixo_arquivo}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_hist_pdf_{login_m}_{modo_periodo}_{sufixo_arquivo}",
+                        use_container_width=True,
+                    )
                 html_bytes = _gerar_html_transcript(nome_m, login_m, msgs_filtradas, rotulo_periodo)
-                st.download_button(
-                    "📄 Baixar este recorte (.html — abra e use Ctrl+P → Salvar como PDF)",
+                col_dl2.download_button(
+                    "📃 Baixar HTML" if _REPORTLAB_OK else "📃 Baixar (.html — Ctrl+P → Salvar como PDF)",
                     data=html_bytes,
                     file_name=f"Conversa_{login_m}_{sufixo_arquivo}.html",
                     mime="text/html",
-                    key=f"dl_hist_{login_m}_{modo_periodo}_{sufixo_arquivo}",
+                    key=f"dl_hist_html_{login_m}_{modo_periodo}_{sufixo_arquivo}",
                     use_container_width=True,
                 )
 
@@ -436,6 +618,12 @@ def renderizar_chat(papel, user):
     if papel in ("adm", "supervisor"):
         marcar_presenca_adm(usuario, nome)
         st.subheader("💬 Chat com Motoristas")
+
+        if not _REPORTLAB_OK:
+            st.caption(
+                "ℹ️ Exportação em PDF nativo desligada — adicione `reportlab` ao "
+                "requirements.txt para habilitar (a exportação em HTML continua disponível)."
+            )
 
         motoristas_cad  = [u for u in listar_usuarios() if u.get("role") == "motorista"]
         info_motoristas = {u["usuario"]: u for u in motoristas_cad}
