@@ -38,6 +38,17 @@ essa fila de esperas sequenciais é a maior causa de lentidão do sistema
 inteiro, não só do Chat. Agora usamos `db.get_all(...)`, que busca todos
 os documentos de uma vez, numa única viagem de rede — o tempo de resposta
 deixa de crescer com o número de motoristas.
+
+CORREÇÃO — ESTOURO DE COTA DO FIRESTORE (leituras):
+`obter_mensagens_chat()` baixava a conversa INTEIRA (até 200 mensagens)
+toda vez que era chamada — e a tela de Atendimento (mod_chat.py) chama
+isso a cada ~2 segundos, dentro de um fragment de auto-atualização. Numa
+conversa com 30 mensagens, isso é 30 leituras a cada 2s = ~900
+leituras/minuto só de UM admin com UMA conversa aberta — a causa mais
+provável dos picos de dezenas de milhares de leituras/dia vistos no
+Firebase Console. Adicionada `obter_mensagens_novas_chat()`, que busca só
+as mensagens mais novas que uma última já vista — usada pelo fragment do
+Chat para não reler a conversa inteira a cada ciclo (ver mod_chat.py).
 ──────────────────────────────────────────────────────────────────────
 """
 
@@ -147,14 +158,46 @@ def finalizar_conversa_chat(motorista_usuario: str, finalizado_por: str):
 
 def obter_mensagens_chat(motorista_usuario: str, limite: int = 200):
     """Retorna as mensagens da conversa de um motorista, em ordem cronológica.
-    Usada para abrir e ler UMA conversa específica (não para contar não-lidas
-    de todo mundo — isso agora é listar_conversas_com_nao_lidas)."""
+    Usada para a carga INICIAL de uma conversa (quando o admin abre ou troca
+    de conversa). Para atualizações seguintes (fragment de auto-refresh),
+    prefira `obter_mensagens_novas_chat` — ver nota de otimização no topo
+    do arquivo."""
     query = (
         get_db().collection("mensagens_chat")
         .where("conversa_id", "==", motorista_usuario)
         .order_by("timestamp")
         .limit(limite)
     )
+    docs = _rodar_query(query)
+    return [{**d.to_dict(), "id": d.id} for d in docs]
+
+
+def obter_mensagens_novas_chat(motorista_usuario: str, desde_timestamp=None, limite: int = 200):
+    """
+    [NOVO — economia de cota] Igual a `obter_mensagens_chat`, mas só busca
+    mensagens com `timestamp` POSTERIOR a `desde_timestamp` (se informado).
+    Com `desde_timestamp=None`, se comporta igual a `obter_mensagens_chat`
+    (busca a conversa inteira) — útil pra reaproveitar a mesma função na
+    carga inicial e nas atualizações seguintes.
+
+    Motivo desta função existir: a tela de Atendimento (mod_chat.py) roda
+    como um fragment que atualiza sozinho a cada poucos segundos, e antes
+    chamava `obter_mensagens_chat` (a conversa INTEIRA, do zero) em TODO
+    ciclo — numa conversa com 30 mensagens, isso é 30 leituras a cada
+    poucos segundos, só pra descobrir que quase sempre nada mudou. Isso foi
+    o principal responsável pelos picos de dezenas de milhares de
+    leituras/dia vistos no Firebase Console.
+
+    Uso esperado (ver mod_chat.py): buscar a conversa inteira UMA VEZ
+    (`desde_timestamp=None`, quando o admin abre/troca de conversa),
+    guardar em `st.session_state`, e nos ciclos seguintes do fragment
+    passar o timestamp da última mensagem já vista — normalmente retorna
+    0 ou 1 mensagem nova, não a conversa inteira de novo.
+    """
+    query = get_db().collection("mensagens_chat").where("conversa_id", "==", motorista_usuario)
+    if desde_timestamp is not None:
+        query = query.where("timestamp", ">", desde_timestamp)
+    query = query.order_by("timestamp").limit(limite)
     docs = _rodar_query(query)
     return [{**d.to_dict(), "id": d.id} for d in docs]
 
