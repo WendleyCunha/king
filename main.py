@@ -68,6 +68,19 @@ except Exception as _erro_import_diagnostico:
         st.error("⚠️ Falha ao carregar o módulo de Diagnóstico N2. Detalhe técnico abaixo:")
         st.exception(_erro)
 
+# [NOVO — módulo de Checklist] Consome a API própria (FastAPI + Postgres,
+# hospedada separadamente no Render — ver checklist_api/), diferente dos
+# demais módulos acima, que leem direto do Firestore. Mesmo padrão de
+# proteção de import dos outros: se o mod_checklist.py falhar ao carregar
+# (erro de sintaxe, dependência faltando etc.), não derruba o main.py
+# inteiro — só mostra o erro quando alguém tentar abrir esse módulo.
+try:
+    from modulo.mod_checklist import renderizar_checklist
+except Exception as _erro_import_checklist:
+    def renderizar_checklist(papel, user=None, _erro=_erro_import_checklist):
+        st.error("⚠️ Falha ao carregar o módulo de Checklist. Detalhe técnico abaixo:")
+        st.exception(_erro)
+
 try:
     from database_chat import listar_conversas_com_nao_lidas
 except Exception:
@@ -491,6 +504,17 @@ with st.sidebar:
                 st.session_state.modulo_ativo = "diagnostico"
                 st.rerun()
 
+        # [NOVO] Checklist — módulo novo, consome a API própria via HTTP
+        # (não Firestore). Mesmo padrão do Diagnóstico N2: visível direto
+        # para adm/supervisor, sem precisar editar 'modulos' de nenhum
+        # usuário existente no Firestore.
+        if papel in ("adm", "supervisor"):
+            ativo = st.session_state.modulo_ativo == "checklist"
+            if st.button("Checklist", key="nav_checklist", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = "checklist"
+                st.rerun()
+
     # ── Grupo "Administração" — Configurações ──
     # Seção própria, com rótulo e estilo de botão diferentes de Operacional
     # e de Sistema (ver CSS .st-key-config_nav acima).
@@ -863,6 +887,9 @@ elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
 
 elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
     _executar_modulo_protegido("Diagnóstico N2", renderizar_diagnostico, papel, user)
+
+elif modulo_ativo == "checklist" and papel in ("adm", "supervisor"):
+    _executar_modulo_protegido("Checklist", renderizar_checklist, papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     _executar_modulo_protegido("Configurações", _renderizar_bloco_configuracoes)
