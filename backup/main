@@ -14,7 +14,24 @@ from database import (
     atualizar_departamento_usuario, redefinir_senha_usuario,
     atualizar_perfil_usuario, renomear_login_usuario,
 )
-from modulo.mod_rastreio import renderizar_rastreio
+
+# [CORREÇÃO — ponto único de falha] Antes, este import não tinha proteção
+# nenhuma: `from modulo.mod_rastreio import renderizar_rastreio` direto,
+# diferente de TODOS os outros módulos abaixo (Home, Tickets, Cartas, Chat,
+# Diagnóstico), que já usam try/except com uma função de fallback. Como o
+# Rastreio é o módulo mais complexo do sistema (importa database_logistica,
+# mod_rastreio_live, e dentro dele ainda importa mod_chat), qualquer
+# problema em QUALQUER ponto dessa cadeia derrubava o `main.py` inteiro na
+# hora do import — inclusive a TELA DE LOGIN, antes de qualquer usuário
+# conseguir entrar. Agora segue o mesmo padrão de proteção dos demais.
+try:
+    from modulo.mod_rastreio import renderizar_rastreio
+except Exception as _erro_import_rastreio:
+    def renderizar_rastreio(papel, user=None, datas_db=None, pode_exp=False,
+                             _erro=_erro_import_rastreio):
+        st.error("⚠️ Falha ao carregar o módulo de Rastreio. Detalhe técnico abaixo:")
+        st.exception(_erro)
+        return False
 
 try:
     from modulo.mod_home import renderizar_home
@@ -25,8 +42,10 @@ except Exception as _erro_import_home:
 
 try:
     from modulo.mod_tickets import renderizar_tickets
-except ImportError:
-    def renderizar_tickets(papel, user=None): st.info("🚧 Módulo de Tickets em desenvolvimento...")
+except Exception as _erro_import_tickets:
+    def renderizar_tickets(papel, user=None, _erro=_erro_import_tickets):
+        st.error("⚠️ Falha ao carregar o módulo de Tickets. Detalhe técnico abaixo:")
+        st.exception(_erro)
 
 try:
     from modulo.mod_cartas import renderizar_cartas
@@ -54,6 +73,44 @@ try:
 except Exception:
     def listar_conversas_com_nao_lidas(_lista):
         return []
+
+# [NOVO — blindagem de runtime] Diferente da proteção de IMPORT lá em cima
+# (que só cobre "o arquivo do módulo carregou certo?"), esta função protege
+# a EXECUÇÃO de cada módulo. Um erro que só acontece quando o módulo roda de
+# verdade — Firestore fora do ar, cota estourada (ResourceExhausted), índice
+# faltando, etc. — antes derrubava a página inteira, mesmo com o import
+# protegido. Agora cada chamada de módulo no roteamento passa por aqui: se
+# der erro, mostra um aviso amigável SÓ naquela tela, e o resto do sistema
+# (sidebar, outros módulos) continua clicável normalmente.
+from google.api_core.exceptions import ResourceExhausted as _ResourceExhausted
+
+def _executar_modulo_protegido(nome_modulo: str, func, *args, **kwargs):
+    """Roda `func(*args, **kwargs)` protegido — devolve o valor de retorno
+    de `func` em caso de sucesso, ou None se der erro (depois de já ter
+    mostrado o aviso na tela)."""
+    try:
+        return func(*args, **kwargs)
+    except _ResourceExhausted:
+        st.error(
+            f"🚫 **{nome_modulo}** não pôde carregar agora: a cota diária gratuita "
+            "de leituras do Firestore foi esgotada (limite do plano Spark, não é "
+            "um bug do sistema)."
+        )
+        st.info(
+            "**Como resolver:** espere o reset automático da cota (meia-noite "
+            "horário do Pacífico, ≈ 4h-5h da manhã em Brasília), ou migre o "
+            "projeto no Firebase para o plano **Blaze** "
+            "(console.firebase.google.com → ⚙️ → Uso e faturamento → Modificar "
+            "plano) — as primeiras 50k leituras/dia continuam grátis, o erro "
+            "some assim que o plano muda. Os outros itens da sidebar continuam "
+            "funcionando normalmente até lá, se não precisarem ler o Firestore "
+            "agora."
+        )
+        return None
+    except Exception as e:
+        st.error(f"⚠️ **{nome_modulo}** encontrou um erro e não pôde carregar agora.")
+        st.exception(e)
+        return None
 
 st.set_page_config(
     page_title="KingStar · Painel Integrado",
@@ -291,7 +348,29 @@ if st.session_state.user is None:
         usuario = st.text_input("Usuário")
         senha   = st.text_input("Senha", type="password")
         if st.button("Entrar", type="primary", use_container_width=True):
-            u = verificar_login(usuario, senha)
+            # [CORREÇÃO] Antes, `verificar_login` rodava sem nenhuma
+            # proteção — se o Firestore falhasse aqui (cota estourada,
+            # serviço fora do ar, etc.), o usuário via um traceback técnico
+            # cru (ResourceExhausted, com stack trace do gRPC) bem na tela
+            # de login, antes mesmo de entrar no sistema. Agora qualquer
+            # falha de leitura vira uma mensagem simples e direta.
+            u = None
+            banco_indisponivel = False
+            try:
+                u = verificar_login(usuario, senha)
+            except _ResourceExhausted:
+                banco_indisponivel = True
+                st.error(
+                    "🚫 O sistema está temporariamente indisponível "
+                    "(banco de dados fora do ar). Tente novamente em alguns minutos."
+                )
+            except Exception:
+                banco_indisponivel = True
+                st.error(
+                    "🚫 O sistema está temporariamente indisponível. "
+                    "Tente novamente em alguns instantes."
+                )
+
             if u:
                 st.session_state.user = u
                 # Regra: após o login, a primeira página é a Home (Meu Dia) —
@@ -299,7 +378,10 @@ if st.session_state.user is None:
                 # vão direto para o Rastreio (suas próprias entregas).
                 st.session_state.modulo_ativo = "rastreio" if u.get("role") == "motorista" else "home"
                 st.rerun()
-            else:
+            elif not banco_indisponivel:
+                # Só mostra "credenciais inválidas" se o problema NÃO foi
+                # indisponibilidade do banco (nesse caso a mensagem certa
+                # já apareceu acima).
                 st.error("Credenciais inválidas.")
     st.stop()
 
@@ -464,13 +546,36 @@ with hc2:
 # ── DADOS ─────────────────────────────────────────────────────────
 modulo_ativo = st.session_state.modulo_ativo
 
+def _obter_datas_disponiveis_protegido():
+    """
+    [CORREÇÃO — ponto de falha desprotegido] Esta chamada rodava FORA de
+    `_executar_modulo_protegido`, direto no meio do script — se o
+    Firestore falhasse aqui (cota estourada, índice faltando, etc.), a
+    página inteira quebrava antes mesmo de chegar no roteamento, mesmo já
+    com a blindagem dos módulos em vigor. Agora qualquer erro aqui vira só
+    um aviso, e `datas_db` volta como lista vazia (o Rastreio ainda abre,
+    só sem o histórico de dias anteriores no seletor de período).
+    """
+    try:
+        return obter_datas_disponiveis_db()
+    except _ResourceExhausted:
+        st.warning(
+            "⚠️ Não foi possível carregar o histórico de dias do Rastreio agora "
+            "(cota de leitura do Firestore esgotada — ver Firebase Console → "
+            "Uso e faturamento). O Rastreio ainda abre, mostrando só o dia de hoje."
+        )
+        return []
+    except Exception as e:
+        st.warning("⚠️ Não foi possível carregar o histórico de dias do Rastreio agora.")
+        return []
+
 # OTIMIZAÇÃO: obter_datas_disponiveis_db() varre a coleção 'entregas'
 # inteira (todo o histórico de entregas já feitas) só para montar a
 # lista de datas do seletor do Rastreio. Antes rodava incondicionalmente
 # em TODA renderização (Tickets, Cartas, Configurações...), mesmo quando
 # a tela em questão nunca usa esse dado. Agora só busca quando o módulo
 # Rastreio está de fato aberto (também é cacheada por 60s em database.py).
-datas_db = obter_datas_disponiveis_db() if modulo_ativo == "rastreio" else []
+datas_db = _obter_datas_disponiveis_protegido() if modulo_ativo == "rastreio" else []
 
 # Motorista não tem acesso ao módulo Home — se a sessão dele ainda
 # apontar pra lá (ex: login antigo, antes dessa regra existir), redireciona.
@@ -498,35 +603,9 @@ if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
 # outra aba antes deste ponto, garante que datas_db já esteja resolvido
 # (evita usar variável desatualizada quando modulo_ativo mudou acima).
 if modulo_ativo == "rastreio" and not datas_db:
-    datas_db = obter_datas_disponiveis_db()
+    datas_db = _obter_datas_disponiveis_protegido()
 
-# ── ROTEAMENTO ────────────────────────────────────────────────────
-if modulo_ativo == "home":
-    renderizar_home(papel, user)
-
-elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
-    is_hoje = renderizar_rastreio(
-        papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
-    )
-    # Atualização manual em vez de streamlit-autorefresh: esse componente
-    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
-    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
-    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
-    # manual é 100% seguro e não tem esse risco.
-    if is_hoje:
-        if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
-            st.rerun()
-
-elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
-    renderizar_tickets(papel, user)
-
-elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
-    renderizar_cartas(papel, user)
-
-elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
-    renderizar_diagnostico(papel, user)
-
-elif modulo_ativo == "config" and papel == "adm":
+def _renderizar_bloco_configuracoes():
     st.subheader("⚙️ Configurações")
 
     # ── Helpers de gerenciamento (sub-abas por departamento) ──────────
@@ -752,6 +831,42 @@ elif modulo_ativo == "config" and papel == "adm":
         except Exception as _erro_import_motivos:
             st.error("⚠️ Falha ao carregar o cadastro de Motivos. Detalhe técnico abaixo:")
             st.exception(_erro_import_motivos)
+
+
+# ── ROTEAMENTO ────────────────────────────────────────────────────
+# [NOVO] Cada chamada abaixo passa por `_executar_modulo_protegido` — ver
+# nota de blindagem de runtime logo acima. Um erro em qualquer módulo
+# (cota do Firestore, índice faltando, bug pontual) mostra um aviso só
+# naquela tela; a sidebar e os outros módulos continuam acessíveis.
+if modulo_ativo == "home":
+    _executar_modulo_protegido("Meu Dia", renderizar_home, papel, user)
+
+elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
+    is_hoje = _executar_modulo_protegido(
+        "Rastreio", renderizar_rastreio,
+        papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
+    )
+    # Atualização manual em vez de streamlit-autorefresh: esse componente
+    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
+    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
+    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
+    # manual é 100% seguro e não tem esse risco.
+    if is_hoje:
+        if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
+            st.rerun()
+
+elif modulo_ativo == "tickets" and tem_permissao(user, "tickets"):
+    _executar_modulo_protegido("Tickets", renderizar_tickets, papel, user)
+
+elif modulo_ativo == "cartas" and tem_permissao(user, "cartas"):
+    _executar_modulo_protegido("Cartas", renderizar_cartas, papel, user)
+
+elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
+    _executar_modulo_protegido("Diagnóstico N2", renderizar_diagnostico, papel, user)
+
+elif modulo_ativo == "config" and papel == "adm":
+    _executar_modulo_protegido("Configurações", _renderizar_bloco_configuracoes)
+
 
 
 else:
