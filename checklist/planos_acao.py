@@ -45,13 +45,13 @@ def _form_novo_plano_avulso():
             responsavel_nome = st.selectbox("Responsável", list(mapa_usuarios.keys()))
             prazo = st.date_input("Prazo", value=_dt.date.today() + _dt.timedelta(days=7))
             st.markdown("**5W2H** _(todos os campos abaixo são opcionais)_")
-            what = st.text_area("O quê (what)", height=60)
-            why = st.text_area("Por quê (why)", height=60)
+            what = st.text_area("O quê (what)", height=70)
+            why = st.text_area("Por quê (why)", height=70)
             col1, col2 = st.columns(2)
             where_ = col1.text_input("Onde (where)")
             when_ = col2.text_input("Quando (when)")
             who = col1.text_input("Quem (who)")
-            how = col2.text_area("Como (how)", height=60)
+            how = col2.text_area("Como (how)", height=70)
             how_much = st.text_input("Quanto custa (how much)")
             if st.form_submit_button("Criar Plano"):
                 if not titulo.strip():
