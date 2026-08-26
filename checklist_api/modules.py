@@ -655,6 +655,62 @@ class UsuarioOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# --- organizacao ---------------------------------------------------
+# [NOVO] Não existia nenhum schema/rota para organização até aqui — criar uma
+# Unidade exige organizacao_id, mas não havia nenhum jeito de obter esse id
+# pela API (só existia a tabela, sem endpoint). Como a King Star é uma única
+# empresa, o fluxo esperado é: criar UMA organização (uma vez só) e usar o
+# id dela em todas as unidades.
+class OrganizacaoCreate(BaseModel):
+    nome: str = Field(min_length=1)
+
+
+class OrganizacaoOut(BaseModel):
+    id: UUID
+    nome: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- perfil ----------------------------------------------------------
+# [NOVO] Perfil (papel de acesso) já existia como tabela — usada internamente
+# pelo bootstrap_service_account.py — mas sem nenhuma rota pública. Sem isso,
+# não dá pra criar papéis como "Gestor de Setor" ou "Aplicador" pela tela.
+class PerfilCreate(BaseModel):
+    nome: str = Field(min_length=1)
+    permissoes: List[str] = Field(default_factory=list)
+
+
+class PerfilOut(BaseModel):
+    id: UUID
+    nome: str
+    permissoes: List[str]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- usuario_escopo (vínculo colaborador → perfil/unidade/setor) -----
+# [NOVO] Esse é o elo que faltava: sem um UsuarioEscopo, um usuário criado via
+# POST /usuarios fica "órfão" — consegue logar, mas require_permission(...)
+# barra qualquer ação, porque _permissoes_do_usuario() não encontra nenhum
+# vínculo. unidade_id/setor_id nulos = acesso à organização inteira (mesmo
+# padrão já usado pela conta de serviço do Painel).
+class UsuarioEscopoCreate(BaseModel):
+    perfil_id: UUID
+    unidade_id: Optional[UUID] = None
+    setor_id: Optional[UUID] = None
+
+
+class UsuarioEscopoOut(BaseModel):
+    id: UUID
+    usuario_id: UUID
+    perfil_id: UUID
+    unidade_id: Optional[UUID]
+    setor_id: Optional[UUID]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # --- unidade -----------------------------------------------------
 class UnidadeCreate(BaseModel):
     organizacao_id: UUID
@@ -1049,6 +1105,109 @@ def obter_usuario(
     return usuario
 
 
+# [NOVO] Vínculo (escopo) — é isso que dá a um colaborador recém-criado um
+# papel de acesso de verdade (perfil +, opcionalmente, restrição a uma
+# unidade/setor específico). Sem isso, o usuário existe mas não consegue
+# fazer nada — toda rota protegida por require_permission(...) barraria.
+@usuarios_router.post(
+    "/{usuario_id}/escopo", response_model=UsuarioEscopoOut, status_code=status.HTTP_201_CREATED
+)
+def criar_vinculo_usuario(
+    usuario_id: UUID,
+    payload: UsuarioEscopoCreate,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("usuario.gerenciar")),
+):
+    usuario = db.get(Usuario, usuario_id)
+    if usuario is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado.")
+    perfil = db.get(Perfil, payload.perfil_id)
+    if perfil is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Perfil inválido.")
+    if payload.unidade_id is not None and db.get(Unidade, payload.unidade_id) is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unidade inválida.")
+    if payload.setor_id is not None and db.get(Setor, payload.setor_id) is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Setor inválido.")
+
+    vinculo = UsuarioEscopo(
+        usuario_id=usuario_id,
+        perfil_id=payload.perfil_id,
+        unidade_id=payload.unidade_id,
+        setor_id=payload.setor_id,
+    )
+    db.add(vinculo)
+    db.commit()
+    db.refresh(vinculo)
+    return vinculo
+
+
+@usuarios_router.get("/{usuario_id}/escopos", response_model=List[UsuarioEscopoOut])
+def listar_vinculos_usuario(
+    usuario_id: UUID,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("usuario.visualizar")),
+):
+    return db.query(UsuarioEscopo).filter(UsuarioEscopo.usuario_id == usuario_id).all()
+
+
+# --- organizacoes.py -----------------------------------------------
+# [NOVO] Reaproveita a permissão "unidade.gerenciar"/"unidade.visualizar" —
+# organização é a estrutura "acima" de unidade, e não fazia sentido criar uma
+# permissão nova só para 1-2 endpoints usados raramente (só ao configurar
+# o sistema pela primeira vez).
+organizacoes_router = APIRouter(prefix="/organizacoes", tags=["organizacoes"])
+
+
+@organizacoes_router.post("", response_model=OrganizacaoOut, status_code=status.HTTP_201_CREATED)
+def criar_organizacao(
+    payload: OrganizacaoCreate,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("unidade.gerenciar")),
+):
+    organizacao = Organizacao(nome=payload.nome)
+    db.add(organizacao)
+    db.commit()
+    db.refresh(organizacao)
+    return organizacao
+
+
+@organizacoes_router.get("", response_model=List[OrganizacaoOut])
+def listar_organizacoes(
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("unidade.visualizar")),
+):
+    return db.query(Organizacao).order_by(Organizacao.nome).all()
+
+
+# --- perfis.py -------------------------------------------------------
+# [NOVO] Papéis de acesso (Administrador, Gestor de Setor, Aplicador, ou
+# quaisquer outros que a operação precisar) — antes só existiam "escondidos"
+# no banco, criados manualmente. Reaproveita "usuario.gerenciar"/
+# "usuario.visualizar" pelo mesmo motivo de organizações acima.
+perfis_router = APIRouter(prefix="/perfis", tags=["perfis"])
+
+
+@perfis_router.post("", response_model=PerfilOut, status_code=status.HTTP_201_CREATED)
+def criar_perfil(
+    payload: PerfilCreate,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("usuario.gerenciar")),
+):
+    perfil = Perfil(nome=payload.nome, permissoes=payload.permissoes)
+    db.add(perfil)
+    db.commit()
+    db.refresh(perfil)
+    return perfil
+
+
+@perfis_router.get("", response_model=List[PerfilOut])
+def listar_perfis(
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(require_permission("usuario.visualizar")),
+):
+    return db.query(Perfil).order_by(Perfil.nome).all()
+
+
 # --- unidades.py -------------------------------------------------
 unidades_router = APIRouter(prefix="/unidades", tags=["unidades"])
 
@@ -1428,6 +1587,37 @@ def criar_item(
     return item
 
 
+# [NOVO] Faltava uma rota de LEITURA de itens — só existia POST. Sem isso, o
+# editor não tem como mostrar as perguntas já cadastradas numa área antes de
+# publicar o checklist (o snapshot só existe depois de publicado).
+@checklists_router.get("/{checklist_id}/itens", response_model=List[ItemOut])
+def listar_itens(
+    checklist_id: UUID,
+    area_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    user: Usuario = Depends(require_permission("checklist.visualizar")),
+):
+    checklist = _get_checklist_ou_404(db, checklist_id)
+    _checar_acesso_unidade(db, user, checklist.unidade_id, "checklist.visualizar")
+
+    area = db.get(ChecklistArea, area_id)
+    if area is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Área não encontrada.")
+
+    # Confere que a área pertence a alguma versão deste checklist (evita
+    # vazar itens de outro checklist só porque alguém passou um area_id de outro).
+    versao_da_area = db.get(ChecklistVersao, area.checklist_versao_id)
+    if versao_da_area is None or versao_da_area.checklist_id != checklist_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Área não pertence a este checklist.")
+
+    return (
+        db.query(ChecklistItem)
+        .filter(ChecklistItem.area_id == area_id)
+        .order_by(ChecklistItem.ordem)
+        .all()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Regra condicional — MVP: 1 condição (decisão registrada em DATABASE.md).
 # Persiste já no formato de árvore para compatibilidade futura com encadeamento.
@@ -1477,6 +1667,32 @@ def criar_regra(
     db.commit()
     db.refresh(regra)
     return regra
+
+
+# [NOVO] Mesma lacuna do listar_itens acima, agora para regras — só existia
+# POST. Segue o mesmo padrão de listar_areas: mostra as regras da versão
+# mais recente (rascunho, se houver; senão a última publicada).
+@checklists_router.get("/{checklist_id}/regras", response_model=List[RegraOut])
+def listar_regras(
+    checklist_id: UUID,
+    db: Session = Depends(get_db),
+    user: Usuario = Depends(require_permission("checklist.visualizar")),
+):
+    checklist = _get_checklist_ou_404(db, checklist_id)
+    _checar_acesso_unidade(db, user, checklist.unidade_id, "checklist.visualizar")
+    versao = (
+        db.query(ChecklistVersao)
+        .filter(ChecklistVersao.checklist_id == checklist_id)
+        .order_by(ChecklistVersao.numero_versao.desc())
+        .first()
+    )
+    if versao is None:
+        return []
+    return (
+        db.query(ChecklistRegra)
+        .filter(ChecklistRegra.checklist_versao_id == versao.id)
+        .all()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2243,6 +2459,8 @@ def exportar_aplicacoes_csv(
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth_router)
 api_router.include_router(usuarios_router)
+api_router.include_router(organizacoes_router)
+api_router.include_router(perfis_router)
 api_router.include_router(unidades_router)
 api_router.include_router(setores_router)
 api_router.include_router(checklists_router)
@@ -2250,5 +2468,3 @@ api_router.include_router(tipos_router)
 api_router.include_router(aplicacoes_router)
 api_router.include_router(planos_acao_router)
 api_router.include_router(dashboards_router)
-
-
