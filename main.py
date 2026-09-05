@@ -87,6 +87,19 @@ except Exception:
     def listar_conversas_com_nao_lidas(_lista):
         return []
 
+# [v21 — NOVO] Widget de Status (Online/Pausa), agora vivendo no
+# cabeçalho GERAL (visível em qualquer módulo, não só dentro de
+# Tickets/WhatsApp Atendimento) — ver docstring de tickets/whats.py.
+# Mesmo padrão de proteção dos demais imports: se falhar, o cabeçalho
+# principal continua funcionando, só sem esse widget.
+try:
+    from tickets.whats import _render_widget_status
+    _STATUS_WIDGET_OK = True
+except Exception:
+    _STATUS_WIDGET_OK = False
+    def _render_widget_status(user):
+        pass
+
 # [NOVO — blindagem de runtime] Diferente da proteção de IMPORT lá em cima
 # (que só cobre "o arquivo do módulo carregou certo?"), esta função protege
 # a EXECUÇÃO de cada módulo. Um erro que só acontece quando o módulo roda de
@@ -237,7 +250,7 @@ section[data-testid="stSidebar"] .st-key-config_nav .stButton > button[kind="pri
 }
 .ks-header {
     background:#ffffff; border-left:5px solid #C9A84C;
-    border-radius:12px; padding:16px 24px; margin-bottom:20px;
+    border-radius:12px; padding:16px 24px; margin-bottom:14px;
     box-shadow:0 2px 8px rgba(0,0,0,0.05);
     display:flex; align-items:center; gap:18px;
 }
@@ -276,6 +289,11 @@ div[data-testid="stHorizontalBlock"]:has(.ks-header) {
 .tn { background:rgba(46,204,113,.1);  color:#1e8449; }
 .tb { background:rgba(52,152,219,.1);  color:#2471a3; }
 .tr { background:rgba(231,76,60,.1);   color:#a93226; }
+
+/* ── [v21] Barra de Status (Online/Pausa) logo abaixo do cabeçalho —
+   mesmo espírito visual do resto (sem card próprio, só um respiro
+   visual antes do conteúdo do módulo). ── */
+.st-key-status_bar_geral { margin-bottom: 10px; }
 
 /* ═══════════════════════════════════════════════════════════════
    RESPONSIVO — CELULAR (telas até 768px)
@@ -566,6 +584,15 @@ with hc2:
     if st.button("Sair", key="btn_sair", use_container_width=True):
         st.session_state.user = None
         st.rerun()
+
+# [v21 — NOVO] Status (Online/Pausa) — logo abaixo do cabeçalho, visível em
+# QUALQUER módulo (não só dentro de Tickets/WhatsApp Atendimento, de onde
+# foi movido pra cá). Ver tickets/whats.py para a implementação real —
+# aqui é só a chamada, protegida (se o widget não estiver disponível por
+# qualquer motivo, o cabeçalho principal continua funcionando normalmente).
+if _STATUS_WIDGET_OK:
+    with st.container(key="status_bar_geral"):
+        _render_widget_status(user)
 
 # ── DADOS ─────────────────────────────────────────────────────────
 modulo_ativo = st.session_state.modulo_ativo
