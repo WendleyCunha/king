@@ -23,6 +23,13 @@ tickets/common.py), esta tela passou a:
      (pode ser preenchido/corrigido depois, no painel de detalhe), mas é
      ele que habilita o envio de WhatsApp de verdade (ver tickets/common.py,
      bloco WHATSAPP DE VERDADE).
+
+[Ajuste de fluxo — v7] Quando não existe Departamento ou Motivo Pai
+     cadastrado, em vez de só um aviso em texto, aparece um BOTÃO que leva
+     direto pra "⚙️ Configurações" (mesmo session_state `modulo_ativo` que
+     o main.py já usa pro roteamento) — evita o admin ficar perdido
+     procurando onde cadastrar. Puramente visual/navegação, nenhuma
+     mudança de banco ou de regra de negócio.
 """
 import time
 import streamlit as st
@@ -59,16 +66,26 @@ def _render_novo(user):
     deps = listar_departamentos()
     dep_nomes = [d["nome"] for d in deps]
     if not dep_nomes:
-        st.warning("⚠️ Nenhum departamento cadastrado. Peça ao administrador para criar em "
-                   "Configurações → Departamentos.")
+        st.warning("⚠️ Nenhum departamento cadastrado. Cadastre em Configurações → Departamentos.")
+        # [Ajuste de fluxo — visual/navegação, nenhuma mudança de banco]
+        # Atalho direto pra tela de cadastro, em vez de deixar o admin
+        # procurar sozinho na sidebar — mesmo session_state que o main.py
+        # já usa pro roteamento (`modulo_ativo`).
+        if st.button("⚙️ Ir para Configurações → Departamentos", type="primary"):
+            st.session_state.modulo_ativo = "config"
+            st.rerun()
         return
 
     dep_sel = st.selectbox("Departamento *", dep_nomes, key="novo_dep")
 
     pais_dep = motivos_pai_do_departamento(dep_sel)
     if not pais_dep:
-        st.info("Este departamento ainda não tem Motivos cadastrados. Peça ao administrador "
-                "para cadastrar em Configurações → Motivos. Será usado um SLA padrão de 5 dias.")
+        st.info(f"O departamento **{dep_sel}** ainda não tem Motivos cadastrados. "
+                f"Cadastre em Configurações → Motivos. Será usado um SLA padrão de 5 dias "
+                f"enquanto isso não for feito.")
+        if st.button("⚙️ Ir para Configurações → Motivos", type="primary", key="btn_ir_config_motivos"):
+            st.session_state.modulo_ativo = "config"
+            st.rerun()
         motivo_obj = None
         sla_dias = 5
     else:
@@ -91,7 +108,10 @@ def _render_novo(user):
         filhos_pai = listar_motivos_filho_de(motivo_obj["id"])
         if not filhos_pai:
             st.info(f"O motivo **{motivo_obj['nome']}** ainda não tem Motivos Filho cadastrados. "
-                    f"Peça ao administrador para cadastrar em Configurações → Motivos.")
+                    f"Cadastre em Configurações → Motivos.")
+            if st.button("⚙️ Ir para Configurações → Motivos", type="primary", key="btn_ir_config_filho"):
+                st.session_state.modulo_ativo = "config"
+                st.rerun()
         else:
             filho_nomes = [f["nome"] for f in filhos_pai]
             filho_sel_nome = st.selectbox(
