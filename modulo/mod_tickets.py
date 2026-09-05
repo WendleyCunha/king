@@ -456,6 +456,40 @@ def _render_estilo_paineis_redimensionaveis():
         border-color: #C9A84C !important;
         box-shadow: 0 -2px 0 0 #C9A84C inset !important;
     }
+
+    /* ═══════════════════════════════════════════════════════════
+       [Ajuste visual] "Caixas por Motivo" — sub-abas de Motivo Filho
+       DISCRETAS (texto simples + sublinhado dourado na seleção), sem
+       fundo, sem borda, sem card — bem mais leve que a tirinha/botão
+       padrão do resto do sistema, conforme pedido explicitamente.
+       ═══════════════════════════════════════════════════════════ */
+    div[class*="st-key-caixa_filho_tabs"] {
+        border-bottom: 1px solid #e2e8f0;
+        margin-bottom: 10px;
+        padding-bottom: 0;
+    }
+    div[class*="st-key-caixa_filho_tabs"] button {
+        background: transparent !important;
+        border: none !important;
+        border-bottom: 2px solid transparent !important;
+        border-radius: 0 !important;
+        color: #64778d !important;
+        font-weight: 500 !important;
+        font-size: 0.85rem !important;
+        padding: 6px 4px !important;
+        box-shadow: none !important;
+    }
+    div[class*="st-key-caixa_filho_tabs"] button:hover {
+        color: #C9A84C !important;
+        background: transparent !important;
+    }
+    div[class*="st-key-caixa_filho_tabs"] button[kind="primary"] {
+        background: transparent !important;
+        border-bottom: 2px solid #C9A84C !important;
+        color: #2c3e50 !important;
+        font-weight: 700 !important;
+        box-shadow: none !important;
+    }
     </style>
     """), unsafe_allow_html=True)
 
@@ -825,6 +859,15 @@ def renderizar_tickets(papel: str, user: dict = None):
     # numa linha só. Construída com st.columns compactas (não Flexbox
     # cru) de propósito: botões e o campo de busca são widgets REAIS do
     # Streamlit, e não renderizam corretamente dentro de HTML injetado
+    # [v28] BARRA DE ABAS ESTILO NAVEGADOR — TOPO ABSOLUTO da área
+    # principal, ANTES até da toolbar (correção: estava depois, ficando
+    # numa posição intermediária). Inclui uma aba fixa "📋 Filas" (a
+    # lista de tickets) + uma aba por ticket aberto. Só aparece quando
+    # modo == "lista" (nos outros modos — novo/whats/caixas/equipe/sync
+    # — não faz sentido escolher entre lista/ticket).
+    if modo in ("lista", None):
+        _render_abas_topo(user, papel)
+
     # via st.markdown — a técnica muda, o resultado visual (uma linha só,
     # compacta) é o mesmo.
     #
@@ -937,15 +980,6 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.session_state.tk_fila = valor
                 st.session_state.tk_modo = "lista"
                 st.rerun()
-
-    # [v27] BARRA DE ABAS ESTILO NAVEGADOR — agora em LARGURA CHEIA, logo
-    # abaixo da toolbar, acima de tudo (não mais espremida dentro da 3ª
-    # coluna). Inclui uma aba fixa "📋 Filas" (a lista de tickets) + uma
-    # aba por ticket aberto. Só aparece quando modo == "lista" (nos outros
-    # modos — novo/whats/caixas/equipe/sync — não faz sentido escolher
-    # entre lista/ticket, então a barra fica de fora).
-    if modo in ("lista", None):
-        _render_abas_topo(user, papel)
 
     # [v27] Layout simplificado: 2 colunas só (Ações + Conteúdo). O que
     # antes era uma 3ª coluna separada pro detalhe do ticket (col_detalhe)
