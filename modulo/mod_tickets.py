@@ -313,6 +313,15 @@ def _render_estilo_paineis_redimensionaveis():
         padding: 16px 18px;
         margin-bottom: 14px;
         box-shadow: 0 3px 12px rgba(61,31,16,0.07);
+        /* [Grupo 1 · item 3] Congela a job bar no topo da coluna de
+           Detalhe enquanto o resto rola por dentro (a coluna já tem
+           overflow-y:auto, ver regra "st-key-tk_paineis ... stColumn"
+           acima) — mesmo princípio de "cabeçalho fixo" já usado na tela
+           de WhatsApp. z-index garante que ela fique por cima do
+           conteúdo que passa por baixo ao rolar. */
+        position: sticky;
+        top: 0;
+        z-index: 5;
     }
 
     /* [v17] Títulos das duas colunas do Detalhe ("Histórico & WhatsApp" /
@@ -479,6 +488,39 @@ def _render_estilo_paineis_redimensionaveis():
             });
             observer.observe(wrapInicial, { childList: true, subtree: true });
         }
+
+        // ═══════════════════════════════════════════════════════
+        // [Grupo 1 · item 1] Ctrl+Enter envia — genérico, funciona em
+        // QUALQUER st.text_area dentro de QUALQUER st.form, em qualquer
+        // tela do módulo (tratativa do ticket, WhatsApp de dentro do
+        // ticket, WhatsApp Atendimento em tickets/whats.py etc.) —
+        // por isso fica aqui, um único listener no documento inteiro,
+        // em vez de repetir o mesmo script em cada arquivo.
+        //
+        // Como funciona: ouve 'keydown' em capture (pega o evento antes
+        // do textarea "engolir"), confirma que é Ctrl+Enter (ou
+        // Cmd+Enter no Mac) E que o foco está num <textarea> dentro de
+        // um <form>, sobe até o <form> mais próximo e clica no botão de
+        // submit dele (o que o Streamlit renderiza como
+        // [data-testid="stFormSubmitButton"] button). Não depende de
+        // nenhum id/key específico — funciona pra formulário novo que
+        // for criado no futuro, sem precisar tocar neste script de novo.
+        // ═══════════════════════════════════════════════════════
+        doc.addEventListener('keydown', function(e) {
+            const ctrlOuCmd = e.ctrlKey || e.metaKey;
+            if (!ctrlOuCmd || e.key !== 'Enter') return;
+            const alvo = e.target;
+            if (!alvo || alvo.tagName !== 'TEXTAREA') return;
+            const form = alvo.closest('form');
+            if (!form) return;
+            const botao = form.querySelector('[data-testid="stFormSubmitButton"] button')
+                       || form.querySelector('button[kind="primaryFormSubmit"]')
+                       || form.querySelector('button[kind="secondaryFormSubmit"]');
+            if (botao && !botao.disabled) {
+                e.preventDefault();
+                botao.click();
+            }
+        }, true);
     })();
     </script>
     """, height=0, width=0)
@@ -671,6 +713,24 @@ def renderizar_tickets(papel: str, user: dict = None):
             st.markdown("**Ações**")
             if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
                 st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None; st.rerun()
+
+            # [Grupo 1 · item 2] "Pular para o mais urgente": abre direto
+            # o próximo ticket que mais precisa de atenção, na ordem
+            # vencidos > urgentes > mais antigo dos meus — sem o atendente
+            # precisar escolher manualmente qual abrir. Não cria filas
+            # novas, só reaproveita as listas que este mesmo bloco já
+            # calculou (f_venc, f_urg, meus).
+            candidatos = f_venc or f_urg or meus
+            if candidatos:
+                mais_urgente = min(candidatos, key=lambda t: t.get("criado_em", ""))
+                origem_label = ("vencido" if candidatos is f_venc
+                                else "urgente" if candidatos is f_urg
+                                else "mais antigo seu")
+                if st.button(f"⏭️ Pular para o mais urgente ({origem_label})",
+                             use_container_width=True, key="tk_pular_urgente"):
+                    st.session_state.tk_ticket_aberto = mais_urgente.get("id")
+                    st.session_state.tk_modo = "lista"
+                    st.rerun()
 
             # [v18] Botão novo — mesma família visual dos outros dois abaixo.
             if st.button("💬 WhatsApp Atendimento", use_container_width=True,
