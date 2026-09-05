@@ -49,6 +49,16 @@ provável dos picos de dezenas de milhares de leituras/dia vistos no
 Firebase Console. Adicionada `obter_mensagens_novas_chat()`, que busca só
 as mensagens mais novas que uma última já vista — usada pelo fragment do
 Chat para não reler a conversa inteira a cada ciclo (ver mod_chat.py).
+
+[v2 — STATUS DE PRESENÇA: Online/Offline/Pausa] `presenca_adm` antes só
+guardava {nome, ultimo_ping} — servia só pra saber "quem tem a tela
+aberta agora". Agora ganhou 3 campos ADITIVOS (nenhum campo antigo foi
+removido nem renomeado): `status` ("online"/"pausa"), `motivo_pausa`
+(ex.: "Almoço", "Banheiro") e `pausa_desde` (timestamp de quando entrou
+em pausa, pra calcular "há quanto tempo"). "Offline" não é um valor
+gravado — é a AUSÊNCIA de ping recente (mesma lógica que
+`listar_admins_online` já usava, ver função abaixo), então continua sem
+precisar de um valor especial pra isso.
 ──────────────────────────────────────────────────────────────────────
 """
 
@@ -268,23 +278,77 @@ def listar_conversas_com_nao_lidas(lista_motoristas: list):
 # ── PRESENÇA DOS ADMs (quem está com o painel aberto agora) ────────
 
 def marcar_presenca_adm(usuario: str, nome: str):
-    """Chamar a cada carregamento/refresh da tela do ADM para 'renovar' o status online."""
+    """Chamar a cada carregamento/refresh da tela do ADM para 'renovar' o
+    status online. NÃO mexe em `status`/`motivo_pausa`/`pausa_desde` — só
+    atualiza `ultimo_ping`, então marcar presença não derruba uma Pausa já
+    ativa (ver `atualizar_status_presenca_adm` abaixo para isso)."""
     get_db().collection("presenca_adm").document(usuario).set({
         "nome": nome,
         "ultimo_ping": datetime.now(timezone.utc),
-    })
+    }, merge=True)
 
 
 def listar_admins_online(janela_segundos: int = 60):
-    """Considera 'online' quem deu um ping nos últimos N segundos."""
+    """Considera 'online' quem deu um ping nos últimos N segundos. Cada
+    item já vem com `status` ("online"/"pausa"), `motivo_pausa` e
+    `pausa_desde`, prontos pra tela mostrar sem consulta extra."""
     agora = datetime.now(timezone.utc)
     online = []
     for d in get_db().collection("presenca_adm").stream():
         data = d.to_dict()
         ping = data.get("ultimo_ping")
         if ping and (agora - ping).total_seconds() <= janela_segundos:
-            online.append({"usuario": d.id, "nome": data.get("nome", d.id)})
+            online.append({
+                "usuario": d.id,
+                "nome": data.get("nome", d.id),
+                "status": data.get("status", "online"),
+                "motivo_pausa": data.get("motivo_pausa", ""),
+                "pausa_desde": data.get("pausa_desde"),
+            })
     return online
+
+
+def atualizar_status_presenca_adm(usuario: str, nome: str, status: str, motivo_pausa: str = ""):
+    """
+    [NOVO — v2] Define o status de presença de quem está logado:
+      status="online" → limpa motivo_pausa/pausa_desde (voltou a atender).
+      status="pausa"  → grava motivo_pausa (ex.: "Almoço", "Banheiro") e
+                         carimba pausa_desde=agora, pra tela calcular
+                         "há quanto tempo" sem precisar guardar isso em
+                         session_state (sobrevive a F5/troca de aba).
+    "Offline" continua sendo implícito (ausência de ping recente) — não é
+    gravado aqui, é o mesmo raciocínio que `listar_admins_online` já usava.
+    Aditivo: só os 3 campos novos (status/motivo_pausa/pausa_desde) são
+    tocados; `nome` e `ultimo_ping` continuam sendo escritos junto, pelo
+    mesmo motivo de sempre (renovar presença).
+    """
+    dados = {
+        "nome": nome,
+        "ultimo_ping": datetime.now(timezone.utc),
+        "status": status,
+    }
+    if status == "pausa":
+        dados["motivo_pausa"] = motivo_pausa or "Pausa"
+        dados["pausa_desde"] = datetime.now(timezone.utc)
+    else:
+        dados["motivo_pausa"] = ""
+        dados["pausa_desde"] = None
+    get_db().collection("presenca_adm").document(usuario).set(dados, merge=True)
+
+
+def obter_status_presenca_adm(usuario: str):
+    """Lê o status de presença de UM usuário específico (usado pra
+    desenhar o próprio widget de status de quem está logado agora, sem
+    precisar carregar a lista inteira de `listar_admins_online`)."""
+    doc = get_db().collection("presenca_adm").document(usuario).get()
+    if not doc.exists:
+        return {"status": "online", "motivo_pausa": "", "pausa_desde": None}
+    d = doc.to_dict()
+    return {
+        "status": d.get("status", "online"),
+        "motivo_pausa": d.get("motivo_pausa", ""),
+        "pausa_desde": d.get("pausa_desde"),
+    }
 
 
 def limpar_presenca_antiga(dias: int = 7):
