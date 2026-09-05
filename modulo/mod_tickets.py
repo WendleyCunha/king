@@ -1,5 +1,6 @@
 """
-KingStar — Módulo de Tickets  (v4 — Motivos Pai/Filho/Etapa + SLA em cascata)
+KingStar — Módulo de Tickets  (v5 — Motivos Pai/Filho/Etapa + SLA em cascata
+                                    + WhatsApp Atendimento ao vivo)
 ─────────────────────────────────────────────────────────────────────────────
 Este arquivo é o ORQUESTRADOR do módulo de tickets: monta a página (CSS
 global, painéis redimensionáveis, roteamento entre modos) e delega cada
@@ -15,6 +16,9 @@ do repositório (mesma pasta do main.py, não dentro de modulo/):
     tickets/filas.py       → Filas de Trabalho em abas + abas por setor
     tickets/detalhe.py     → painel de detalhe do ticket (3ª coluna)
     tickets/geral.py       → Visão Geral da Operação + Sync Zendesk
+    tickets/whats.py        → [NOVO v18] WhatsApp Atendimento ao vivo —
+                              inbox de conversas por telefone, independente
+                              de já existir ticket ou não (ver changelog [18])
 
 Histórico de versões (changelog) — mantido aqui por ser a porta de entrada
 do módulo:
@@ -66,6 +70,42 @@ do módulo:
        tk_deck_card_"]`) — usados por `tickets/detalhe.py` na reorganização
        em colunas "Histórico & WhatsApp" / "Ficha do Ticket". NENHUMA
        regra de CSS/JS existente foi removida ou alterada — só adição.
+
+  [18] WHATSAPP ATENDIMENTO AO VIVO (v6 — NOVO):
+       Antes, o bloco de WhatsApp (`_bloco_whatsapp`, em tickets/detalhe.py)
+       só existia DENTRO de um ticket já aberto — ou seja, pra ver uma
+       conversa de WhatsApp era preciso já ter criado (ou já existir) um
+       ticket vinculado àquele telefone. Isso não cobre o caso real de um
+       atendente abrindo o painel e querendo ver "quem está me escrevendo
+       agora", sem ticket nenhum ainda.
+
+       Este changelog introduz um MODO novo, "whats" (botão "💬 WhatsApp
+       Atendimento" no painel de Ações), com sua própria tela cheia (ver
+       `tickets/whats.py`):
+         • Lista de conversas ativas (lidas direto de `whatsapp_conversas`,
+           a MESMA coleção que o WhatsApp de dentro do ticket já usa —
+           nenhuma coleção nova).
+         • Ao abrir uma conversa, o histórico fica ao lado (mesmo padrão
+           visual do detalhe do ticket), e existe um botão "🎫 Abrir ticket
+           para este cliente" — que cria uma SEGUNDA solicitação (ou a
+           primeira, se for cliente novo) via `abrir_solicitacao_cliente`,
+           SEM fechar a conversa: o WhatsApp continua visível ao lado,
+           exatamente como pedido ("mantendo todo o histórico ao lado
+           como no Concierge").
+         • "Esperando resposta" é CALCULADO, não armazenado: se a última
+           mensagem da conversa tem `direcao == "in"`, o cliente escreveu
+           por último e ninguém respondeu ainda. Não é um campo novo no
+           banco — é leitura interpretada em cima do que já existe.
+         • Presença/"quem está online agora" reaproveita `presenca_adm`,
+           a MESMA coleção que `database_chat.py` já usa pro chat
+           motorista↔ADM — é isto que consolida os dois "chats" do sistema
+           numa fonte única de presença, em vez de duas.
+
+       NADA foi alterado em `tickets/common.py`, `database.py`,
+       `database_chat.py` nem em nenhum webhook nesta versão — o modo novo
+       só LÊ dados que já existem, através de funções novas que ainda
+       precisam ser adicionadas a `tickets/common.py` (ver pedido no final
+       do arquivo `tickets/whats.py`, que ainda será entregue).
 """
 import streamlit as st
 
@@ -95,6 +135,10 @@ from tickets.common import (
     WHATSAPP_COLECAO, JANELA_WHATSAPP_H, normalizar_telefone,
     listar_mensagens_whatsapp, minutos_desde_ultima_mensagem_cliente,
     whatsapp_configurado, enviar_whatsapp,
+    # [v5 — contêiner por cliente] precisa estar reexportado pra tickets/whats.py
+    # (e qualquer outro módulo) poder abrir uma solicitação nova sem
+    # importar tickets.common diretamente.
+    abrir_solicitacao_cliente,
 )
 from .mod_motivos import (
     listar_motivos_pai, motivos_pai_do_departamento,
@@ -116,6 +160,10 @@ from tickets.geral import (
     _gerar_excel_relatorio, _aba_dashboard, _aba_por_atendente,
     _aba_por_motivo, _aba_sla_perdido, _aba_exportar,
 )
+# [v18 — NOVO] WhatsApp Atendimento ao vivo — arquivo ainda a ser entregue;
+# a importação já fica pronta aqui para não exigir um segundo ajuste neste
+# orquestrador quando o arquivo chegar.
+from tickets.whats import _render_whatsapp_atendimento
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -293,6 +341,40 @@ def _render_estilo_paineis_redimensionaveis():
         padding: 14px 16px;
         margin-bottom: 12px;
         box-shadow: 0 2px 8px rgba(61,31,16,0.05);
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       [v18 — NOVO] WHATSAPP ATENDIMENTO — lista de conversas, no
+       mesmo espírito visual da tirinha de ticket (card com borda
+       colorida à esquerda) e do "Painel de Tickets" acima. A cor da
+       borda muda conforme quem falou por último:
+         dourado  → nós falamos por último (sem pendência)
+         azul     → cliente escreveu e ainda não tem ticket nenhum
+         âmbar    → cliente escreveu e JÁ existe ticket, aguardando
+                    resposta do atendente
+       Reaproveita a mesma paleta (GOLD/BLUE_INFO/GOLD_WARN) já usada
+       no resto do módulo — não introduz cor nova.
+       ═══════════════════════════════════════════════════════════ */
+    div[class*="st-key-wa_row_"] button {
+        text-align:left !important; justify-content:flex-start !important;
+        background:#fff !important; border:1px solid #e2e8f0 !important;
+        border-left:5px solid #C9A84C !important; border-radius:10px !important;
+        color:#2c3e50 !important; font-weight:600 !important; font-size:0.88rem !important;
+        padding:9px 14px !important; margin-bottom:6px !important;
+        height:auto !important; white-space:normal !important;
+    }
+    div[class*="st-key-wa_row_"] button:hover {
+        background:#FBF6E6 !important; border-color:#C9A84C !important;
+    }
+    div[class*="st-key-wa_row_aguardando_"] button {
+        border-left-color:#D4A12C !important; animation: tkbordapiscarsuave 1.6s infinite;
+    }
+    div[class*="st-key-wa_row_semticket_"] button {
+        border-left-color:#60A5FA !important;
+    }
+    .wa-online-dot {
+        display:inline-block; width:8px; height:8px; border-radius:50%;
+        background:#16A34A; margin-right:5px;
     }
     </style>
     """), unsafe_allow_html=True)
@@ -534,6 +616,10 @@ def renderizar_tickets(papel: str, user: dict = None):
     if "tk_fila"          not in st.session_state: st.session_state.tk_fila          = "meus"
     if "tk_ticket_aberto" not in st.session_state: st.session_state.tk_ticket_aberto  = None
     if "tk_modo"          not in st.session_state: st.session_state.tk_modo          = "lista"
+    # [v18] telefone da conversa de WhatsApp em foco no modo "whats" —
+    # separado de tk_ticket_aberto de propósito: uma conversa pode estar
+    # aberta SEM nenhum ticket vinculado ainda.
+    if "tk_whats_foco"    not in st.session_state: st.session_state.tk_whats_foco    = None
 
     uname = user.get("usuario","")
 
@@ -550,6 +636,9 @@ def renderizar_tickets(papel: str, user: dict = None):
     f_global  = todos_geral
 
     modo = st.session_state.tk_modo
+    # [v18] o modo "whats" tem sua própria tela cheia com split interno
+    # (lista de conversas + conversa + ficha do cliente) — não usa a 3ª
+    # coluna deste orquestrador, então não conta pra "mostra_detalhe".
     mostra_detalhe = bool(st.session_state.tk_ticket_aberto) and modo in ("lista", None)
 
     # ── PAINEL DE TICKETS (independente, fora das 3 colunas de baixo) ──
@@ -558,7 +647,18 @@ def renderizar_tickets(papel: str, user: dict = None):
     # Fica sempre visível porque as 3 colunas abaixo (Ações/Lista/Detalhe)
     # já rolam por dentro de si mesmas — não é preciso nenhum truque de
     # CSS sticky pra "congelar" este painel no topo.
-    _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+    #
+    # [v18] Não aparece no modo "whats" — a tela de WhatsApp Atendimento
+    # tem sua própria busca (por telefone/nome), dentro de tickets/whats.py,
+    # porque o universo ali é "conversas", não "tickets".
+    if modo != "whats":
+        _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+
+    if modo == "whats":
+        # [v18] Tela cheia própria — ver tickets/whats.py. Recebe `todos_geral`
+        # pra poder cruzar telefone → ticket já existente (sem nova leitura).
+        _render_whatsapp_atendimento(user, papel, todos_geral)
+        return
 
     with st.container(key="tk_paineis"):
         if mostra_detalhe:
@@ -571,6 +671,11 @@ def renderizar_tickets(papel: str, user: dict = None):
             st.markdown("**Ações**")
             if st.button("➕ Novo Ticket", use_container_width=True, type="primary"):
                 st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None; st.rerun()
+
+            # [v18] Botão novo — mesma família visual dos outros dois abaixo.
+            if st.button("💬 WhatsApp Atendimento", use_container_width=True,
+                         type="primary" if st.session_state.tk_modo == "whats" else "secondary"):
+                st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
 
             if papel in ("supervisor", "adm"):
                 if st.button("📊 Visão Geral da Operação", use_container_width=True,
