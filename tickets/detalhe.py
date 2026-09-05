@@ -632,34 +632,44 @@ def _render_barra_abas(user, papel):
     Barra de abas estilo navegador — uma aba por ticket aberto, a aba
     ativa destacada, com um "✕" pra fechar cada uma. Fica ACIMA do
     conteúdo do ticket, dentro da mesma coluna de Detalhe.
+
+    IMPORTANTE (limite do Streamlit): columns só podem ser aninhadas em
+    até 1 nível. Esta função já roda DENTRO de `col_detalhe` (a 3ª coluna
+    do orquestrador) — ou seja, já está em profundidade 1. Por isso o
+    layout abaixo usa um ÚNICO `st.columns(...)` "achatado" (2 colunas
+    por aba: botão + fechar), em vez de uma coluna por aba contendo,
+    cada uma, suas próprias sub-colunas — isso seria profundidade 2 e
+    o Streamlit recusa com StreamlitAPIException.
     """
     abertos = st.session_state.get("tk_tickets_abertos", [])
     if not abertos:
         return
     ativo = st.session_state.get("tk_ticket_ativo")
 
-    cols = st.columns(len(abertos) + 0 if len(abertos) <= 6 else 6)
     # Limite de 6 abas visíveis lado a lado por questão de espaço — acima
     # disso, as mais antigas continuam "abertas" na lista mas o ideal é
     # fechar as que não estão mais em uso.
     visiveis = abertos[-6:] if len(abertos) > 6 else abertos
 
     with st.container(key="tk_abas_bar"):
-        aba_cols = st.columns(len(visiveis))
-        for col, tid in zip(aba_cols, visiveis):
+        specs = []
+        for _ in visiveis:
+            specs += [4, 1]  # botão da aba (largo) + botão fechar (estreito)
+        colunas = st.columns(specs)
+
+        for i, tid in enumerate(visiveis):
             t = buscar_ticket_por_id(tid)
             titulo_aba = f"#{t.get('id_zendesk', tid[:6])}" if t else tid[:6]
-            with col:
-                cb1, cb2 = st.columns([4, 1])
-                with cb1:
-                    if st.button(titulo_aba, key=f"tk_aba_{tid}", use_container_width=True,
-                                 type="primary" if tid == ativo else "secondary"):
-                        st.session_state.tk_ticket_ativo = tid
-                        st.rerun()
-                with cb2:
-                    if st.button("✕", key=f"tk_aba_fechar_{tid}", use_container_width=True):
-                        _fechar_aba_ticket(tid)
-                        st.rerun()
+            col_btn, col_fechar = colunas[i * 2], colunas[i * 2 + 1]
+            with col_btn:
+                if st.button(titulo_aba, key=f"tk_aba_{tid}", use_container_width=True,
+                             type="primary" if tid == ativo else "secondary"):
+                    st.session_state.tk_ticket_ativo = tid
+                    st.rerun()
+            with col_fechar:
+                if st.button("✕", key=f"tk_aba_fechar_{tid}", use_container_width=True):
+                    _fechar_aba_ticket(tid)
+                    st.rerun()
 
 
 def _render_painel_lateral_detalhe(user, papel):
