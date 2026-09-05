@@ -139,6 +139,10 @@ from tickets.common import (
     # (e qualquer outro módulo) poder abrir uma solicitação nova sem
     # importar tickets.common diretamente.
     abrir_solicitacao_cliente,
+    # [v27] usada pela barra de abas em largura cheia (mostrar o
+    # id_zendesk de cada aba sem precisar carregar o ticket inteiro de
+    # novo em outro lugar).
+    buscar_ticket_por_id,
 )
 from .mod_motivos import (
     listar_motivos_pai, motivos_pai_do_departamento,
@@ -152,8 +156,9 @@ from tickets.filas import (
     _render_lista_em_grid, _render_lista_pendencias_setor,
 )
 from tickets.detalhe import (
-    _render_painel_lateral_detalhe, _carregar_e_render_detalhe, _detalhe_corpo,
+    _carregar_e_render_detalhe, _detalhe_corpo,
     _bloco_classificacao, _bloco_pendencias_setor,
+    _fechar_aba_ticket,
 )
 from tickets.geral import (
     _render_visao_geral_operacao, _render_sync,
@@ -216,18 +221,32 @@ def _render_estilo_paineis_redimensionaveis():
     }
 
     /* ═══════════════════════════════════════════════════════════
-       ROLAGEM INTERNA INDEPENDENTE — cada coluna ("Ações", "Lista",
-       "Detalhe") rola por dentro, sem empurrar as outras, igual ao
-       painel de e-mail / WhatsApp Web. Cada coluna vira sua própria
-       "janelinha" com altura travada relativa à tela e overflow
-       próprio. Pura CSS, sem depender de JS ou de posições internas
-       do Streamlit — só a altura em si (calc(100vh - Npx)) é uma
-       estimativa do espaço ocupado pelo cabeçalho acima E pelo Painel
-       de Tickets (busca + botões de view), que agora ficam FORA destas
-       colunas; ajuste o valor abaixo se sobrar/faltar espaço no layout.
+       [v27] INTERFACE "CONGELADA" — a página inteira não rola: só os
+       painéis internos rolam (regra logo abaixo). `.stApp` é o
+       container de TODA a página do Streamlit, mas essa regra só existe
+       no DOM enquanto o módulo Tickets está sendo renderizado (o CSS é
+       reinjetado a cada troca de módulo) — trocar pra Rastreio/Cartas/
+       ERP volta ao comportamento normal de rolagem, sem precisar
+       desfazer nada aqui.
+       ═══════════════════════════════════════════════════════════ */
+    .stApp {
+        overflow: hidden !important;
+        height: 100vh !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       ROLAGEM INTERNA INDEPENDENTE — cada coluna ("Ações", "Conteúdo")
+       rola por dentro, sem empurrar as outras, igual ao painel de
+       e-mail / WhatsApp Web. Cada coluna vira sua própria "janelinha"
+       com altura travada relativa à tela e overflow próprio. Pura CSS,
+       sem depender de JS ou de posições internas do Streamlit — só a
+       altura em si (calc(100vh - Npx)) é uma estimativa do espaço
+       ocupado pelo cabeçalho + toolbar + barra de abas, que agora ficam
+       FORA destas colunas; ajuste o valor abaixo se sobrar/faltar
+       espaço no layout.
        ═══════════════════════════════════════════════════════════ */
     div[class*="st-key-tk_paineis"] div[data-testid="stColumn"] {
-        max-height: calc(100vh - 340px);
+        max-height: calc(100vh - 420px);
         overflow-y: auto;
         overflow-x: hidden;
         padding-right: 6px;
@@ -581,6 +600,49 @@ def _render_estilo_paineis_redimensionaveis():
 # ═══════════════════════════════════════════════════════════════════
 # RENDERIZAÇÃO
 # ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# [v27] BARRA DE ABAS EM LARGURA CHEIA — sobe pro topo da tela (antes só
+# existia dentro da 3ª coluna). Sempre tem uma aba fixa "📋 Filas" (a
+# lista de tickets) + uma aba por ticket aberto, no mesmo espírito de
+# navegador. Mesmo cuidado de profundidade de `st.columns` já usado em
+# tickets/detalhe.py: roda no nível principal da página (fora de
+# qualquer coluna), então o único `st.columns(...)` aqui é profundidade 1
+# — seguro.
+# ═══════════════════════════════════════════════════════════════════
+def _render_abas_topo(user, papel):
+    abertos = st.session_state.get("tk_tickets_abertos", [])
+    ativo = st.session_state.get("tk_ticket_ativo") or "__lista__"
+    visiveis = abertos[-6:] if len(abertos) > 6 else abertos
+
+    with st.container(key="tk_abas_bar"):
+        specs = [1.2]
+        for _ in visiveis:
+            specs += [3, 0.8]
+        colunas = st.columns(specs)
+
+        with colunas[0]:
+            if st.button("📋 Filas", key="tk_aba_lista", use_container_width=True,
+                         type="primary" if ativo == "__lista__" else "secondary"):
+                st.session_state.tk_ticket_ativo = "__lista__"
+                st.rerun()
+
+        for i, tid in enumerate(visiveis):
+            t = buscar_ticket_por_id(tid)
+            titulo_aba = f"#{t.get('id_zendesk', tid[:6])}" if t else tid[:6]
+            col_btn, col_fechar = colunas[1 + i * 2], colunas[2 + i * 2]
+            with col_btn:
+                if st.button(titulo_aba, key=f"tk_aba_{tid}", use_container_width=True,
+                             type="primary" if tid == ativo else "secondary"):
+                    st.session_state.tk_ticket_ativo = tid
+                    st.rerun()
+            with col_fechar:
+                if st.button("✕", key=f"tk_aba_fechar_{tid}", use_container_width=True):
+                    _fechar_aba_ticket(tid)
+                    if not st.session_state.get("tk_ticket_ativo"):
+                        st.session_state.tk_ticket_ativo = "__lista__"
+                    st.rerun()
+
+
 def renderizar_tickets(papel: str, user: dict = None):
     if user is None:
         user = {"role": papel, "nome": "Usuário", "usuario": "user", "departamento": ""}
@@ -721,7 +783,7 @@ def renderizar_tickets(papel: str, user: dict = None):
     # — é este orquestrador quem "escuta" essa gravação logo abaixo e
     # decide se vira uma aba nova ou só ativa uma aba já existente.
     if "tk_tickets_abertos" not in st.session_state: st.session_state.tk_tickets_abertos = []
-    if "tk_ticket_ativo"    not in st.session_state: st.session_state.tk_ticket_ativo    = None
+    if "tk_ticket_ativo"    not in st.session_state: st.session_state.tk_ticket_ativo    = "__lista__"
 
     _tid_recem_clicado = st.session_state.get("tk_ticket_aberto")
     if _tid_recem_clicado:
@@ -749,10 +811,9 @@ def renderizar_tickets(papel: str, user: dict = None):
     f_global  = todos_geral
 
     modo = st.session_state.tk_modo
-    # [v21] mostra_detalhe agora depende da lista de ABAS abertas, não de
-    # um único "tk_ticket_aberto" (que vira None assim que é consumido,
-    # logo no início desta função).
-    mostra_detalhe = bool(st.session_state.tk_tickets_abertos) and modo in ("lista", None)
+    # [v27] `mostra_detalhe` (3ª coluna separada) deixou de existir — o
+    # layout agora é sempre 2 colunas (Ações + Conteúdo), e a escolha
+    # lista/ticket é feita pela barra de abas, não por uma coluna extra.
 
     # [v26 — REMOVIDO] "Painel de Tickets" (busca + botões de view de
     # tickets/filas.py) saiu do layout por instrução explícita — a tela
@@ -766,6 +827,12 @@ def renderizar_tickets(papel: str, user: dict = None):
     # Streamlit, e não renderizam corretamente dentro de HTML injetado
     # via st.markdown — a técnica muda, o resultado visual (uma linha só,
     # compacta) é o mesmo.
+    #
+    # [v27] Ampliada: agora reúne TAMBÉM os atalhos que antes moravam na
+    # coluna "Ações" (Pular urgente, WhatsApp Atendimento, Visão Geral,
+    # Sync) — tudo numa barra só, como pedido. O widget de Status
+    # (Online/Pausa) NÃO foi duplicado aqui: já vive no cabeçalho global
+    # (main.py), visível em qualquer tela, inclusive esta.
     if modo not in ("whats", "caixas"):
         if "tk_status_filtro" not in st.session_state:
             st.session_state.tk_status_filtro = "todos"
@@ -773,7 +840,7 @@ def renderizar_tickets(papel: str, user: dict = None):
             st.session_state.tk_busca_termo = ""
 
         with st.container(key="tk_toolbar"):
-            tb = st.columns([1.3, 1.6, 1.1, 1, 2.2, 0.9, 1.6])
+            tb = st.columns([1.1, 1.3, 0.9, 0.7, 1.0, 1.5, 1.3, 1.3, 0.8, 2.0, 0.8, 1.5])
             categorias_status = [
                 (tb[0], "aberto", "Aguardando equipe"),
                 (tb[1], "em_andamento", "Em tratamento interno"),
@@ -782,20 +849,45 @@ def renderizar_tickets(papel: str, user: dict = None):
             ]
             for col, valor, label in categorias_status:
                 with col:
-                    ativo = st.session_state.tk_status_filtro == valor
+                    ativo_status = st.session_state.tk_status_filtro == valor
                     if st.button(label, key=f"tb_status_{valor}", use_container_width=True,
-                                 type="primary" if ativo else "secondary"):
+                                 type="primary" if ativo_status else "secondary"):
                         st.session_state.tk_status_filtro = valor
                         st.rerun()
             with tb[4]:
+                if st.button("📋 Filas", key="tb_ver_filas", use_container_width=True,
+                             type="primary" if modo in ("lista", None) else "secondary"):
+                    st.session_state.tk_modo = "lista"; st.rerun()
+            with tb[5]:
+                candidatos = f_venc or f_urg or meus
+                if candidatos and st.button("⏭️ Mais urgente", key="tb_pular_urgente",
+                                            use_container_width=True):
+                    mais_urgente = min(candidatos, key=lambda t: t.get("criado_em", ""))
+                    st.session_state.tk_ticket_aberto = mais_urgente.get("id")
+                    st.session_state.tk_modo = "lista"
+                    st.rerun()
+            with tb[6]:
+                if st.button("💬 WhatsApp", key="tb_whats", use_container_width=True,
+                             type="primary" if modo == "whats" else "secondary"):
+                    st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
+            with tb[7]:
+                if papel in ("supervisor", "adm"):
+                    if st.button("📊 Visão Geral", key="tb_visao_geral", use_container_width=True,
+                                 type="primary" if modo == "equipe" else "secondary"):
+                        st.session_state.tk_modo = "equipe"; st.session_state.tk_ticket_aberto = None; st.rerun()
+            with tb[8]:
+                if papel == "adm":
+                    if st.button("🔄 Sync", key="tb_sync", use_container_width=True):
+                        st.session_state.tk_modo = "sync"; st.session_state.tk_ticket_aberto = None; st.rerun()
+            with tb[9]:
                 termo_busca = st.text_input("Busca", value=st.session_state.tk_busca_termo,
                                             placeholder="Número, CPF, pedido...",
                                             label_visibility="collapsed", key="tk_busca_input")
-            with tb[5]:
+            with tb[10]:
                 if st.button("Buscar", key="tb_buscar", use_container_width=True):
                     st.session_state.tk_busca_termo = termo_busca
                     st.rerun()
-            with tb[6]:
+            with tb[11]:
                 if st.button("+ Abrir atendimento", key="tb_abrir", use_container_width=True,
                              type="primary"):
                     st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None
@@ -824,9 +916,9 @@ def renderizar_tickets(papel: str, user: dict = None):
             f_urg     = [x for x in f_urg     if _t in texto_busca(x)]
             f_venc    = [x for x in f_venc    if _t in texto_busca(x)]
 
-    # [v26 — NOVO] Sidebar de Filas em accordion — usa o `st.sidebar`
-    # GLOBAL (o mesmo da navegação de módulos no main.py), não a coluna
-    # "Ações" interna. Cada botão seta `tk_fila` + volta pro modo "lista";
+    # [v26] Sidebar de Filas em accordion — usa o `st.sidebar` GLOBAL (o
+    # mesmo da navegação de módulos no main.py), não a coluna "Ações"
+    # interna. Cada botão seta `tk_fila` + volta pro modo "lista";
     # `_render_conteudo_fila_selecionada` já lê `tk_fila` pra decidir qual
     # bucket mostrar (mesmo mecanismo de sempre, só o gatilho mudou de
     # lugar).
@@ -846,51 +938,27 @@ def renderizar_tickets(papel: str, user: dict = None):
                 st.session_state.tk_modo = "lista"
                 st.rerun()
 
-    # [v26 — REMOVIDO] "➕ Novo Ticket" (agora é "+ Abrir atendimento" na
-    # toolbar) e "📋 Ver Filas de Trabalho" (agora é a sidebar acima)
-    # saíram daqui — evita duplicar a mesma ação em dois lugares.
+    # [v27] BARRA DE ABAS ESTILO NAVEGADOR — agora em LARGURA CHEIA, logo
+    # abaixo da toolbar, acima de tudo (não mais espremida dentro da 3ª
+    # coluna). Inclui uma aba fixa "📋 Filas" (a lista de tickets) + uma
+    # aba por ticket aberto. Só aparece quando modo == "lista" (nos outros
+    # modos — novo/whats/caixas/equipe/sync — não faz sentido escolher
+    # entre lista/ticket, então a barra fica de fora).
+    if modo in ("lista", None):
+        _render_abas_topo(user, papel)
+
+    # [v27] Layout simplificado: 2 colunas só (Ações + Conteúdo). O que
+    # antes era uma 3ª coluna separada pro detalhe do ticket (col_detalhe)
+    # deixou de existir — agora é a própria aba ativa (lista OU ticket)
+    # quem ocupa a coluna de conteúdo, em largura cheia.
     with st.container(key="tk_paineis"):
-        if mostra_detalhe:
-            col_filas, col_main, col_detalhe = st.columns([1, 2, 1.4])
-        else:
-            col_filas, col_main = st.columns([1, 3])
-            col_detalhe = None
+        col_filas, col_conteudo = st.columns([1, 4.5])
 
         with col_filas:
             st.markdown("**Ações**")
 
-            # [Grupo 1 · item 2] "Pular para o mais urgente": abre direto
-            # o próximo ticket que mais precisa de atenção, na ordem
-            # vencidos > urgentes > mais antigo dos meus — sem o atendente
-            # precisar escolher manualmente qual abrir. Não cria filas
-            # novas, só reaproveita as listas que este mesmo bloco já
-            # calculou (f_venc, f_urg, meus).
-            candidatos = f_venc or f_urg or meus
-            if candidatos:
-                mais_urgente = min(candidatos, key=lambda t: t.get("criado_em", ""))
-                origem_label = ("vencido" if candidatos is f_venc
-                                else "urgente" if candidatos is f_urg
-                                else "mais antigo seu")
-                if st.button(f"⏭️ Pular para o mais urgente ({origem_label})",
-                             use_container_width=True, key="tk_pular_urgente"):
-                    st.session_state.tk_ticket_aberto = mais_urgente.get("id")
-                    st.session_state.tk_modo = "lista"
-                    st.rerun()
-
-            # [v18] Botão novo — mesma família visual dos outros dois abaixo.
-            if st.button("💬 WhatsApp Atendimento", use_container_width=True,
-                         type="primary" if st.session_state.tk_modo == "whats" else "secondary"):
-                st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
-
-            # [v24] FILA :: CAIXAS POR MOTIVO — agora fixo no painel
-            # esquerdo (não é mais um botão que leva pra outra tela).
-            # Clicar num motivo já pula direto pra dentro da caixa dele
-            # (pulando a tela de cartões) — a área da direita mostra na
-            # hora "Todos" + os Motivo Filho daquele Motivo Pai.
-            st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
-                        unsafe_allow_html=True)
-            st.markdown('<span class="nav-section" style="padding-left:0;">FILA</span>',
-                        unsafe_allow_html=True)
+            # [v24] FILA :: CAIXAS POR MOTIVO — único item que continua
+            # aqui (os demais atalhos subiram pra toolbar, ver acima).
             st.caption("**CAIXAS POR MOTIVO**")
             pendentes_por_motivo = {}
             for t in f_global:
@@ -909,30 +977,22 @@ def renderizar_tickets(papel: str, user: dict = None):
                     st.session_state.tk_ticket_aberto = None
                     st.rerun()
 
-            if papel in ("supervisor", "adm"):
-                if st.button("📊 Visão Geral da Operação", use_container_width=True,
-                             type="primary" if st.session_state.tk_modo == "equipe" else "secondary"):
-                    st.session_state.tk_modo = "equipe"; st.session_state.tk_ticket_aberto = None; st.rerun()
-
-            if papel == "adm":
-                if st.button("🔄 Sync Zendesk", use_container_width=True):
-                    st.session_state.tk_modo = "sync"; st.session_state.tk_ticket_aberto = None; st.rerun()
-
-        with col_main:
-            if f_venc:
+        with col_conteudo:
+            if f_venc and modo in ("lista", None):
                 st.markdown(_html(
                     f'<div class="tk-banner">⏳ {len(f_venc)} ticket(s) com prazo ESTOURADO '
-                    f'aguardando tratativa! Verifique a view "SLA vencidos" no Painel de Tickets.</div>'
+                    f'aguardando tratativa! Verifique a fila "SLA vencidos" na sidebar.</div>'
                 ), unsafe_allow_html=True)
 
             if modo in ("lista", None):
-                _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+                aba_ativa = st.session_state.get("tk_ticket_ativo") or "__lista__"
+                if aba_ativa == "__lista__" or aba_ativa is None:
+                    _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
+                else:
+                    _carregar_e_render_detalhe(aba_ativa, user, papel)
             elif modo == "novo":
                 _render_novo(user)
             elif modo == "whats":
-                # [v21] Roda dentro de col_main agora, não mais em tela
-                # cheia própria — o painel de Ações à esquerda continua
-                # visível e clicável (Novo Ticket, Ver Filas etc.).
                 _render_whatsapp_atendimento(user, papel, todos_geral)
             elif modo == "caixas":
                 _render_caixas_por_motivo(user, papel, todos_geral)
@@ -944,7 +1004,3 @@ def renderizar_tickets(papel: str, user: dict = None):
                     _render_visao_geral_operacao(user, papel, todos_geral)
             elif modo == "sync":
                 _render_sync()
-
-        if col_detalhe is not None:
-            with col_detalhe:
-                _render_painel_lateral_detalhe(user, papel)
