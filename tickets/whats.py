@@ -200,11 +200,12 @@ def _minutos_desde_utc(dt):
 
 def _render_widget_status(user):
     """
-    Online / Offline / Pausa (com motivo), no topo da tela — mesmo padrão
-    visual da Concierge. "Offline" aqui não é um clique: é o que acontece
-    sozinho quando ninguém abre esta tela por mais de 60s (mesma regra que
-    já existia em `listar_admins_online`). O clique em Pausa exige
-    escolher um motivo da lista (com ou sem minutos sugeridos).
+    [Ajuste — botão único] Antes eram 2 botões lado a lado (Online +
+    Pausa). Agora é UM botão só, com popover mostrando as opções: Online,
+    Offline, e os motivos de Pausa. Reaproveita exatamente as mesmas
+    funções de dado de sempre (`atualizar_status_presenca_adm`,
+    `obter_status_presenca_adm`) — só a apresentação muda pra um único
+    ponto de clique, como pedido.
     """
     if not _PRESENCA_DISPONIVEL:
         return
@@ -213,28 +214,34 @@ def _render_widget_status(user):
     nome = user.get("nome", "")
     atual = obter_status_presenca_adm(uname)
 
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        if st.button("🟢 Online", use_container_width=True,
+    if atual["status"] == "pausa":
+        minutos_em_pausa = _minutos_desde_utc(atual.get("pausa_desde"))
+        txt_tempo = f" há {int(minutos_em_pausa)}min" if minutos_em_pausa is not None else ""
+        rotulo_botao = f"🟠 Pausa: {atual.get('motivo_pausa','')}{txt_tempo}"
+    elif atual["status"] == "offline":
+        rotulo_botao = "⚪ Offline"
+    else:
+        rotulo_botao = "🟢 Online"
+
+    with st.popover(rotulo_botao, use_container_width=False):
+        if st.button("🟢 Online", key="status_online", use_container_width=True,
                      type="primary" if atual["status"] == "online" else "secondary"):
             atualizar_status_presenca_adm(uname, nome, "online")
             st.rerun()
-    with c2:
-        if atual["status"] == "pausa":
-            minutos_em_pausa = _minutos_desde_utc(atual.get("pausa_desde"))
-            txt_tempo = f" há {int(minutos_em_pausa)}min" if minutos_em_pausa is not None else ""
-            st.button(f"🟠 Pausa: {atual.get('motivo_pausa','')}{txt_tempo}",
-                     use_container_width=True, type="primary", disabled=True)
-        else:
-            with st.popover("🟠 Pausa", use_container_width=True):
-                for motivo, minutos_sugeridos in _MOTIVOS_PAUSA:
-                    label = f"{motivo}" + (f" · {minutos_sugeridos}min" if minutos_sugeridos else "")
-                    if st.button(label, key=f"wa_pausa_{motivo}", use_container_width=True):
-                        atualizar_status_presenca_adm(uname, nome, "pausa", motivo)
-                        st.rerun()
-    with c3:
-        st.caption("⚪ Offline é automático — acontece sozinho se você ficar "
-                   "mais de 1 minuto sem abrir esta tela.")
+        if st.button("⚪ Offline", key="status_offline", use_container_width=True,
+                     type="primary" if atual["status"] == "offline" else "secondary"):
+            atualizar_status_presenca_adm(uname, nome, "offline")
+            st.rerun()
+        st.markdown('<div style="border-top:1px solid #e2e8f0;margin:6px 0;"></div>',
+                    unsafe_allow_html=True)
+        st.caption("Pausa")
+        for motivo, minutos_sugeridos in _MOTIVOS_PAUSA:
+            label = f"🟠 {motivo}" + (f" · {minutos_sugeridos}min" if minutos_sugeridos else "")
+            ativo_pausa = atual["status"] == "pausa" and atual.get("motivo_pausa") == motivo
+            if st.button(label, key=f"wa_pausa_{motivo}", use_container_width=True,
+                         type="primary" if ativo_pausa else "secondary"):
+                atualizar_status_presenca_adm(uname, nome, "pausa", motivo)
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════
