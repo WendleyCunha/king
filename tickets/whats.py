@@ -108,6 +108,39 @@ def _carregar_todas_conversas_whatsapp() -> list:
     return sorted(out, key=lambda c: c.get("ultima_msg_em", ""), reverse=True)
 
 
+def _minutos_desde(timestamp_str: str):
+    """[Grupo 1 · item 5] Minutos desde um timestamp no formato de
+    `agora_brt()` ("%Y-%m-%d %H:%M:%S"), ou None se não der pra converter.
+    Usado só para CALCULAR a cor da conversa (vermelho/laranja/azul) — não
+    lê nem grava nada novo no banco."""
+    if not timestamp_str:
+        return None
+    try:
+        dt = datetime.strptime(str(timestamp_str)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=BRT)
+        return (datetime.now(BRT) - dt).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _estado_conversa(ultima_direcao: str, ultima_em: str) -> str:
+    """
+    [Grupo 1 · item 5] Reproduz a mesma régua de cor já usada na Concierge,
+    calculada em cima do que já existe (direção + horário da última
+    mensagem) — nenhum campo novo:
+
+        'azul'    → cliente falou por último, há MENOS de 10 min (mensagem nova)
+        'vermelho'→ cliente falou por último, há MAIS de 10 min (esperando)
+        'laranja' → nós falamos por último, e o cliente não respondeu
+                    depois de MAIS de 10 min
+        'ok'      → nós falamos por último, dentro dos 10 min (nada a fazer)
+    """
+    minutos = _minutos_desde(ultima_em)
+    if ultima_direcao == "in":
+        return "azul" if (minutos is not None and minutos <= 10) else "vermelho"
+    else:
+        return "laranja" if (minutos is not None and minutos > 10) else "ok"
+
+
 def _tickets_do_telefone(telefone_norm: str, todos_geral: list) -> list:
     """Tickets (já achatados, de `listar_tickets()`) cujo `cliente_telefone`
     normalizado bate com este telefone — cruzamento em memória, sem
@@ -344,22 +377,27 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
 
         for c in conversas:
             tel = c["telefone"]
-            aguardando = c["ultima_msg_direcao"] == "in"
+            estado = _estado_conversa(c["ultima_msg_direcao"], c["ultima_msg_em"])
             tel_norm = normalizar_telefone(tel)
             tem_ticket = bool(_tickets_do_telefone(tel_norm, todos_geral))
 
-            # chave da linha carrega o estado (aguardando / sem ticket) pro
-            # CSS já definido em mod_tickets.py pintar a borda certa.
-            if aguardando:
+            # [Grupo 1 · item 5] chave da linha carrega o estado calculado
+            # (vermelho/laranja/azul) pro CSS já definido em mod_tickets.py
+            # pintar a borda certa — reaproveita as MESMAS classes CSS que
+            # já existiam (wa_row_aguardando_ = vermelho/laranja piscando,
+            # wa_row_semticket_ = azul), só a condição que decide qual usar
+            # ficou mais precisa (calculada por tempo, não só por direção).
+            if estado in ("vermelho", "laranja"):
                 key_row = f"wa_row_aguardando_{tel}"
-            elif not tem_ticket:
+            elif estado == "azul" or not tem_ticket:
                 key_row = f"wa_row_semticket_{tel}"
             else:
                 key_row = f"wa_row_{tel}"
 
+            icone = {"vermelho": "🔴 ", "laranja": "🟠 ", "azul": "🔵 ", "ok": ""}[estado]
             preview = (c["ultima_msg_texto"] or "")[:44]
             hora = str(c["ultima_msg_em"])[11:16] if c["ultima_msg_em"] else ""
-            rotulo = f"{'⏳ ' if aguardando else ''}{tel}\n{preview} · {hora}"
+            rotulo = f"{icone}{tel}\n{preview} · {hora}"
 
             with st.container(key=key_row):
                 if st.button(rotulo, key=f"wa_btn_{tel}", use_container_width=True):
