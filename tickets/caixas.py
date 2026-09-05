@@ -192,14 +192,21 @@ def _render_caixas_por_motivo(user, papel, todos_geral: list):
     chips = [("", f"Todos {len(tickets_do_pai)}")] + [
         (nome, f"{nome} {qtd}") for nome, qtd in sorted(cont_filho.items(), key=lambda kv: -kv[1])
     ]
-    cols_chip = st.columns(len(chips))
-    for col, (valor, label) in zip(cols_chip, chips):
-        with col:
-            if st.button(label, key=f"caixa_filho_{motivo_sel}_{valor or 'todos'}",
-                         use_container_width=True,
-                         type="primary" if filho_sel == valor else "secondary"):
-                st.session_state.tk_caixa_filho = valor
-                st.rerun()
+    # [Ajuste visual] Sub-abas discretas (texto + sublinhado na seleção),
+    # não mais botões/cards pesados — só a CLASSE do container muda
+    # (`caixa_filho_tabs`), o CSS que estiliza fica em mod_tickets.py,
+    # mesmo padrão já usado pra outras barras do sistema. A lógica de
+    # clique é a MESMA de sempre (st.button + session_state), só o visual
+    # do botão que é reescrito via CSS.
+    with st.container(key="caixa_filho_tabs"):
+        cols_chip = st.columns(len(chips))
+        for col, (valor, label) in zip(cols_chip, chips):
+            with col:
+                if st.button(label, key=f"caixa_filho_{motivo_sel}_{valor or 'todos'}",
+                             use_container_width=True,
+                             type="primary" if filho_sel == valor else "secondary"):
+                    st.session_state.tk_caixa_filho = valor
+                    st.rerun()
 
     tickets_filtrados = tickets_do_pai
     if filho_sel:
