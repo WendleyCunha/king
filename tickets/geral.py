@@ -5,6 +5,13 @@ Bloco exclusivo de Supervisor/ADM: Visão Geral da Operação (dashboard,
 ranking por atendente com transferência em massa, ranking por motivo, SLA
 perdido, exportação em Excel com 3 abas) + a tela de Sync Zendesk / Zona de
 Perigo (exclusão total de tickets).
+
+[Ajuste visual — v23] O dashboard mostrava "Quem mais atendeu" e "Motivo
+mais acionado" como `st.dataframe` cru — uma tabela sem estilo nenhum,
+destoando do resto do sistema (que usa cards com borda dourada em todo
+lugar). Trocado por uma lista de cards no mesmo padrão visual já usado em
+`tickets/detalhe.py` e `mod_motivos.py` — nenhuma lógica de contagem
+mudou, só a forma de mostrar o resultado.
 """
 import time
 import pandas as pd
@@ -106,6 +113,35 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
                 ws.set_column(i, i, largura)
     buf.seek(0)
     return buf.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# [v23] Card de ranking — mesmo padrão visual do resto do sistema
+# (borda dourada à esquerda, badge de posição), em vez de st.dataframe.
+# ═══════════════════════════════════════════════════════════════════
+def _render_ranking_cards(itens: list, rotulo_singular: str, key_ctx: str, max_itens: int = 8):
+    """`itens`: lista de (nome, qtd), já ordenada do maior pro menor."""
+    if not itens:
+        st.caption("Sem dados.")
+        return
+    medalhas = ["🥇", "🥈", "🥉"]
+    for i, (nome, qtd) in enumerate(itens[:max_itens]):
+        medalha = medalhas[i] if i < 3 else f"{i+1}º"
+        destaque = "border-left-color:#C9A84C;" if i == 0 else ""
+        st.markdown(_html(f"""
+        <div class="tk-equipe-card" style="display:flex;justify-content:space-between;
+                    align-items:center;{destaque}">
+            <div>
+                <span style="font-size:0.95rem;font-weight:700;color:#2c3e50;">
+                    {medalha} {esc(nome)}
+                </span>
+            </div>
+            <div>
+                <span class="tk-badge-val">{qtd} {esc(rotulo_singular)}{'s' if qtd != 1 else ''}</span>
+            </div>
+        </div>"""), unsafe_allow_html=True)
+    if len(itens) > max_itens:
+        st.caption(f"+ {len(itens) - max_itens} outro(s), fora do top {max_itens}.")
 
 
 def _render_visao_geral_operacao(user, papel, todos_geral):
@@ -247,31 +283,14 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
 
     cont_mot = Counter(t.get("motivo_pai") or "Sem motivo" for t in tickets)
 
+    # [v23] Ranking em cards estilizados, não mais st.dataframe cru.
     cmc1, cmc2 = st.columns(2)
     with cmc1:
         st.markdown("##### 🏆 Quem mais atendeu")
-        if cont_at:
-            top_nome, top_qtd = cont_at.most_common(1)[0]
-            st.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Top Atendente</div>'
-                        f'<div class="kpi-value" style="font-size:1.3rem;">{esc(top_nome)}</div>'
-                        f'<div class="kpi-sub">{top_qtd} ticket(s)</div></div>', unsafe_allow_html=True)
-            st.markdown("")
-            df_at = pd.DataFrame(cont_at.most_common(), columns=["Atendente", "Tickets"])
-            st.dataframe(df_at, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Sem dados.")
+        _render_ranking_cards(cont_at.most_common(), "ticket", key_ctx="dash_atend")
     with cmc2:
         st.markdown("##### 📋 Motivo mais acionado")
-        if cont_mot:
-            top_mot, top_qtd_mot = cont_mot.most_common(1)[0]
-            st.markdown(f'<div class="kpi-card gold"><div class="kpi-label">Top Motivo</div>'
-                        f'<div class="kpi-value" style="font-size:1.3rem;">{esc(top_mot)}</div>'
-                        f'<div class="kpi-sub">{top_qtd_mot} ticket(s)</div></div>', unsafe_allow_html=True)
-            st.markdown("")
-            df_mot = pd.DataFrame(cont_mot.most_common(), columns=["Motivo", "Tickets"])
-            st.dataframe(df_mot, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Sem dados.")
+        _render_ranking_cards(cont_mot.most_common(), "ticket", key_ctx="dash_motivo")
 
 
 def _aba_por_atendente(tickets: list, usuarios_dep: list, user, papel):
@@ -416,9 +435,9 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
         for a in ats:
             cont_resp[nomes_users.get(a, a)] += 1
 
+    # [v23] Ranking em cards, não mais st.dataframe cru.
     st.markdown("**Ranking de responsáveis por SLA perdido**")
-    df_resp = pd.DataFrame(cont_resp.most_common(), columns=["Atendente", "SLA Perdido"])
-    st.dataframe(df_resp, use_container_width=True, hide_index=True)
+    _render_ranking_cards(cont_resp.most_common(), "SLA perdido", key_ctx="sla_resp")
 
     st.markdown("---")
     st.markdown("**Detalhe dos tickets com SLA perdido**")
