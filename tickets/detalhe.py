@@ -23,32 +23,19 @@ tickets/common.py):
   detalhe (`_detalhe_corpo`) passou a se organizar em 3 blocos visuais,
   no espírito do "Shuffle" da Nubank (job bar → thread → deck de cards),
   MAS reaproveitando exatamente as mesmas funções de regra de negócio que
-  já existiam — nenhuma regra mudou, só a organização visual:
+  já existiam — nenhuma regra mudou, só a organização visual.
 
-    1) JOB BAR — o cartão de cabeçalho que já existia (status, prioridade,
-       SLA, cliente, motivo) ganhou a classe `tk-jobbar` pra receber o
-       acabamento visual novo (ver CSS em mod_tickets.py). Conteúdo
-       idêntico a antes.
-
-    2) COLUNA "💬 Histórico & WhatsApp" (esquerda) — reúne, na mesma
-       ordem de sempre: a tratativa (status + comentário), o registro de
-       contato/observação avulsa, o histórico de comentários (bolhas) e,
-       NOVO, o bloco de WhatsApp de verdade (`_bloco_whatsapp`) — envio
-       via Twilio + leitura do histórico gravado pelo webhook externo
-       (ver `webhook_whatsapp/main.py` e o changelog [v6] em
-       `tickets/common.py`).
-
-    3) COLUNA "🗂️ Ficha do Ticket" (direita) — reúne: a Ficha do Cliente
-       (NOVO — nome/código/telefone, com o telefone editável aqui, já que
-       é ele que habilita o WhatsApp), a Classificação Motivo Filho/Etapa
-       (`_bloco_classificacao`, EXATAMENTE como antes), as Pendências
-       entre Setores (`_bloco_pendencias_setor`, EXATAMENTE como antes),
-       Dados do Pedido (NOVO — placeholder até a integração com o módulo
-       de Rastreio/Logística ser conectada) e o histórico de classificação.
-
-  A validação de "Resolvido" (Validar e encerrar / Reabrir) continua em
-  largura cheia, embaixo das duas colunas — é uma ação final, não faz
-  sentido "escondida" dentro de uma coluna lateral.
+[v21 — ABAS ESTILO NAVEGADOR] Antes, só existia UM ticket aberto por vez
+  (`tk_ticket_aberto`), e abrir outro substituía o anterior. Agora:
+    • `tk_tickets_abertos`: lista de IDs, na ordem em que foram abertos
+      (ordem das abas, igual navegador).
+    • `tk_ticket_ativo`: qual desses está sendo exibido agora.
+  A tirinha de ticket (tickets/strip.py) continua fazendo exatamente o
+  mesmo gesto de sempre — só grava em `tk_ticket_aberto` e dá um rerun.
+  É o ORQUESTRADOR (mod_tickets.py) quem "escuta" essa gravação e decide
+  se é uma aba nova ou uma já aberta — este arquivo (detalhe.py) só
+  precisou passar a ler `tk_ticket_ativo` em vez de `tk_ticket_aberto`,
+  e o botão "✕" agora fecha só a aba ativa (tira da lista), não zera tudo.
 """
 import time
 import streamlit as st
@@ -605,7 +592,8 @@ def _detalhe_corpo(t, tid, user, papel):
                       use_container_width=True):
             atualizar_ticket(tid, {"status": "finalizado"}, interacao_de=user.get("usuario",""))
             st.success("Chamado encerrado!"); time.sleep(.5)
-            st.session_state.tk_ticket_aberto = None; st.rerun()
+            _fechar_aba_ticket(tid)
+            st.rerun()
         if cvb.button("↩️ Reabrir chamado", key=f"reab_{tid}", use_container_width=True):
             atualizar_ticket(tid, {"status": "em_andamento"}, interacao_de=user.get("usuario",""))
             st.success("Chamado reaberto!"); time.sleep(.5); st.rerun()
@@ -621,18 +609,80 @@ def _carregar_e_render_detalhe(tid, user, papel, modal=False):
     _detalhe_corpo(t, tid, user, papel)
 
 
-def _render_painel_lateral_detalhe(user, papel):
-    """Coluna da direita (3ª coluna) com o detalhe do ticket clicado — em
-    vez do antigo popup/st.dialog. Só é chamada quando há um ticket aberto
-    no estado da sessão (tk_ticket_aberto)."""
-    tid = st.session_state.get("tk_ticket_aberto")
-    if not tid:
+# ═══════════════════════════════════════════════════════════════════
+# [v21 — ABAS ESTILO NAVEGADOR] Helpers de estado das abas
+# ═══════════════════════════════════════════════════════════════════
+def _fechar_aba_ticket(tid):
+    """Remove um ticket da lista de abas abertas e escolhe a próxima aba
+    ativa (a anterior na lista, ou None se não sobrar nenhuma)."""
+    abertos = st.session_state.get("tk_tickets_abertos", [])
+    if tid in abertos:
+        idx = abertos.index(tid)
+        abertos.remove(tid)
+        st.session_state.tk_tickets_abertos = abertos
+        if abertos:
+            novo_idx = min(idx, len(abertos) - 1)
+            st.session_state.tk_ticket_ativo = abertos[novo_idx]
+        else:
+            st.session_state.tk_ticket_ativo = None
+
+
+def _render_barra_abas(user, papel):
+    """
+    Barra de abas estilo navegador — uma aba por ticket aberto, a aba
+    ativa destacada, com um "✕" pra fechar cada uma. Fica ACIMA do
+    conteúdo do ticket, dentro da mesma coluna de Detalhe.
+    """
+    abertos = st.session_state.get("tk_tickets_abertos", [])
+    if not abertos:
         return
+    ativo = st.session_state.get("tk_ticket_ativo")
+
+    cols = st.columns(len(abertos) + 0 if len(abertos) <= 6 else 6)
+    # Limite de 6 abas visíveis lado a lado por questão de espaço — acima
+    # disso, as mais antigas continuam "abertas" na lista mas o ideal é
+    # fechar as que não estão mais em uso.
+    visiveis = abertos[-6:] if len(abertos) > 6 else abertos
+
+    with st.container(key="tk_abas_bar"):
+        aba_cols = st.columns(len(visiveis))
+        for col, tid in zip(aba_cols, visiveis):
+            t = buscar_ticket_por_id(tid)
+            titulo_aba = f"#{t.get('id_zendesk', tid[:6])}" if t else tid[:6]
+            with col:
+                cb1, cb2 = st.columns([4, 1])
+                with cb1:
+                    if st.button(titulo_aba, key=f"tk_aba_{tid}", use_container_width=True,
+                                 type="primary" if tid == ativo else "secondary"):
+                        st.session_state.tk_ticket_ativo = tid
+                        st.rerun()
+                with cb2:
+                    if st.button("✕", key=f"tk_aba_fechar_{tid}", use_container_width=True):
+                        _fechar_aba_ticket(tid)
+                        st.rerun()
+
+
+def _render_painel_lateral_detalhe(user, papel):
+    """Coluna da direita (3ª coluna) com o detalhe do ticket ativo — em
+    vez do antigo popup/st.dialog, e agora com barra de abas no topo
+    quando há mais de um ticket aberto ao mesmo tempo (ver changelog
+    [v21])."""
+    abertos = st.session_state.get("tk_tickets_abertos", [])
+    if not abertos:
+        return
+
+    tid = st.session_state.get("tk_ticket_ativo")
+    if not tid or tid not in abertos:
+        tid = abertos[-1]
+        st.session_state.tk_ticket_ativo = tid
+
+    _render_barra_abas(user, papel)
+
     c_tit, c_fechar = st.columns([5, 1])
     with c_tit:
         st.markdown("### 📄 Detalhe do Ticket")
     with c_fechar:
-        if st.button("✕", key="tk_fechar_detalhe", help="Fechar", use_container_width=True):
-            st.session_state.tk_ticket_aberto = None
+        if st.button("✕ Fechar aba", key="tk_fechar_detalhe", use_container_width=True):
+            _fechar_aba_ticket(tid)
             st.rerun()
     _carregar_e_render_detalhe(tid, user, papel, modal=True)
