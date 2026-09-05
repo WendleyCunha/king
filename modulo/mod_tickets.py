@@ -709,14 +709,9 @@ def renderizar_tickets(papel: str, user: dict = None):
         st.session_state.tk_ticket_ativo = _tid_recem_clicado
         st.session_state.tk_ticket_aberto = None  # consumido — já virou aba
 
-    # [v21] Status (Online/Offline/Pausa) — sempre visível no topo da tela
-    # de Tickets, não importa em qual modo/aba você esteja (lista, novo
-    # ticket, WhatsApp Atendimento, etc.). Reaproveita o MESMO widget que
-    # já existia dentro do WhatsApp Atendimento (tickets/whats.py) — um
-    # só lugar de manutenção, dois lugares onde aparece.
-    _render_widget_status(user)
-    st.markdown('<div style="border-top:1px solid #e2e8f0;margin:6px 0 12px;"></div>',
-                unsafe_allow_html=True)
+    # [v21] Status (Online/Offline/Pausa) — MOVIDO pro cabeçalho principal
+    # (main.py), visível em qualquer tela do sistema, não só aqui dentro
+    # de Tickets. Removido daqui para não duplicar o mesmo widget na tela.
 
     uname = user.get("usuario","")
 
