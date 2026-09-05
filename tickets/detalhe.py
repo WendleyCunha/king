@@ -680,10 +680,10 @@ def _render_barra_abas(user, papel):
 
 
 def _render_painel_lateral_detalhe(user, papel):
-    """Coluna da direita (3ª coluna) com o detalhe do ticket ativo — em
-    vez do antigo popup/st.dialog, e agora com barra de abas no topo
-    quando há mais de um ticket aberto ao mesmo tempo (ver changelog
-    [v21])."""
+    """[v27] A barra de abas SUBIU pro topo da tela (ver mod_tickets.py —
+    agora roda em largura cheia, acima de tudo, estilo navegador de
+    verdade). Esta função ficou mais enxuta: só o título + botão fechar +
+    o corpo do ticket ativo, sem repetir a barra de abas aqui dentro."""
     abertos = st.session_state.get("tk_tickets_abertos", [])
     if not abertos:
         return
@@ -692,8 +692,6 @@ def _render_painel_lateral_detalhe(user, papel):
     if not tid or tid not in abertos:
         tid = abertos[-1]
         st.session_state.tk_ticket_ativo = tid
-
-    _render_barra_abas(user, papel)
 
     c_tit, c_fechar = st.columns([5, 1])
     with c_tit:
