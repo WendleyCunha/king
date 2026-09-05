@@ -60,9 +60,12 @@ from .common import (
 # ── Ficha do Cliente (NOVO) — nome/código/telefone, telefone editável ──
 def _bloco_ficha_cliente(t, tid, user):
     st.markdown('<div class="tk-deck-card-title">📇 Cliente</div>', unsafe_allow_html=True)
-    col_nome, col_cod = st.columns(2)
-    col_nome.text_input("Nome", value=t.get("cliente_nome","") or "—", key=f"cli_nome_ro_{tid}", disabled=True)
-    col_cod.text_input("Código", value=t.get("cliente_codigo","") or "—", key=f"cli_cod_ro_{tid}", disabled=True)
+    # [CORREÇÃO] Esta função roda DENTRO de `col_deck` (col_detalhe →
+    # col_thread/col_deck), já profundidade 2 — um `st.columns(2)` aqui
+    # seria profundidade 3 (StreamlitAPIException). Nome e Código ficam
+    # empilhados, não lado a lado.
+    st.text_input("Nome", value=t.get("cliente_nome","") or "—", key=f"cli_nome_ro_{tid}", disabled=True)
+    st.text_input("Código", value=t.get("cliente_codigo","") or "—", key=f"cli_cod_ro_{tid}", disabled=True)
 
     tel_atual = t.get("cliente_telefone","") or ""
     tel_novo = st.text_input(
@@ -379,20 +382,24 @@ def _bloco_tratativa_e_historico(t, tid, user, papel, status_atual, terminal, fi
                  "histórico abaixo.")
     else:
         with st.form(f"form_trat_{tid}", clear_on_submit=True):
-            cs1, cs2 = st.columns(2)
-            with cs1:
-                if status_edit:
-                    idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
-                    novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
-                                               format_func=lambda k: STATUS_CFG[k][0],
-                                               key=f"det_status_{tid}")
-                else:
-                    novo_status = status_atual
-                    st.markdown("**Status**")
-                    st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
-            with cs2:
-                st.markdown("**Prioridade**")
-                st.markdown(pill(pv, pbg, pc), unsafe_allow_html=True)
+            # [CORREÇÃO] Esta função roda DENTRO de `col_thread`, que já é
+            # a 2ª coluna aninhada (col_detalhe → col_thread/col_deck) —
+            # ou seja, já está em profundidade 2. Um `st.columns(2)` aqui
+            # dentro seria profundidade 3, e o Streamlit só permite até 1
+            # nível de aninhamento (StreamlitAPIException). Por isso Status
+            # e Prioridade agora ficam empilhados, não lado a lado — mesmo
+            # conteúdo, sem colunas novas.
+            if status_edit:
+                idx = STATUS_OPC.index(status_atual) if status_atual in STATUS_OPC else 0
+                novo_status = st.selectbox("Status", STATUS_OPC, index=idx,
+                                           format_func=lambda k: STATUS_CFG[k][0],
+                                           key=f"det_status_{tid}")
+            else:
+                novo_status = status_atual
+                st.markdown("**Status**")
+                st.markdown(pill(sv, sbg, sc), unsafe_allow_html=True)
+
+            st.markdown(f"**Prioridade:** {pill(pv, pbg, pc)}", unsafe_allow_html=True)
 
             novo_com = st.text_area("Escrever resposta / comentário", height=90,
                                     placeholder="Digite a tratativa...", key=f"com_{tid}")
