@@ -11,3 +11,5 @@ fpdf2
 matplotlib>=3.8.0
 functions-framework==3.*
 twilio==9.*
+qrcode>=7.4.0
+Pillow>=10.0.0
