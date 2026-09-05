@@ -141,6 +141,57 @@ def _estado_conversa(ultima_direcao: str, ultima_em: str) -> str:
         return "laranja" if (minutos is not None and minutos > 10) else "ok"
 
 
+# ═══════════════════════════════════════════════════════════════════
+# [Ficha do Cliente — v19] Card no formato da Concierge (Nome, E-mail,
+# Telefone, Canal, Identificado, Código, Pedidos, Outros atendimentos).
+#
+# ⚠️ HONESTIDADE COM O DADO: este sistema NÃO tem integração com o ERP
+# ainda. Por isso, os campos que dependeriam disso (E-mail, Pedidos deste
+# cliente, Acesso ao Portal) aparecem marcados como "não conectado" em vez
+# de mostrar informação fingida ou um zero enganoso. O que É real:
+#   - Nome/Código: vêm de um ticket já existente vinculado a este telefone.
+#   - Identificado: SIM se algum ticket já vinculou um cliente_codigo a
+#     este telefone; NÃO (contato avulso) se nenhum vinculou ainda.
+#   - Outros atendimentos: contagem real, de `_tickets_do_telefone`.
+# ═══════════════════════════════════════════════════════════════════
+def _bloco_ficha_cliente_completa(telefone: str, tickets_vinculados: list):
+    st.markdown('<div class="tk-deck-card-title">📇 Ficha do Cliente</div>', unsafe_allow_html=True)
+
+    identificado = bool(tickets_vinculados and any(t.get("cliente_codigo") for t in tickets_vinculados))
+    nome = next((t.get("cliente_nome") for t in tickets_vinculados if t.get("cliente_nome")), "") or "—"
+    codigo = next((t.get("cliente_codigo") for t in tickets_vinculados if t.get("cliente_codigo")), "") or "—"
+
+    linhas = [
+        ("Nome", nome if identificado else "—"),
+        ("E-mail", "🚧 não conectado (requer integração ERP)"),
+        ("Telefone", telefone),
+        ("Canal", "whatsapp"),
+        ("Identificado", "✅ Sim (cadastro interno)" if identificado else "❌ Não — contato avulso"),
+        ("Código", codigo if identificado else "—"),
+    ]
+    for label, valor in linhas:
+        st.markdown(_html(f"""
+        <div style="display:flex;justify-content:space-between;padding:4px 0;
+                    border-bottom:1px solid #f3f3f3;font-size:0.82rem;">
+            <span style="color:#64778d;">{esc(label)}</span>
+            <span style="color:#2c3e50;font-weight:600;">{esc(valor)}</span>
+        </div>"""), unsafe_allow_html=True)
+
+    st.markdown(_html("""
+    <div style="background:#FBF3D9;border:1px solid #D4A12C;border-radius:8px;
+                padding:8px 12px;margin-top:10px;font-size:0.76rem;color:#7A5C12;">
+        🚧 <b>Pedidos deste cliente</b> e <b>Acesso ao Portal</b> ainda não
+        aparecem aqui — dependem de integração com o ERP, que este sistema
+        ainda não tem. Assim que a integração existir, entram nesta ficha
+        sem precisar mudar o resto da tela.
+    </div>"""), unsafe_allow_html=True)
+
+    st.markdown(_html(f"""
+    <div style="font-size:0.82rem;color:#2c3e50;margin-top:8px;">
+        🗂 <b>Outros atendimentos:</b> {len(tickets_vinculados)}
+    </div>"""), unsafe_allow_html=True)
+
+
 def _tickets_do_telefone(telefone_norm: str, todos_geral: list) -> list:
     """Tickets (já achatados, de `listar_tickets()`) cujo `cliente_telefone`
     normalizado bate com este telefone — cruzamento em memória, sem
@@ -320,14 +371,15 @@ def _render_conversa_foco(telefone: str, user, papel, todos_geral: list):
     with col_ficha:
         st.markdown('<div class="tk-deck-title">🗂️ Ficha &amp; Ticket</div>', unsafe_allow_html=True)
 
+        # [v19] Ficha do Cliente sempre aparece — identificado ou avulso.
+        with st.container(key=f"tk_deck_card_wa_ficha_{telefone}"):
+            _bloco_ficha_cliente_completa(telefone, tickets_vinculados)
+
         if tickets_vinculados:
-            cli_cod = tickets_vinculados[0].get("cliente_codigo", "")
             with st.container(key=f"tk_deck_card_wa_hist_{telefone}"):
-                st.markdown('<div class="tk-deck-card-title">📇 Histórico deste cliente</div>',
+                st.markdown('<div class="tk-deck-card-title">📜 Histórico deste cliente</div>',
                             unsafe_allow_html=True)
                 _render_bloco_historico_cliente(tickets_vinculados)
-        else:
-            st.caption("Sem ticket vinculado ainda — abra um abaixo, se for o caso.")
 
         with st.container(key=f"tk_deck_card_wa_abrir_{telefone}"):
             _bloco_abrir_ticket_da_conversa(telefone, user)
