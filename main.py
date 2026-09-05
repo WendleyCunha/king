@@ -81,21 +81,6 @@ except Exception as _erro_import_checklist:
         st.error("⚠️ Falha ao carregar o módulo de Checklist. Detalhe técnico abaixo:")
         st.exception(_erro)
 
-# [NOVO — módulo ERP] Vendas, estoque, logística, RH, financeiro e fiscal.
-# Mora no pacote erp/ (Firestore num banco separado, "erp", pra não
-# misturar coleções com o painel) e reaproveita o login já feito aqui —
-# não tem tela de login própria. Mesmo padrão de proteção de import dos
-# demais: se erp/ falhar ao carregar, não derruba o main.py inteiro.
-try:
-    from modulo.mod_erp import renderizar_erp
-    from erp.auth import tem_algum_acesso as _erp_tem_algum_acesso
-except Exception as _erro_import_erp:
-    def renderizar_erp(papel, user=None, _erro=_erro_import_erp):
-        st.error("⚠️ Falha ao carregar o módulo ERP. Detalhe técnico abaixo:")
-        st.exception(_erro)
-    def _erp_tem_algum_acesso(papel, login):
-        return False
-
 try:
     from database_chat import listar_conversas_com_nao_lidas
 except Exception:
@@ -162,6 +147,16 @@ st.set_page_config(
 BRT = timezone(timedelta(hours=-3))
 def agora_brt(): return datetime.now(BRT).strftime("%H:%M:%S")
 
+def _html(s: str) -> str:
+    """Remove a indentação de cada linha (evita virar 'bloco de código' no
+    Markdown) — mesmo helper já usado em todo o resto do sistema."""
+    return "\n".join(linha.lstrip() for linha in s.splitlines())
+
+import html as _htmlmod
+def esc(v) -> str:
+    """Escapa texto livre (ex: nome do usuário) antes de injetar no HTML."""
+    return _htmlmod.escape(str(v if v is not None else ""))
+
 def get_logo():
     if os.path.exists("logo.png"):
         with open("logo.png","rb") as f: return base64.b64encode(f.read()).decode()
@@ -186,19 +181,6 @@ def _total_chat_pendentes():
 @st.cache_data(ttl=5, show_spinner=False)
 def _total_chat_pendentes_cache(motoristas_ids: tuple) -> int:
     return sum(c["nao_lidas"] for c in listar_conversas_com_nao_lidas(list(motoristas_ids)))
-
-def _usuario_tem_acesso_erp() -> bool:
-    """
-    Decide se mostra o botão 'ERP' na sidebar. Protegida como os demais
-    pontos que leem o Firestore no meio do carregamento da sidebar: se o
-    banco do ERP estiver fora do ar/cota estourada, o botão simplesmente
-    não aparece, em vez de quebrar a sidebar inteira.
-    """
-    try:
-        u = st.session_state.get("user") or {}
-        return _erp_tem_algum_acesso(u.get("role", ""), u.get("usuario", ""))
-    except Exception:
-        return False
 
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
@@ -277,9 +259,10 @@ section[data-testid="stSidebar"] .st-key-config_nav .stButton > button[kind="pri
     color: #2c3e50 !important;
 }
 .ks-header {
-    background:#ffffff; border-left:5px solid #C9A84C;
-    border-radius:12px; padding:16px 24px; margin-bottom:14px;
-    box-shadow:0 2px 8px rgba(0,0,0,0.05);
+    background: linear-gradient(180deg, #1c1710 0%, #262015 100%);
+    border-left:5px solid #C9A84C;
+    border-radius:12px; padding:14px 22px; margin-bottom:0;
+    box-shadow:0 2px 10px rgba(0,0,0,0.25);
     display:flex; align-items:center; gap:18px;
 }
 /* Cabeçalho FIXO ao rolar a página */
@@ -287,14 +270,55 @@ div[data-testid="stHorizontalBlock"]:has(.ks-header) {
     position: sticky; top: 0; z-index: 999;
     background: #f4f6f9; padding-top: 6px; padding-bottom: 6px;
 }
-.ks-title { font-size:1.4rem; font-weight:800; color:#2c3e50; margin:0; }
-.ks-sub { font-size:0.8rem; color:#64778d; margin-top:3px; }
+.ks-title { font-size:1.4rem; font-weight:800; color:#F5EFE0; margin:0; }
+.ks-sub { font-size:0.8rem; color:#C9BFA6; margin-top:3px; }
 .ks-pill { display:inline-block; padding:3px 10px; border-radius:10px;
     font-size:0.72rem; font-weight:700; margin-right:3px;
-    background:rgba(52,152,219,.1); color:#2471a3; }
+    background:rgba(96,165,250,.18); color:#8FC1FF; }
 .ks-nivel { display:inline-block; padding:3px 10px; border-radius:10px;
     font-size:0.72rem; font-weight:700;
-    background:rgba(201,168,76,.15); color:#7a5f1a; }
+    background:rgba(201,168,76,.22); color:#F0D896; }
+
+/* [v25] Menu horizontal escuro (navbar) — barra de botões logo abaixo
+   do card acima, no MESMO fundo escuro (visualmente uma peça só, ainda
+   que sejam dois containers do Streamlit por baixo). Botão ativo com
+   destaque dourado; inativos discretos, texto claro. */
+div[class*="st-key-navbar_menu"] {
+    background: linear-gradient(180deg, #262015 0%, #1c1710 100%);
+    border-left: 5px solid #C9A84C;
+    border-radius: 0 0 12px 12px;
+    padding: 6px 18px 10px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+}
+div[class*="st-key-navbar_menu"] .stButton > button {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: #C9BFA6 !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    border-radius: 8px !important;
+    padding: 7px 14px !important;
+}
+div[class*="st-key-navbar_menu"] .stButton > button:hover {
+    background: rgba(255,255,255,0.06) !important;
+    color: #F5EFE0 !important;
+}
+div[class*="st-key-navbar_menu"] .stButton > button[kind="primary"] {
+    background: rgba(201,168,76,0.20) !important;
+    border: 1px solid #C9A84C !important;
+    color: #F0D896 !important;
+}
+div[class*="st-key-navbar_user"] .stButton > button {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.15) !important;
+    color: #F5EFE0 !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+}
+div[class*="st-key-navbar_user"] .stButton > button:hover {
+    background: rgba(255,255,255,0.14) !important;
+}
 .kpi-card { background:#fff; border-radius:12px; padding:18px 12px;
     text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.05); }
 .kpi-card.gold  { border-top:4px solid #C9A84C; }
@@ -407,6 +431,12 @@ if st.session_state.user is None:
         usuario = st.text_input("Usuário")
         senha   = st.text_input("Senha", type="password")
         if st.button("Entrar", type="primary", use_container_width=True):
+            # [CORREÇÃO] Antes, `verificar_login` rodava sem nenhuma
+            # proteção — se o Firestore falhasse aqui (cota estourada,
+            # serviço fora do ar, etc.), o usuário via um traceback técnico
+            # cru (ResourceExhausted, com stack trace do gRPC) bem na tela
+            # de login, antes mesmo de entrar no sistema. Agora qualquer
+            # falha de leitura vira uma mensagem simples e direta.
             u = None
             banco_indisponivel = False
             try:
@@ -426,9 +456,15 @@ if st.session_state.user is None:
 
             if u:
                 st.session_state.user = u
+                # Regra: após o login, a primeira página é a Home (Meu Dia) —
+                # exceto para motoristas, que não têm acesso a esse módulo e
+                # vão direto para o Rastreio (suas próprias entregas).
                 st.session_state.modulo_ativo = "rastreio" if u.get("role") == "motorista" else "home"
                 st.rerun()
             elif not banco_indisponivel:
+                # Só mostra "credenciais inválidas" se o problema NÃO foi
+                # indisponibilidade do banco (nesse caso a mensagem certa
+                # já apareceu acima).
                 st.error("Credenciais inválidas.")
     st.stop()
 
@@ -461,6 +497,7 @@ if papel == "motorista":
         if st.button("🔄 Atualizar entregas", key="btn_refresh_rastreio_motorista", use_container_width=True):
             st.rerun()
 
+        # Nome do motorista + Sair ficam só aqui, no final da aba de entregas
         st.markdown("<hr style='margin:20px 0 14px;border:none;border-top:1px solid #eee;'>",
                     unsafe_allow_html=True)
         st.markdown(
@@ -498,12 +535,23 @@ with st.sidebar:
             st.session_state.modulo_ativo = "home"
             st.rerun()
 
+    # ── Grupo "Sistema" — Rastreio / Tickets / Cartas / Diagnóstico N2 ──
+    # Visual de sub-navegação (barra lateral discreta), propositalmente
+    # diferente do item "Meu Dia" (Operacional) e do botão "Configurações"
+    # (Administração), pra deixar a hierarquia da sidebar clara. O
+    # roteamento continua idêntico (cadeia de elif mais abaixo) — só
+    # mudou a apresentação visual.
     st.markdown('<span class="nav-section">Sistema</span>', unsafe_allow_html=True)
 
     with st.container(key="sistema_nav"):
         for key, label in [("rastreio","Rastreio"), ("tickets","Tickets"), ("cartas","Cartas")]:
             if key not in mods: continue
             lbl = label
+            # Chat agora vive dentro do Rastreio (aba ao lado de Cadastros) —
+            # o badge de mensagens pendentes aparece aqui, no botão Rastreio.
+            # (cacheado por 5s em _total_chat_pendentes — ver database_chat.py
+            # para o motivo da otimização; sem isso, essa chamada rodava
+            # pesada a cada rerun de QUALQUER tela, não só do Chat.)
             if key == "rastreio" and papel in ("adm", "supervisor"):
                 _pend_nav = _total_chat_pendentes()
                 if _pend_nav:
@@ -514,6 +562,11 @@ with st.sidebar:
                 st.session_state.modulo_ativo = key
                 st.rerun()
 
+        # Diagnóstico N2 — visível para adm/supervisor, agrupado dentro de
+        # "Sistema" junto com Rastreio/Tickets/Cartas. Sem ícone, para ficar
+        # no mesmo padrão dos demais itens do grupo. (não depende de
+        # 'modulos' do usuário no Firestore, então nenhum usuário existente
+        # precisa ser editado pra esse botão aparecer).
         if papel in ("adm", "supervisor"):
             ativo = st.session_state.modulo_ativo == "diagnostico"
             if st.button("Diagnóstico N2", key="nav_diagnostico", use_container_width=True,
@@ -521,6 +574,10 @@ with st.sidebar:
                 st.session_state.modulo_ativo = "diagnostico"
                 st.rerun()
 
+        # [NOVO] Checklist — módulo novo, consome a API própria via HTTP
+        # (não Firestore). Mesmo padrão do Diagnóstico N2: visível direto
+        # para adm/supervisor, sem precisar editar 'modulos' de nenhum
+        # usuário existente no Firestore.
         if papel in ("adm", "supervisor"):
             ativo = st.session_state.modulo_ativo == "checklist"
             if st.button("Checklist", key="nav_checklist", use_container_width=True,
@@ -528,19 +585,9 @@ with st.sidebar:
                 st.session_state.modulo_ativo = "checklist"
                 st.rerun()
 
-        # [NOVO] ERP — vendas, estoque, logística, RH, financeiro, fiscal.
-        # Diferente de Diagnóstico/Checklist (fixos pra adm/supervisor),
-        # o botão aparece pra QUALQUER papel que tenha pelo menos 1 ABA do
-        # ERP liberada (ver erp/auth.py) — além de adm, que sempre tem
-        # acesso total. Isso permite, por exemplo, um usuário "operacional"
-        # que só vende, sem enxergar Rastreio/Tickets/Diagnóstico.
-        if papel == "adm" or _usuario_tem_acesso_erp():
-            ativo = st.session_state.modulo_ativo == "erp"
-            if st.button("ERP", key="nav_erp", use_container_width=True,
-                         type="primary" if ativo else "secondary"):
-                st.session_state.modulo_ativo = "erp"
-                st.rerun()
-
+    # ── Grupo "Administração" — Configurações ──
+    # Seção própria, com rótulo e estilo de botão diferentes de Operacional
+    # e de Sistema (ver CSS .st-key-config_nav acima).
     if papel == "adm":
         st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
                     unsafe_allow_html=True)
@@ -555,41 +602,74 @@ with st.sidebar:
     st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 8px;"></div>',
                 unsafe_allow_html=True)
 
-# ── CABEÇALHO ─────────────────────────────────────────────────────
+# ── CABEÇALHO (navbar escura) ──────────────────────────────────────
 lb        = get_logo()
-logo_html = (f'<img src="data:image/png;base64,{lb}" style="height:50px;margin-right:18px;">'
+logo_html = (f'<img src="data:image/png;base64,{lb}" style="height:44px;margin-right:16px;">'
              if lb else "")
-_NOMES_MODULOS = {"rastreio": "Rastreio", "tickets": "Tickets", "cartas": "Cartas"}
-pills = "".join(
-    f'<span class="ks-pill">{_NOMES_MODULOS[m]}</span>'
-    for m in mods if m in _NOMES_MODULOS
-)
 
-hc1, hc2 = st.columns([9, 1])
+hc1, hc2 = st.columns([8, 1.4])
 with hc1:
     st.markdown(f"""
     <div class="ks-header">
         {logo_html}
         <div style="flex:1;">
-            <div class="ks-title">Painel KingStar</div>
+            <div class="ks-title">King Star Concierge</div>
             <div class="ks-sub">
-                KingStar Colchoes &nbsp;·&nbsp; by Wendley &nbsp;·&nbsp;
+                KingStar Colchoes &nbsp;·&nbsp;
                 <span style="color:#C9A84C;font-weight:700;">Tempo Real</span>
                 &nbsp;·&nbsp; {agora_brt()}
             </div>
         </div>
-        <div style="text-align:right;white-space:nowrap;">
-            <div style="font-size:0.88rem;font-weight:700;color:#2c3e50;margin-bottom:4px;">{user['nome']}</div>
-            <div>{pills}<span class="ks-nivel">{papel.upper()}</span></div>
-        </div>
     </div>
     """, unsafe_allow_html=True)
 with hc2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Sair", key="btn_sair", use_container_width=True):
-        st.session_state.user = None
-        st.rerun()
+    st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+    with st.container(key="navbar_user"):
+        cu1, cu2 = st.columns([2.4, 1])
+        with cu1:
+            st.markdown(_html(f"""
+            <div style="color:#F5EFE0;font-size:0.82rem;padding-top:8px;text-align:right;">
+                <b>{esc(user['nome'])}</b><br>
+                <span class="ks-nivel">{esc(papel.upper())}</span>
+            </div>"""), unsafe_allow_html=True)
+        with cu2:
+            if st.button("Sair", key="btn_sair", use_container_width=True):
+                st.session_state.user = None
+                st.rerun()
 
+# ── MENU HORIZONTAL (mesma navegação da sidebar, no formato navbar
+# escura pedido — os mesmos módulos, só apresentados como linha de
+# botões em vez de lista vertical). A sidebar continua funcionando
+# em paralelo por enquanto; assim que confirmar que prefere só a
+# navbar, tiro a duplicidade da sidebar. ──
+with st.container(key="navbar_menu"):
+    itens_navbar = []
+    if papel != "motorista":
+        itens_navbar.append(("home", "🏠 Meu Dia"))
+    for key, label in [("rastreio", "Rastreio"), ("tickets", "Tickets"), ("cartas", "Cartas")]:
+        if key in mods:
+            itens_navbar.append((key, label))
+    if papel in ("adm", "supervisor"):
+        itens_navbar.append(("diagnostico", "Diagnóstico N2"))
+        itens_navbar.append(("checklist", "Checklist"))
+    if papel == "adm":
+        itens_navbar.append(("config", "Configurações"))
+
+    cols_nav = st.columns(len(itens_navbar) or 1)
+    for col, (key, label) in zip(cols_nav, itens_navbar):
+        with col:
+            ativo = st.session_state.modulo_ativo == key
+            if st.button(label, key=f"navbar_{key}", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = key
+                st.rerun()
+
+
+# [v21 — NOVO] Status (Online/Pausa) — logo abaixo do cabeçalho, visível em
+# QUALQUER módulo (não só dentro de Tickets/WhatsApp Atendimento, de onde
+# foi movido pra cá). Ver tickets/whats.py para a implementação real —
+# aqui é só a chamada, protegida (se o widget não estiver disponível por
+# qualquer motivo, o cabeçalho principal continua funcionando normalmente).
 if _STATUS_WIDGET_OK:
     with st.container(key="status_bar_geral"):
         _render_widget_status(user)
@@ -598,6 +678,15 @@ if _STATUS_WIDGET_OK:
 modulo_ativo = st.session_state.modulo_ativo
 
 def _obter_datas_disponiveis_protegido():
+    """
+    [CORREÇÃO — ponto de falha desprotegido] Esta chamada rodava FORA de
+    `_executar_modulo_protegido`, direto no meio do script — se o
+    Firestore falhasse aqui (cota estourada, índice faltando, etc.), a
+    página inteira quebrava antes mesmo de chegar no roteamento, mesmo já
+    com a blindagem dos módulos em vigor. Agora qualquer erro aqui vira só
+    um aviso, e `datas_db` volta como lista vazia (o Rastreio ainda abre,
+    só sem o histórico de dias anteriores no seletor de período).
+    """
     try:
         return obter_datas_disponiveis_db()
     except _ResourceExhausted:
@@ -611,35 +700,53 @@ def _obter_datas_disponiveis_protegido():
         st.warning("⚠️ Não foi possível carregar o histórico de dias do Rastreio agora.")
         return []
 
+# OTIMIZAÇÃO: obter_datas_disponiveis_db() varre a coleção 'entregas'
+# inteira (todo o histórico de entregas já feitas) só para montar a
+# lista de datas do seletor do Rastreio. Antes rodava incondicionalmente
+# em TODA renderização (Tickets, Cartas, Configurações...), mesmo quando
+# a tela em questão nunca usa esse dado. Agora só busca quando o módulo
+# Rastreio está de fato aberto (também é cacheada por 60s em database.py).
 datas_db = _obter_datas_disponiveis_protegido() if modulo_ativo == "rastreio" else []
 
+# Motorista não tem acesso ao módulo Home — se a sessão dele ainda
+# apontar pra lá (ex: login antigo, antes dessa regra existir), redireciona.
 if papel == "motorista" and modulo_ativo == "home":
     st.session_state.modulo_ativo = "rastreio"
     modulo_ativo = "rastreio"
     st.rerun()
 
+# Chat deixou de ser um módulo próprio — agora é uma aba dentro do
+# Rastreio (ao lado de Cadastros). Sessões antigas que ainda apontem
+# pra "chat" são redirecionadas pra lá.
 if modulo_ativo == "chat":
     st.session_state.modulo_ativo = "rastreio"
     modulo_ativo = "rastreio"
     st.rerun()
 
+# ── NOTIFICAÇÃO DE CHAT NO PAINEL GERAL (visível em qualquer tela, exceto dentro do Rastreio) ──
 if papel in ("adm", "supervisor") and modulo_ativo != "rastreio":
     _pend_geral = _total_chat_pendentes()
     if _pend_geral:
         st.info(f"💬 Você tem **{_pend_geral}** mensagem(ns) de motoristas aguardando resposta. "
                 f"Acesse **Rastreio → aba Chat** para responder.")
 
+# Se o módulo Rastreio precisar dessas datas mas o usuário navegou para
+# outra aba antes deste ponto, garante que datas_db já esteja resolvido
+# (evita usar variável desatualizada quando modulo_ativo mudou acima).
 if modulo_ativo == "rastreio" and not datas_db:
     datas_db = _obter_datas_disponiveis_protegido()
 
 def _renderizar_bloco_configuracoes():
     st.subheader("⚙️ Configurações")
 
+    # ── Helpers de gerenciamento (sub-abas por departamento) ──────────
     def _gerenciar_usuario(u, dep_nomes, ctx, idx):
         uname = u.get("usuario", f"u{idx}")
         dep   = u.get("departamento", "—") or "—"
         role  = u.get("role", "—")
         with st.expander(f"**{u.get('nome','—')}** · `{uname}` · {role.upper()} · 🏢 {dep}"):
+
+            # ── Editar Perfil (Nome / Nível) ──────────────────────────
             st.markdown("**✏️ Editar Perfil**")
             pc1, pc2 = st.columns(2)
             novo_nome_p = pc1.text_input("Nome completo", value=u.get("nome", ""),
@@ -661,6 +768,7 @@ def _renderizar_bloco_configuracoes():
 
             st.markdown("---")
 
+            # ── Editar Login (recria o documento — ação sensível) ─────
             st.markdown("**🔁 Alterar Login**")
             st.caption("O login é o identificador do usuário no banco (usado pra entrar no "
                        "sistema). Alterá-lo recria o cadastro com o novo login e apaga o "
@@ -688,6 +796,7 @@ def _renderizar_bloco_configuracoes():
 
             st.markdown("---")
 
+            # Departamento
             if dep_nomes:
                 ix = (dep_nomes.index(dep) + 1) if dep in dep_nomes else 0
                 novo_dep = st.selectbox("Departamento", ["— Selecione —"] + dep_nomes,
@@ -697,6 +806,7 @@ def _renderizar_bloco_configuracoes():
                         atualizar_departamento_usuario(uname, novo_dep)
                         st.success("Departamento atualizado!"); time.sleep(.5); st.rerun()
 
+            # Alterar senha (reset pelo admin)
             if uname != "admin":
                 st.markdown("**🔑 Redefinir senha**")
                 ns  = st.text_input("Nova senha", type="password", key=f"ns_{ctx}_{uname}_{idx}")
@@ -711,6 +821,7 @@ def _renderizar_bloco_configuracoes():
                         (st.success if ok else st.error)(msg)
                         if ok: time.sleep(.6); st.rerun()
 
+            # Excluir
             if uname != "admin":
                 st.markdown("---")
                 if st.button("🗑️ Excluir usuário", key=f"del_{ctx}_{uname}_{idx}"):
@@ -733,6 +844,7 @@ def _renderizar_bloco_configuracoes():
         ["👥 Usuários", "🔒 Permissões", "🏢 Departamentos", "🗂️ Motivos"]
     )
 
+    # ─── ABA USUÁRIOS (sub-abas por departamento) ─────────────────
     with aba_u:
         deps      = listar_departamentos()
         dep_nomes = [d["nome"] for d in deps]
@@ -785,6 +897,7 @@ def _renderizar_bloco_configuracoes():
                 for j, u in enumerate(outros):
                     _gerenciar_usuario(u, dep_nomes, "uout", j)
 
+    # ─── ABA PERMISSÕES (sub-abas por departamento) ───────────────
     with aba_m:
         deps      = listar_departamentos()
         dep_nomes = [d["nome"] for d in deps]
@@ -808,6 +921,7 @@ def _renderizar_bloco_configuracoes():
                 for j, u in enumerate(outros):
                     _perm_card(u, "pout", j)
 
+    # ─── ABA DEPARTAMENTOS (sem divisão) ──────────────────────────
     with aba_dep:
         st.markdown("### 🏢 Departamentos")
         with st.expander("➕ Novo Departamento", expanded=True):
@@ -836,6 +950,11 @@ def _renderizar_bloco_configuracoes():
                     (st.success if ok else st.error)(msg)
                     if ok: time.sleep(.5); st.rerun()
 
+    # ─── ABA MOTIVOS (Motivo Pai → Motivo Filho → Etapa) ──────────
+    # Substitui a lógica antiga de Tabulação para o módulo de Tickets:
+    # Motivo Pai carrega o SLA de triagem (SLA1); Motivo Filho e Etapa são
+    # escolhidos pelo atendente durante o atendimento (ver mod_tickets.py).
+    # Etapas vermelhas exigem data futura (SLA2) e travam a trilha do ticket.
     with aba_mot:
         try:
             from modulo.mod_motivos import renderizar_motivos
@@ -846,6 +965,10 @@ def _renderizar_bloco_configuracoes():
 
 
 # ── ROTEAMENTO ────────────────────────────────────────────────────
+# [NOVO] Cada chamada abaixo passa por `_executar_modulo_protegido` — ver
+# nota de blindagem de runtime logo acima. Um erro em qualquer módulo
+# (cota do Firestore, índice faltando, bug pontual) mostra um aviso só
+# naquela tela; a sidebar e os outros módulos continuam acessíveis.
 if modulo_ativo == "home":
     _executar_modulo_protegido("Meu Dia", renderizar_home, papel, user)
 
@@ -854,6 +977,11 @@ elif modulo_ativo == "rastreio" and tem_permissao(user, "rastreio"):
         "Rastreio", renderizar_rastreio,
         papel, user, datas_db=datas_db, pode_exp=pode_exportar(user)
     )
+    # Atualização manual em vez de streamlit-autorefresh: esse componente
+    # tem um bug conhecido de deixar o timer JS "vivo" no navegador mesmo
+    # depois de trocar de aba, o que pode travar OUTRAS telas do sistema
+    # (Cartas, Tickets etc.) sem relação nenhuma com o Rastreio. Um botão
+    # manual é 100% seguro e não tem esse risco.
     if is_hoje:
         if st.button("🔄 Atualizar rastreio", key="btn_refresh_rastreio"):
             st.rerun()
@@ -870,15 +998,13 @@ elif modulo_ativo == "diagnostico" and papel in ("adm", "supervisor"):
 elif modulo_ativo == "checklist" and papel in ("adm", "supervisor"):
     _executar_modulo_protegido("Checklist", renderizar_checklist, papel, user)
 
-elif modulo_ativo == "erp" and (papel == "adm" or _usuario_tem_acesso_erp()):
-    _executar_modulo_protegido("ERP", renderizar_erp, papel, user)
-
 elif modulo_ativo == "config" and papel == "adm":
     _executar_modulo_protegido("Configurações", _renderizar_bloco_configuracoes)
 
 
 
 else:
+    # ── MINHA CONTA — qualquer usuário logado pode trocar a senha ──
     st.subheader("👤 Minha Conta")
     dep_user = user.get("departamento", "—") or "—"
     st.markdown(f"**Nome:** {user['nome']}  |  **Login:** `{user.get('usuario','')}`  |  "
