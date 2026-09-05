@@ -28,6 +28,11 @@ KingStar — Cadastro de Motivos (Motivo Pai → Motivo Filho → Etapa)
                      ao Motivo Pai): se diferente do departamento do ticket,
                      cria uma pendência automática pra aquele setor assim
                      que a classificação é confirmada.
+
+[Ajuste visual — v2] Nenhuma função de CRUD foi alterada nesta versão. Só a
+UI de `renderizar_motivos` ganhou o mesmo acabamento visual (cards com borda
+dourada, badges coloridos) já usado no módulo de Tickets, em vez de
+`st.expander` cru — pra parecer parte do mesmo sistema, não uma tela solta.
 """
 import streamlit as st
 import sys
@@ -183,11 +188,51 @@ def resolver_etapa_final(motivo_filho_id: str, caminho_nomes: list):
     return etapa_final, filho_id
 
 
+# ═══════════════════════════════════════════════════════════════════
+# [Ajuste visual] CSS local — mesma família visual (dourado #C9A84C,
+# cards com sombra leve, badges arredondados) já usada no restante do
+# sistema. Escopado por classe (`mot-*`) para não vazar em outras telas.
+# ═══════════════════════════════════════════════════════════════════
+def _css_motivos():
+    st.markdown("""
+    <style>
+    .mot-card { background:#fff; border:1px solid #ecdfc9; border-left:4px solid #C9A84C;
+        border-radius:10px; padding:14px 16px; margin-bottom:10px;
+        box-shadow:0 2px 8px rgba(61,31,16,0.05); }
+    .mot-card.filho { border-left-color:#60A5FA; }
+    .mot-card.etapa-preta { border-left-color:#475569; }
+    .mot-card.etapa-vermelha { border-left-color:#DC2626; }
+    .mot-titulo { font-weight:700; font-size:0.95rem; color:#2c3e50; margin-bottom:4px; }
+    .mot-badges { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+    .mot-badge { font-size:0.7rem; font-weight:700; padding:2px 9px; border-radius:10px;
+        display:inline-block; }
+    .mot-badge-dep { background:#F3ECD9; color:#6B5A2A; border:1px solid #C9A84C; }
+    .mot-badge-sla { background:#EEF2FF; color:#3730A3; border:1px solid #818CF8; }
+    .mot-badge-prio-urgente { background:#FEE2E2; color:#B91C1C; border:1px solid #F87171; }
+    .mot-badge-prio-alta    { background:#FFEDD5; color:#C2410C; border:1px solid #FB923C; }
+    .mot-badge-prio-normal  { background:#E2E8F0; color:#475569; border:1px solid #CBD5E1; }
+    .mot-badge-prio-baixa   { background:#F1F5F9; color:#64748B; border:1px solid #CBD5E1; }
+    .mot-badge-vinc { background:#DBEAFE; color:#1D4ED8; border:1px solid #60A5FA; }
+    .mot-badge-vermelha { background:#FEE2E2; color:#B91C1C; border:1px solid #F87171; }
+    .mot-badge-preta { background:#F1F5F9; color:#334155; border:1px solid #94A3B8; }
+    .mot-section-title { font-size:0.72rem; font-weight:800; letter-spacing:1px;
+        text-transform:uppercase; color:#7a5f1a; margin:18px 0 8px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _badge_prioridade(prio: str, labels: dict) -> str:
+    classe = f"mot-badge-prio-{prio}" if prio in ("urgente", "alta", "normal", "baixa") else "mot-badge-prio-normal"
+    return f'<span class="mot-badge {classe}">🎯 {labels.get(prio, "Normal")}</span>'
+
+
 # ── UI de cadastro (somente ADM) ─────────────────────────────────────
 def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
     if papel != "adm":
         st.warning("🔒 Acesso restrito a Administradores.")
         return
+
+    _css_motivos()
 
     st.markdown("## 🗂️ Motivos, Motivos Filho e Etapas")
     st.caption(
@@ -211,7 +256,7 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
     with aba_pai:
         st.markdown("#### Novo Motivo Pai")
         if not deps:
-            st.warning("Cadastre um Departamento antes.")
+            st.warning("⚠️ Cadastre um Departamento antes de criar um Motivo Pai.")
         else:
             with st.form("form_novo_pai", clear_on_submit=True):
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
@@ -226,7 +271,7 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                     "pra esse setor ao abrir o chamado, se for diferente do Departamento acima",
                     opcoes_vinc_pai
                 )
-                if st.form_submit_button("➕ Adicionar", type="primary"):
+                if st.form_submit_button("➕ Adicionar", type="primary", use_container_width=True):
                     if not nome.strip():
                         st.error("Informe o nome.")
                     else:
@@ -235,15 +280,27 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                             "" if dep_vinc == SEM_VINCULO else dep_vinc
                         )
                         st.success("Motivo Pai criado!"); st.rerun()
-        st.markdown("---")
-        for m in listar_motivos_pai():
+
+        pais_existentes = listar_motivos_pai()
+        st.markdown(f'<div class="mot-section-title">Cadastrados ({len(pais_existentes)})</div>',
+                    unsafe_allow_html=True)
+        if not pais_existentes:
+            st.caption("Nenhum Motivo Pai cadastrado ainda — é ele que precisa existir antes do "
+                       "'Novo Ticket' conseguir oferecer opções de Motivo.")
+        for m in pais_existentes:
             vinc_atual = m.get("departamento_vinculado") or ""
-            vinc_txt = f" · 📨 vinculado a {vinc_atual}" if vinc_atual else ""
-            with st.expander(
-                f"**{m['nome']}** · 🏢 {m.get('departamento','—')} · "
-                f"⏱ {m.get('sla_dias', 5)}d · 🎯 {prio_labels.get(m.get('prioridade','normal'), 'Normal')}"
-                f"{vinc_txt}"
-            ):
+            vinc_html = (f'<span class="mot-badge mot-badge-vinc">📨 vincula {vinc_atual}</span>'
+                        if vinc_atual else "")
+            st.markdown(_montar_card_html(
+                titulo=m["nome"],
+                badges=(
+                    f'<span class="mot-badge mot-badge-dep">🏢 {m.get("departamento","—")}</span>'
+                    f'<span class="mot-badge mot-badge-sla">⏱ {m.get("sla_dias", 5)}d SLA</span>'
+                    f'{_badge_prioridade(m.get("prioridade","normal"), prio_labels)}'
+                    f'{vinc_html}'
+                ),
+            ), unsafe_allow_html=True)
+            with st.expander("✏️ Editar / excluir"):
                 with st.form(f"edit_pai_{m['id']}"):
                     e1, e2, e3, e4 = st.columns([2, 1, 1, 1])
                     novo_nome = e1.text_input("Nome", value=m["nome"], key=f"pnome_{m['id']}")
@@ -280,26 +337,35 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
         st.markdown("#### Novo Motivo Filho")
         pais = listar_motivos_pai()
         if not pais:
-            st.info("Cadastre um Motivo Pai primeiro.")
+            st.info("Cadastre um Motivo Pai primeiro (aba 🅰️ ao lado).")
         else:
             with st.form("form_novo_filho", clear_on_submit=True):
                 pai_nomes = [p["nome"] for p in pais]
                 pai_sel = st.selectbox("Motivo Pai *", pai_nomes)
                 nome_f = st.text_input("Nome do Motivo Filho *")
-                if st.form_submit_button("➕ Adicionar", type="primary"):
+                if st.form_submit_button("➕ Adicionar", type="primary", use_container_width=True):
                     pai_obj = next(p for p in pais if p["nome"] == pai_sel)
                     if not nome_f.strip():
                         st.error("Informe o nome.")
                     else:
                         criar_motivo_filho(nome_f.strip(), pai_obj["id"], pai_obj["nome"])
                         st.success("Motivo Filho criado!"); st.rerun()
-            st.markdown("---")
+
+            total_filhos = sum(len(listar_motivos_filho_de(p["id"])) for p in pais)
+            st.markdown(f'<div class="mot-section-title">Cadastrados ({total_filhos})</div>',
+                        unsafe_allow_html=True)
+            if not total_filhos:
+                st.caption("Nenhum Motivo Filho cadastrado ainda — sem ele, o atendente não "
+                           "consegue classificar o ticket na triagem.")
             for p in pais:
                 filhos = listar_motivos_filho_de(p["id"])
                 if filhos:
                     st.markdown(f"**{p['nome']}**")
                     for f in filhos:
-                        with st.expander(f"↳ {f['nome']}"):
+                        st.markdown(_montar_card_html(
+                            titulo=f"↳ {f['nome']}", classe_extra="filho", badges="",
+                        ), unsafe_allow_html=True)
+                        with st.expander("✏️ Editar / excluir"):
                             with st.form(f"edit_filho_{f['id']}"):
                                 novo_nome_f = st.text_input("Nome", value=f["nome"], key=f"fnome_{f['id']}")
                                 b1, b2 = st.columns(2)
@@ -314,7 +380,7 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
         st.markdown("#### Nova Etapa")
         filhos = listar_motivos_filho()
         if not filhos:
-            st.info("Cadastre um Motivo Filho primeiro.")
+            st.info("Cadastre um Motivo Filho primeiro (aba 🅱️ ao lado).")
         else:
             with st.form("form_nova_etapa", clear_on_submit=True):
                 filho_labels = {f["id"]: f"{f['motivo_pai_nome']} → {f['nome']}" for f in filhos}
@@ -344,7 +410,7 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                     "departamento do ticket",
                     opcoes_vinc_etapa
                 )
-                if st.form_submit_button("➕ Adicionar", type="primary"):
+                if st.form_submit_button("➕ Adicionar", type="primary", use_container_width=True):
                     if not nome_e.strip():
                         st.error("Informe o nome da etapa.")
                     else:
@@ -355,29 +421,44 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                             departamento_vinculado="" if dep_vinc_etapa == SEM_VINCULO else dep_vinc_etapa
                         )
                         st.success("Etapa criada!"); st.rerun()
-            st.markdown("---")
+
+            total_etapas = sum(len(listar_etapas_de(f["id"])) for f in filhos)
+            st.markdown(f'<div class="mot-section-title">Cadastradas ({total_etapas})</div>',
+                        unsafe_allow_html=True)
+            if not total_etapas:
+                st.caption("Nenhuma Etapa cadastrada ainda — sem ela, a classificação do "
+                           "ticket na triagem não tem opções pra escolher.")
             for f in filhos:
                 etapas = listar_etapas_de(f["id"])
                 if etapas:
                     st.markdown(f"**{f['motivo_pai_nome']} → {f['nome']}**")
                     for e in etapas:
-                        cor = "🔴" if e.get("requer_data") else "⚫"
+                        vermelha = bool(e.get("requer_data"))
+                        classe_e = "etapa-vermelha" if vermelha else "etapa-preta"
+                        badge_cor = ('<span class="mot-badge mot-badge-vermelha">🔴 exige data</span>'
+                                    if vermelha else
+                                    '<span class="mot-badge mot-badge-preta">⚫ sem data</span>')
                         reap_atual = e.get("reaproveita_motivo_filho_id") or ""
-                        reap_nome = ""
+                        badge_reap = ""
                         if reap_atual:
                             alvo = next((x for x in filhos if x["id"] == reap_atual), None)
                             if alvo:
-                                reap_nome = f" ↪️ reaproveita **{alvo['nome']}**"
-                        vinc = (f" · 👤 {', '.join(e['atendentes_vinculados'])}"
-                                if e.get("atendentes_vinculados") else "")
+                                badge_reap = f'<span class="mot-badge mot-badge-vinc">↪️ reaproveita {alvo["nome"]}</span>'
+                        badge_atend = (f'<span class="mot-badge mot-badge-dep">👤 {", ".join(e["atendentes_vinculados"])}</span>'
+                                      if e.get("atendentes_vinculados") else "")
                         dep_vinc_atual_e = e.get("departamento_vinculado") or ""
-                        vinc_dep_txt = f" · 📨 {dep_vinc_atual_e}" if dep_vinc_atual_e else ""
-                        with st.expander(f"{cor} {e['nome']}{reap_nome}{vinc}{vinc_dep_txt}"):
+                        badge_dep_e = (f'<span class="mot-badge mot-badge-vinc">📨 {dep_vinc_atual_e}</span>'
+                                      if dep_vinc_atual_e else "")
+                        st.markdown(_montar_card_html(
+                            titulo=e["nome"], classe_extra=classe_e,
+                            badges=f"{badge_cor}{badge_reap}{badge_atend}{badge_dep_e}",
+                        ), unsafe_allow_html=True)
+                        with st.expander("✏️ Editar / excluir"):
                             with st.form(f"edit_etapa_{e['id']}"):
                                 novo_nome_e = st.text_input("Nome", value=e["nome"], key=f"enome_{e['id']}")
                                 novo_requer = st.checkbox(
                                     "🔴 Etapa vermelha (exige data futura / 2º SLA)",
-                                    value=bool(e.get("requer_data")), key=f"ereq_{e['id']}"
+                                    value=vermelha, key=f"ereq_{e['id']}"
                                 )
                                 opcoes_reap_e = [SEM_VINCULO] + [x["id"] for x in filhos if x["id"] != f["id"]]
                                 idx_reap = opcoes_reap_e.index(reap_atual) if reap_atual in opcoes_reap_e else 0
@@ -410,3 +491,12 @@ def renderizar_motivos(papel: str, usuarios_disponiveis: list = None):
                                     st.success("Atualizado!"); st.rerun()
                                 if b2.form_submit_button("🗑️ Excluir", use_container_width=True):
                                     excluir_etapa(e["id"]); st.rerun()
+
+
+def _montar_card_html(titulo: str, badges: str = "", classe_extra: str = "") -> str:
+    """[Ajuste visual] Monta o HTML de um card padronizado (título + linha
+    de badges), usado pelas 3 listagens acima (Motivo Pai, Motivo Filho,
+    Etapa) — um único ponto de manutenção pro visual do card."""
+    badges_html = f'<div class="mot-badges">{badges}</div>' if badges else ""
+    return (f'<div class="mot-card {classe_extra}">'
+            f'<div class="mot-titulo">{titulo}</div>{badges_html}</div>')
