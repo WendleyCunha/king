@@ -495,10 +495,9 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
         except Exception:
             pass
 
-    # [v20] Widget de Status — Online / Offline / Pausa (com motivo).
-    _render_widget_status(user)
-    st.markdown('<div style="border-top:1px solid #e2e8f0;margin:8px 0 14px;"></div>',
-                unsafe_allow_html=True)
+    # [v21] Status (Online/Offline/Pausa) — MOVIDO pro cabeçalho principal
+    # (main.py). Removido daqui pra não duplicar na tela de WhatsApp
+    # Atendimento (que já mostra o mesmo widget lá em cima, uma vez só).
 
     busca = st.text_input("🔎 Buscar por telefone", key="wa_busca",
                           placeholder="Digite parte do número...")
