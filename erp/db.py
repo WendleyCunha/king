@@ -17,7 +17,6 @@ def get_db():
         creds = service_account.Credentials.from_service_account_info(key_dict)
         st.session_state.db_erp = firestore.Client(
             credentials=creds, project=creds.project_id, database="portal"
-)
         )
     return st.session_state.db_erp
 
