@@ -781,11 +781,32 @@ def renderizar_tickets(papel: str, user: dict = None):
                          type="primary" if st.session_state.tk_modo == "whats" else "secondary"):
                 st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
 
-            # [v22] Caixas por Motivo — Pedido/Compras/Logística/Cliente,
-            # com sub-filtro por Motivo Filho, ordenação e lote.
-            if st.button("🗂️ Caixas por Motivo", use_container_width=True,
-                         type="primary" if st.session_state.tk_modo == "caixas" else "secondary"):
-                st.session_state.tk_modo = "caixas"; st.session_state.tk_ticket_aberto = None; st.rerun()
+            # [v24] FILA :: CAIXAS POR MOTIVO — agora fixo no painel
+            # esquerdo (não é mais um botão que leva pra outra tela).
+            # Clicar num motivo já pula direto pra dentro da caixa dele
+            # (pulando a tela de cartões) — a área da direita mostra na
+            # hora "Todos" + os Motivo Filho daquele Motivo Pai.
+            st.markdown('<div style="border-top:1px dashed #cbd5e1;margin:14px 0 6px;"></div>',
+                        unsafe_allow_html=True)
+            st.markdown('<span class="nav-section" style="padding-left:0;">FILA</span>',
+                        unsafe_allow_html=True)
+            st.caption("**CAIXAS POR MOTIVO**")
+            pendentes_por_motivo = {}
+            for t in f_global:
+                if t.get("motivo_pai") and t.get("status") in STATUS_ABERTOS:
+                    nome = t.get("motivo_pai")
+                    pendentes_por_motivo[nome] = pendentes_por_motivo.get(nome, 0) + 1
+            for nome_motivo, qtd in sorted(pendentes_por_motivo.items(), key=lambda kv: -kv[1]):
+                ativo_motivo = (st.session_state.tk_modo == "caixas"
+                                and st.session_state.get("tk_caixa_motivo") == nome_motivo)
+                if st.button(f"{nome_motivo.upper()} {qtd}", key=f"fila_caixa_{nome_motivo}",
+                             use_container_width=True,
+                             type="primary" if ativo_motivo else "secondary"):
+                    st.session_state.tk_modo = "caixas"
+                    st.session_state.tk_caixa_motivo = nome_motivo
+                    st.session_state.tk_caixa_filho = ""  # "Todos" — 100% dos tickets do motivo
+                    st.session_state.tk_ticket_aberto = None
+                    st.rerun()
 
             if papel in ("supervisor", "adm"):
                 if st.button("📊 Visão Geral da Operação", use_container_width=True,
