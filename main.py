@@ -580,9 +580,10 @@ with st.container(key="navbar_menu"):
                 st.session_state.modulo_ativo = key
                 st.rerun()
 
-if _STATUS_WIDGET_OK:
-    with st.container(key="status_bar_geral"):
-        _render_widget_status(user)
+# [v29 — REMOVIDO] O widget de Status (Online/Offline/Pausa) saiu do
+# cabeçalho global — por pedido explícito, agora vive DENTRO da barra
+# persistente do módulo Tickets (ver mod_tickets.py), como um botão
+# único. Deixa de aparecer nos outros módulos (Rastreio, Cartas, ERP).
 
 # ── DADOS ─────────────────────────────────────────────────────────
 modulo_ativo = st.session_state.modulo_ativo
