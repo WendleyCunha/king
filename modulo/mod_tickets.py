@@ -678,9 +678,11 @@ def renderizar_tickets(papel: str, user: dict = None):
     f_global  = todos_geral
 
     modo = st.session_state.tk_modo
-    # [v18] o modo "whats" tem sua própria tela cheia com split interno
-    # (lista de conversas + conversa + ficha do cliente) — não usa a 3ª
-    # coluna deste orquestrador, então não conta pra "mostra_detalhe".
+    # [v18→v21 CORRIGIDO] o modo "whats" NÃO usa mais tela cheia própria —
+    # isso escondia o painel de Ações (Novo Ticket, Ver Filas de Trabalho)
+    # inteiro, sem jeito de voltar. Agora roda DENTRO de col_main, igual
+    # "novo"/"equipe"/"sync" já fazem — o painel de Ações continua sempre
+    # visível, não importa em qual modo você está.
     mostra_detalhe = bool(st.session_state.tk_ticket_aberto) and modo in ("lista", None)
 
     # ── PAINEL DE TICKETS (independente, fora das 3 colunas de baixo) ──
@@ -690,17 +692,11 @@ def renderizar_tickets(papel: str, user: dict = None):
     # já rolam por dentro de si mesmas — não é preciso nenhum truque de
     # CSS sticky pra "congelar" este painel no topo.
     #
-    # [v18] Não aparece no modo "whats" — a tela de WhatsApp Atendimento
-    # tem sua própria busca (por telefone/nome), dentro de tickets/whats.py,
-    # porque o universo ali é "conversas", não "tickets".
+    # Não aparece no modo "whats" — a tela de WhatsApp Atendimento tem sua
+    # própria busca (por telefone), dentro de tickets/whats.py, porque o
+    # universo ali é "conversas", não "tickets".
     if modo != "whats":
         _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
-
-    if modo == "whats":
-        # [v18] Tela cheia própria — ver tickets/whats.py. Recebe `todos_geral`
-        # pra poder cruzar telefone → ticket já existente (sem nova leitura).
-        _render_whatsapp_atendimento(user, papel, todos_geral)
-        return
 
     with st.container(key="tk_paineis"):
         if mostra_detalhe:
@@ -763,6 +759,11 @@ def renderizar_tickets(papel: str, user: dict = None):
                 _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global)
             elif modo == "novo":
                 _render_novo(user)
+            elif modo == "whats":
+                # [v21] Roda dentro de col_main agora, não mais em tela
+                # cheia própria — o painel de Ações à esquerda continua
+                # visível e clicável (Novo Ticket, Ver Filas etc.).
+                _render_whatsapp_atendimento(user, papel, todos_geral)
             elif modo == "equipe":
                 if papel not in ("supervisor", "adm"):
                     st.warning("🔒 Acesso restrito a Supervisores e Administradores.")
