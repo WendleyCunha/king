@@ -63,12 +63,16 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 try:
-    from database_chat import marcar_presenca_adm, listar_admins_online
+    from database_chat import (
+        marcar_presenca_adm, listar_admins_online,
+        atualizar_status_presenca_adm, obter_status_presenca_adm,
+    )
     _PRESENCA_DISPONIVEL = True
 except Exception:
     # Se database_chat.py não existir nesse ambiente, ou o import falhar
     # por qualquer motivo, a tela de WhatsApp Atendimento continua
-    # funcionando — só sem o indicador de "quem está online agora".
+    # funcionando — só sem o indicador de "quem está online agora" nem
+    # o widget de Status (Online/Offline/Pausa).
     _PRESENCA_DISPONIVEL = False
 
 
@@ -139,6 +143,98 @@ def _estado_conversa(ultima_direcao: str, ultima_em: str) -> str:
         return "azul" if (minutos is not None and minutos <= 10) else "vermelho"
     else:
         return "laranja" if (minutos is not None and minutos > 10) else "ok"
+
+
+def _categoria_ver(ultima_direcao: str, tickets_vinculados: list) -> str:
+    """
+    [v20 — barra "Ver"] Classifica a conversa numa das 4 categorias da
+    Concierge, aproximadas em cima do que este sistema JÁ tem (sem campo
+    novo): direção da última mensagem + status dos tickets vinculados.
+
+        'aguardando_equipe'   → cliente falou por último, ninguém respondeu
+                                 ainda (é a categoria mais urgente).
+        'aguardando_cliente'  → nós falamos por último, esperando ele
+                                 responder.
+        'tratamento_interno'  → existe ticket vinculado ainda ABERTO
+                                 (aberto/em_andamento/aguardando), tratado
+                                 por dentro do portal, independente de quem
+                                 falou por último no WhatsApp.
+        'concluido'           → todo ticket vinculado já está
+                                 resolvido/finalizado/cancelado, ou não há
+                                 nenhum ticket (conversa avulsa encerrada).
+
+    ⚠️ Isto é uma APROXIMAÇÃO da definição da Concierge, não uma cópia
+    exata — a Concierge tem um motor de fila próprio que este sistema não
+    replica. Ajustar os critérios abaixo é rápido se a definição real for
+    diferente na prática.
+    """
+    tem_aberto = any(t.get("status") in STATUS_ABERTOS for t in tickets_vinculados)
+    if tem_aberto:
+        return "tratamento_interno"
+    if tickets_vinculados and not tem_aberto:
+        return "concluido"
+    # Sem ticket nenhum vinculado — classifica só pela conversa em si.
+    return "aguardando_equipe" if ultima_direcao == "in" else "aguardando_cliente"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# [v20] Widget de Status — Online / Offline / Pausa (com motivo)
+# ═══════════════════════════════════════════════════════════════════
+_MOTIVOS_PAUSA = [
+    ("Almoço", 60), ("Pausa 10", 10), ("Treinamento", None),
+    ("Banheiro", None), ("Reunião", None), ("Particular", None),
+]
+
+
+def _minutos_desde_utc(dt):
+    """Como `_minutos_desde`, mas para datetime timezone-aware (UTC) vindo
+    direto do Firestore — usado só pelo widget de Status."""
+    if not dt:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        return (_dt.now(_tz.utc) - dt).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _render_widget_status(user):
+    """
+    Online / Offline / Pausa (com motivo), no topo da tela — mesmo padrão
+    visual da Concierge. "Offline" aqui não é um clique: é o que acontece
+    sozinho quando ninguém abre esta tela por mais de 60s (mesma regra que
+    já existia em `listar_admins_online`). O clique em Pausa exige
+    escolher um motivo da lista (com ou sem minutos sugeridos).
+    """
+    if not _PRESENCA_DISPONIVEL:
+        return
+
+    uname = user.get("usuario", "")
+    nome = user.get("nome", "")
+    atual = obter_status_presenca_adm(uname)
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        if st.button("🟢 Online", use_container_width=True,
+                     type="primary" if atual["status"] == "online" else "secondary"):
+            atualizar_status_presenca_adm(uname, nome, "online")
+            st.rerun()
+    with c2:
+        if atual["status"] == "pausa":
+            minutos_em_pausa = _minutos_desde_utc(atual.get("pausa_desde"))
+            txt_tempo = f" há {int(minutos_em_pausa)}min" if minutos_em_pausa is not None else ""
+            st.button(f"🟠 Pausa: {atual.get('motivo_pausa','')}{txt_tempo}",
+                     use_container_width=True, type="primary", disabled=True)
+        else:
+            with st.popover("🟠 Pausa", use_container_width=True):
+                for motivo, minutos_sugeridos in _MOTIVOS_PAUSA:
+                    label = f"{motivo}" + (f" · {minutos_sugeridos}min" if minutos_sugeridos else "")
+                    if st.button(label, key=f"wa_pausa_{motivo}", use_container_width=True):
+                        atualizar_status_presenca_adm(uname, nome, "pausa", motivo)
+                        st.rerun()
+    with c3:
+        st.caption("⚪ Offline é automático — acontece sozinho se você ficar "
+                   "mais de 1 minuto sem abrir esta tela.")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -399,6 +495,11 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
         except Exception:
             pass
 
+    # [v20] Widget de Status — Online / Offline / Pausa (com motivo).
+    _render_widget_status(user)
+    st.markdown('<div style="border-top:1px solid #e2e8f0;margin:8px 0 14px;"></div>',
+                unsafe_allow_html=True)
+
     busca = st.text_input("🔎 Buscar por telefone", key="wa_busca",
                           placeholder="Digite parte do número...")
 
@@ -406,6 +507,47 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
     if busca.strip():
         termo = busca.strip()
         conversas = [c for c in conversas if termo in c["telefone"]]
+
+    # [v20] Pré-calcula tickets vinculados + categoria "Ver" de cada
+    # conversa UMA vez (evita repetir a mesma consulta em memória duas
+    # vezes: uma pro filtro, outra pro card da lista).
+    info_por_conversa = {}
+    for c in conversas:
+        tel_norm = normalizar_telefone(c["telefone"])
+        tks = _tickets_do_telefone(tel_norm, todos_geral)
+        info_por_conversa[c["telefone"]] = {
+            "tickets": tks,
+            "categoria": _categoria_ver(c["ultima_msg_direcao"], tks),
+        }
+
+    contagem = {"aguardando_equipe": 0, "aguardando_cliente": 0, "tratamento_interno": 0, "concluido": 0}
+    for info in info_por_conversa.values():
+        contagem[info["categoria"]] += 1
+
+    # [v20] Barra "Ver" — mesmas 4 categorias + "Todos", filtrando a lista
+    # abaixo. Guarda a escolha em session_state pra sobreviver ao rerun.
+    if "wa_ver_filtro" not in st.session_state:
+        st.session_state.wa_ver_filtro = "todos"
+
+    st.markdown("**Ver**")
+    vc1, vc2, vc3, vc4, vc5 = st.columns(5)
+    botoes_ver = [
+        (vc1, "aguardando_equipe", f"Aguardando equipe {contagem['aguardando_equipe']}"),
+        (vc2, "aguardando_cliente", f"Aguardando cliente {contagem['aguardando_cliente']}"),
+        (vc3, "tratamento_interno", f"Em tratamento interno {contagem['tratamento_interno']}"),
+        (vc4, "concluido", f"Concluído {contagem['concluido']}"),
+        (vc5, "todos", f"Todos {len(conversas)}"),
+    ]
+    for col, valor, label in botoes_ver:
+        with col:
+            if st.button(label, key=f"wa_ver_{valor}", use_container_width=True,
+                         type="primary" if st.session_state.wa_ver_filtro == valor else "secondary"):
+                st.session_state.wa_ver_filtro = valor
+                st.rerun()
+
+    filtro_atual = st.session_state.wa_ver_filtro
+    if filtro_atual != "todos":
+        conversas = [c for c in conversas if info_por_conversa[c["telefone"]]["categoria"] == filtro_atual]
 
     col_lista, col_foco = st.columns([1, 2.2])
 
@@ -416,10 +558,15 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
             try:
                 online = listar_admins_online()
                 if online:
-                    nomes_online = ", ".join(o["nome"] for o in online)
+                    partes = []
+                    for o in online:
+                        if o.get("status") == "pausa":
+                            partes.append(f"{o['nome']} (🟠 {o.get('motivo_pausa','Pausa')})")
+                        else:
+                            partes.append(o["nome"])
                     st.markdown(_html(
                         f'<div style="font-size:0.75rem;color:#16A34A;margin-bottom:8px;">'
-                        f'<span class="wa-online-dot"></span>Online agora: {esc(nomes_online)}</div>'
+                        f'<span class="wa-online-dot"></span>Online agora: {esc(", ".join(partes))}</div>'
                     ), unsafe_allow_html=True)
             except Exception:
                 pass
@@ -430,8 +577,7 @@ def _render_whatsapp_atendimento(user, papel, todos_geral: list):
         for c in conversas:
             tel = c["telefone"]
             estado = _estado_conversa(c["ultima_msg_direcao"], c["ultima_msg_em"])
-            tel_norm = normalizar_telefone(tel)
-            tem_ticket = bool(_tickets_do_telefone(tel_norm, todos_geral))
+            tem_ticket = bool(info_por_conversa[tel]["tickets"])
 
             # [Grupo 1 · item 5] chave da linha carrega o estado calculado
             # (vermelho/laranja/azul) pro CSS já definido em mod_tickets.py
