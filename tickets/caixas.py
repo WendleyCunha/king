@@ -71,10 +71,15 @@ def _ordenar(tickets: list, ordem: str) -> list:
 
 
 def _render_card_ticket_caixa(t, box_label: str, key_sufixo: str, marcavel: bool):
-    """Card autossuficiente de um ticket dentro da Caixa por Motivo — não
-    depende de `tickets/strip.py`. Clicar no ID/assunto grava
-    `tk_ticket_aberto`, exatamente como a tirinha faria, e o orquestrador
-    (mod_tickets.py) cuida de transformar isso numa aba."""
+    """
+    [Ajuste visual] Card de ticket dentro de "Caixas por Motivo", agora
+    REAPROVEITANDO exatamente as mesmas classes CSS da tirinha usada em
+    "Filas" (`tkwrap_` pro botão + `.tk-stripbody` pro corpo) — já
+    definidas globalmente em mod_tickets.py. Não criei CSS novo: só
+    troquei o `st.container(key=...)` pra usar o prefixo `tkwrap_`, que
+    já tem todo o estilo (borda dourada à esquerda, cantos arredondados,
+    hover) pronto. Continua não dependendo de `tickets/strip.py`.
+    """
     tid = t.get("id")
     sv, sbg, sc, _ = STATUS_CFG.get(t.get("status","aberto"), ("—","#fff","#000","#000"))
     caminho = _caminho_motivo(t) or t.get("motivo_pai") or "—"
@@ -85,6 +90,15 @@ def _render_card_ticket_caixa(t, box_label: str, key_sufixo: str, marcavel: bool
     quem_abriu = t.get("aberto_por") or "—"
     com_atend = f" · com {', '.join(atend)}" if atend else ""
 
+    # Mesmo critério de borda piscante (vencido/atenção) já usado na
+    # tirinha de Filas — reaproveitado via sufixo do container key.
+    if ticket_vencido_pendente(t):
+        prefixo_wrap = "tkwrap_venc_"
+    elif sla_foi_perdido(t):
+        prefixo_wrap = "tkwrap_warn_"
+    else:
+        prefixo_wrap = "tkwrap_"
+
     marcado = False
     col_chk, col_corpo = (st.columns([0.06, 0.94]) if marcavel else (None, st))
     if marcavel:
@@ -92,22 +106,25 @@ def _render_card_ticket_caixa(t, box_label: str, key_sufixo: str, marcavel: bool
             marcado = st.checkbox("", key=f"caixa_sel_{key_sufixo}_{tid}", label_visibility="collapsed")
 
     with col_corpo:
-        if st.button(f"#{esc(t.get('id_zendesk', str(tid)[:8]))} · {esc(t.get('assunto','—'))}",
-                     key=f"caixa_abrir_{key_sufixo}_{tid}", use_container_width=True):
-            st.session_state.tk_ticket_aberto = tid
-            st.rerun()
-        st.markdown(_html(f"""
-        <div style="font-size:0.78rem;color:#64778d;margin:-4px 0 2px;">
-            {esc(quem_abriu)} · cód. {esc(cli_cod)} · {esc(dep.lower())} · {esc(criado)}{esc(com_atend)}
-        </div>
-        <div style="font-size:0.78rem;color:#7a5f1a;margin-bottom:6px;">
-            classificado {esc(caminho)} · vive em <b>{esc(box_label)}</b>
-        </div>
-        <div style="margin-bottom:10px;">
-            <span style="background:{sbg};color:{sc};padding:2px 10px;border-radius:12px;
-                        font-size:0.72rem;font-weight:700;">{esc(sv)}</span>
-        </div>
-        """), unsafe_allow_html=True)
+        with st.container(key=f"{prefixo_wrap}caixa_{key_sufixo}_{tid}"):
+            if st.button(f"#{esc(t.get('id_zendesk', str(tid)[:8]))} · {esc(t.get('assunto','—'))}",
+                         key=f"caixa_abrir_{key_sufixo}_{tid}", use_container_width=True):
+                st.session_state.tk_ticket_aberto = tid
+                st.rerun()
+            st.markdown(_html(f"""
+            <div class="tk-stripbody">
+                <span class="tk-strip-meta">
+                    {esc(quem_abriu)} · cód. {esc(cli_cod)} · {esc(dep.lower())} · {esc(criado)}{esc(com_atend)}
+                </span><br>
+                <span class="tk-strip-meta" style="color:#7a5f1a;">
+                    classificado {esc(caminho)} · vive em <b>{esc(box_label)}</b>
+                </span>
+                <div class="tk-strip-bottom">
+                    <span style="background:{sbg};color:{sc};padding:2px 10px;border-radius:12px;
+                                font-size:0.72rem;font-weight:700;">{esc(sv)}</span>
+                </div>
+            </div>
+            """), unsafe_allow_html=True)
 
     return marcado
 
