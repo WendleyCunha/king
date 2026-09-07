@@ -504,22 +504,21 @@ def _detalhe_corpo(t, tid, user, papel):
         pendencias_badges += (f' <span class="tk-setor-pill" style="background:{cor_pend};">'
                               f'📨 aguarda {esc(pend.get("setor_destino",""))}</span>')
 
-    # ── (1) JOB BAR — mesmo conteúdo de sempre, classe nova (tk-jobbar)
-    # só pro acabamento visual (ver CSS em mod_tickets.py). ──
+    # ── (1) JOB BAR — [v31] compactada pra 2 linhas: título+badges na
+    # linha 1, todos os metadados numa única linha fluida na linha 2
+    # (mesmo conteúdo de sempre, só reorganizado — nada foi removido). ──
     st.markdown(_html(f"""
     <div class="tk-jobbar" style="border-left:6px solid {sla_cor if pendente_vencido else '#C9A84C'};">
-        <h3 style="margin:0 0 6px;color:#2c3e50;">#{id_vis} — {titulo}</h3>
-        <div style="margin-bottom:10px;">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:4px;">
+            <b style="color:#2c3e50;font-size:0.95rem;">#{id_vis} — {titulo}</b>
             {pill(sv,sbg,sc)} {pill(pv,pbg,pc)} {sla1_badge}{pendencias_badges}
-            <span style="font-size:0.78rem;color:#64778d;margin-left:8px;">
-                🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
-            </span>
         </div>
-        <div style="font-size:0.8rem;color:#2c3e50;margin-bottom:6px;">
-            🧾 Cliente: <b>{cli_nome}</b> &nbsp;·&nbsp; Código: <b>{cli_cod}</b>
-        </div>
-        <div style="font-size:0.78rem;color:#64778d;margin-bottom:8px;">
-            🙋 Solicitante: {solicit} &nbsp;·&nbsp; 👥 Atendentes: {atend_str}
+        <div style="font-size:0.76rem;color:#64778d;white-space:normal;line-height:1.5;">
+            🏢 {dep} &nbsp;·&nbsp; 📂 {caminho_mot} &nbsp;·&nbsp; {criado}
+            &nbsp;·&nbsp; 🧾 Cliente: <b style="color:#2c3e50;">{cli_nome}</b>
+            &nbsp;·&nbsp; Código: <b style="color:#2c3e50;">{cli_cod}</b>
+            &nbsp;·&nbsp; 🙋 Solicitante: {solicit}
+            &nbsp;·&nbsp; 👥 {atend_str}
             &nbsp;·&nbsp; ⏱ {esc(sla_label(t))}: <b style="color:{sla_cor};">{esc(sl)}</b>
         </div>
     </div>"""), unsafe_allow_html=True)
