@@ -166,6 +166,16 @@ st.markdown("""
 section[data-testid="stSidebar"] {
     background-color: #ffffff !important;
     border-right: 1px solid #dbe2e9 !important;
+    /* [v30] Persistente igual à toolbar de Tickets: fica fixa ao rolar,
+       nunca sobe/soma junto com o conteúdo principal. A sidebar nativa do
+       Streamlit já tende a se comportar assim, mas isto garante
+       explicitamente (mesmo princípio de position:sticky já usado nas
+       barras de Tickets), com scroll PRÓPRIO dela caso a lista de Filas
+       cresça além da tela. */
+    position: sticky !important;
+    top: 0 !important;
+    height: 100vh !important;
+    overflow-y: auto !important;
 }
 section[data-testid="stSidebar"] .stButton > button {
     border: 1px solid #e2e8f0 !important;
