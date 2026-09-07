@@ -285,24 +285,48 @@ def _render_estilo_paineis_redimensionaveis():
     /* [v26] Toolbar compacta — substitui o antigo "Painel de Tickets".
        Card branco, uma linha só, botões pequenos (mesmo princípio visual
        dos chips de "Ver" já usados no resto do sistema). */
+    /* [v29] Sticky logo ABAIXO da barra de abas (que já é sticky, top:118px,
+       ~38px de altura) — os dois ficam empilhados e fixos ao rolar. */
     div[class*="st-key-tk_toolbar"] {
+        position: sticky;
+        top: 156px;
+        z-index: 997;
         background: #FFFFFF;
         border: 1px solid #e2e8f0;
-        border-radius: 14px;
-        padding: 8px 14px;
-        margin-bottom: 14px;
+        border-radius: 10px;
+        padding: 6px 12px;
+        margin-bottom: 8px;
         box-shadow: 0 3px 10px rgba(0,0,0,0.06);
     }
+    /* [v29] Mesmo "hack" de flex já usado nos botões de view antigos:
+       transforma a fileira rígida de `st.columns` numa fileira flexível
+       que QUEBRA LINHA em vez de sobrepor/cortar texto (era a causa do
+       "Busca r" quebrado ao meio) — cada botão vira largura automática,
+       não mais uma fração fixa da tela. */
+    div[class*="st-key-tk_toolbar"] div[data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 6px !important;
+        row-gap: 6px !important;
+        align-items: center !important;
+    }
+    div[class*="st-key-tk_toolbar"] div[data-testid="stColumn"] {
+        width: auto !important;
+        flex: 0 0 auto !important;
+        min-width: 0 !important;
+    }
     div[class*="st-key-tk_toolbar"] button {
-        font-size: 0.8rem !important;
+        font-size: 0.78rem !important;
         padding: 4px 10px !important;
-        min-height: 32px !important;
-        height: 32px !important;
-        border-radius: 16px !important;
+        min-height: 30px !important;
+        height: 30px !important;
+        border-radius: 15px !important;
+        white-space: nowrap !important;
     }
     div[class*="st-key-tk_toolbar"] input {
-        min-height: 32px !important;
-        font-size: 0.85rem !important;
+        min-height: 30px !important;
+        font-size: 0.82rem !important;
+        width: 180px !important;
     }
     .tk-painel-topo-titulo {
         font-size: 0.74rem; font-weight: 800; color: #7a5f1a;
@@ -352,9 +376,9 @@ def _render_estilo_paineis_redimensionaveis():
     .tk-jobbar {
         background: linear-gradient(180deg, #ffffff 0%, #fdfaf3 100%);
         border: 1px solid #ecdfc9;
-        border-radius: 12px;
-        padding: 16px 18px;
-        margin-bottom: 14px;
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
         box-shadow: 0 3px 12px rgba(61,31,16,0.07);
         /* [Grupo 1 · item 3] Congela a job bar no topo da coluna de
            Detalhe enquanto o resto rola por dentro (a coluna já tem
@@ -432,13 +456,28 @@ def _render_estilo_paineis_redimensionaveis():
     /* ═══════════════════════════════════════════════════════════
        [v21] BARRA DE ABAS ESTILO NAVEGADOR — um ticket por aba,
        cantos arredondados só em cima, a aba ativa "levantada" (fundo
-       branco, sem borda inferior) e as inativas em cinza — mesmo
-       princípio visual de abas de navegador/editor de código.
-       ═══════════════════════════════════════════════════════════ */
+    /* [v29] Sticky — a barra de ABAS fica fixa logo abaixo da navbar
+       global (que já é sticky no main.py, z-index:999). z-index menor
+       aqui garante que a navbar sempre fique por cima ao sobrepor
+       durante a rolagem. `top` é uma estimativa da altura da navbar +
+       menu horizontal (main.py) — ajuste se sobrar/faltar encaixe. */
     div[class*="st-key-tk_abas_bar"] {
+        position: sticky;
+        top: 118px;
+        z-index: 998;
+        background: #f4f6f9;
         border-bottom: 2px solid #C9A84C;
-        margin-bottom: 0;
-        padding-bottom: 0;
+        margin-bottom: 6px;
+        padding: 4px 0 0;
+    }
+    /* [v29] Abas + botão "X" fundidos visualmente — gap mínimo entre os
+       dois elementos do MESMO ticket, e quebra de linha (flex-wrap) pra
+       não sobrepor quando há muitas abas abertas. */
+    div[class*="st-key-tk_abas_bar"] div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 3px !important;
+        row-gap: 6px !important;
+        align-items: center !important;
     }
     div[class*="st-key-tk_aba_"] button {
         border-radius: 8px 8px 0 0 !important;
@@ -448,13 +487,25 @@ def _render_estilo_paineis_redimensionaveis():
         color: #64778d !important;
         font-weight: 600 !important;
         font-size: 0.82rem !important;
-        padding: 6px 10px !important;
+        padding: 5px 9px !important;
+        min-height: 30px !important;
+        height: 30px !important;
+        white-space: nowrap !important;
     }
     div[class*="st-key-tk_aba_"] button[kind="primary"] {
         background: #ffffff !important;
         color: #2c3e50 !important;
         border-color: #C9A84C !important;
         box-shadow: 0 -2px 0 0 #C9A84C inset !important;
+    }
+    /* O botão "✕" (fechar) vira a "outra metade" do mesmo pill — sem
+       borda esquerda, cantos do lado esquerdo retos, encostado na aba. */
+    div[class*="st-key-tk_aba_fechar_"] button {
+        border-left: none !important;
+        border-radius: 0 8px 0 0 !important;
+        padding: 5px 8px !important;
+        min-height: 30px !important;
+        height: 30px !important;
     }
 
     /* ═══════════════════════════════════════════════════════════
@@ -871,93 +922,100 @@ def renderizar_tickets(papel: str, user: dict = None):
     # via st.markdown — a técnica muda, o resultado visual (uma linha só,
     # compacta) é o mesmo.
     #
-    # [v27] Ampliada: agora reúne TAMBÉM os atalhos que antes moravam na
-    # coluna "Ações" (Pular urgente, WhatsApp Atendimento, Visão Geral,
-    # Sync) — tudo numa barra só, como pedido. O widget de Status
-    # (Online/Pausa) NÃO foi duplicado aqui: já vive no cabeçalho global
-    # (main.py), visível em qualquer tela, inclusive esta.
-    if modo not in ("whats", "caixas"):
-        if "tk_status_filtro" not in st.session_state:
-            st.session_state.tk_status_filtro = "todos"
-        if "tk_busca_termo" not in st.session_state:
-            st.session_state.tk_busca_termo = ""
+    # [v29] SEMPRE visível agora — antes sumia em "whats"/"caixas", o que
+    # foi apontado como erro de fluxo. A barra de status/atalhos/ações
+    # precisa ser 100% persistente, então a condição que escondia ela
+    # nesses dois modos foi removida. O widget de Status (Online/
+    # Offline/Pausa) também MUDOU de lugar: saiu do cabeçalho global
+    # (main.py) e agora é o primeiro item desta barra, como pedido —
+    # um botão único com popover.
+    if "tk_status_filtro" not in st.session_state:
+        st.session_state.tk_status_filtro = "todos"
+    if "tk_busca_termo" not in st.session_state:
+        st.session_state.tk_busca_termo = ""
 
-        with st.container(key="tk_toolbar"):
-            tb = st.columns([1.1, 1.3, 0.9, 0.7, 1.0, 1.5, 1.3, 1.3, 0.8, 2.0, 0.8, 1.5])
-            categorias_status = [
-                (tb[0], "aberto", "Aguardando equipe"),
-                (tb[1], "em_andamento", "Em tratamento interno"),
-                (tb[2], "resolvido", "Concluído"),
-                (tb[3], "todos", "Todos"),
-            ]
-            for col, valor, label in categorias_status:
-                with col:
-                    ativo_status = st.session_state.tk_status_filtro == valor
-                    if st.button(label, key=f"tb_status_{valor}", use_container_width=True,
-                                 type="primary" if ativo_status else "secondary"):
-                        st.session_state.tk_status_filtro = valor
-                        st.rerun()
-            with tb[4]:
-                if st.button("📋 Filas", key="tb_ver_filas", use_container_width=True,
-                             type="primary" if modo in ("lista", None) else "secondary"):
-                    st.session_state.tk_modo = "lista"; st.rerun()
-            with tb[5]:
-                candidatos = f_venc or f_urg or meus
-                if candidatos and st.button("⏭️ Mais urgente", key="tb_pular_urgente",
-                                            use_container_width=True):
-                    mais_urgente = min(candidatos, key=lambda t: t.get("criado_em", ""))
-                    st.session_state.tk_ticket_aberto = mais_urgente.get("id")
-                    st.session_state.tk_modo = "lista"
+    with st.container(key="tk_toolbar"):
+        tb = st.columns([1.3, 1.1, 1.3, 0.9, 0.7, 1.0, 1.5, 1.3, 1.3, 0.8, 2.0, 0.8, 1.5])
+        with tb[0]:
+            _render_widget_status(user)
+        categorias_status = [
+            (tb[1], "aberto", "Aguardando equipe"),
+            (tb[2], "em_andamento", "Em tratamento interno"),
+            (tb[3], "resolvido", "Concluído"),
+            (tb[4], "todos", "Todos"),
+        ]
+        for col, valor, label in categorias_status:
+            with col:
+                ativo_status = st.session_state.tk_status_filtro == valor
+                if st.button(label, key=f"tb_status_{valor}", use_container_width=True,
+                             type="primary" if ativo_status else "secondary"):
+                    st.session_state.tk_status_filtro = valor
                     st.rerun()
-            with tb[6]:
-                if st.button("💬 WhatsApp", key="tb_whats", use_container_width=True,
-                             type="primary" if modo == "whats" else "secondary"):
-                    st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
-            with tb[7]:
-                if papel in ("supervisor", "adm"):
-                    if st.button("📊 Visão Geral", key="tb_visao_geral", use_container_width=True,
-                                 type="primary" if modo == "equipe" else "secondary"):
-                        st.session_state.tk_modo = "equipe"; st.session_state.tk_ticket_aberto = None; st.rerun()
-            with tb[8]:
-                if papel == "adm":
-                    if st.button("🔄 Sync", key="tb_sync", use_container_width=True):
-                        st.session_state.tk_modo = "sync"; st.session_state.tk_ticket_aberto = None; st.rerun()
-            with tb[9]:
-                termo_busca = st.text_input("Busca", value=st.session_state.tk_busca_termo,
-                                            placeholder="Número, CPF, pedido...",
-                                            label_visibility="collapsed", key="tk_busca_input")
-            with tb[10]:
-                if st.button("Buscar", key="tb_buscar", use_container_width=True):
-                    st.session_state.tk_busca_termo = termo_busca
-                    st.rerun()
-            with tb[11]:
-                if st.button("+ Abrir atendimento", key="tb_abrir", use_container_width=True,
-                             type="primary"):
-                    st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None
-                    st.rerun()
+        with tb[5]:
+            if st.button("📋 Filas", key="tb_ver_filas", use_container_width=True,
+                         type="primary" if modo in ("lista", None) else "secondary"):
+                st.session_state.tk_modo = "lista"; st.rerun()
+        with tb[6]:
+            candidatos = f_venc or f_urg or meus
+            if candidatos and st.button("⏭️ Mais urgente", key="tb_pular_urgente",
+                                        use_container_width=True):
+                mais_urgente = min(candidatos, key=lambda t: t.get("criado_em", ""))
+                st.session_state.tk_ticket_aberto = mais_urgente.get("id")
+                st.session_state.tk_modo = "lista"
+                st.rerun()
+        with tb[7]:
+            if st.button("💬 WhatsApp", key="tb_whats", use_container_width=True,
+                         type="primary" if modo == "whats" else "secondary"):
+                st.session_state.tk_modo = "whats"; st.session_state.tk_ticket_aberto = None; st.rerun()
+        with tb[8]:
+            if papel in ("supervisor", "adm"):
+                if st.button("📊 Visão Geral", key="tb_visao_geral", use_container_width=True,
+                             type="primary" if modo == "equipe" else "secondary"):
+                    st.session_state.tk_modo = "equipe"; st.session_state.tk_ticket_aberto = None; st.rerun()
+        with tb[9]:
+            if papel == "adm":
+                if st.button("🔄 Sync", key="tb_sync", use_container_width=True):
+                    st.session_state.tk_modo = "sync"; st.session_state.tk_ticket_aberto = None; st.rerun()
+        with tb[10]:
+            termo_busca = st.text_input("Busca", value=st.session_state.tk_busca_termo,
+                                        placeholder="Número, CPF, pedido...",
+                                        label_visibility="collapsed", key="tk_busca_input")
+        with tb[11]:
+            if st.button("Buscar", key="tb_buscar", use_container_width=True):
+                st.session_state.tk_busca_termo = termo_busca
+                st.rerun()
+        with tb[12]:
+            if st.button("+ Abrir atendimento", key="tb_abrir", use_container_width=True,
+                         type="primary"):
+                st.session_state.tk_modo = "novo"; st.session_state.tk_ticket_aberto = None
+                st.rerun()
 
-        # Aplica o filtro de status (Aguardando equipe/Em tratamento
-        # interno/Concluído/Todos) nos buckets ANTES de passar pra lista —
-        # concluído junta os 3 status finais (resolvido/finalizado/cancelado).
-        _filtro_status = st.session_state.tk_status_filtro
-        if _filtro_status != "todos":
-            _alvo = ("resolvido", "finalizado", "cancelado") if _filtro_status == "resolvido" else (_filtro_status,)
-            meus      = [t for t in meus      if t.get("status") in _alvo]
-            f_abertos = [t for t in f_abertos if t.get("status") in _alvo]
-            f_andam   = [t for t in f_andam   if t.get("status") in _alvo]
-            f_urg     = [t for t in f_urg     if t.get("status") in _alvo]
-            f_venc    = [t for t in f_venc    if t.get("status") in _alvo]
+    # [v29] O filtro de status/busca só faz sentido sobre as listas de
+    # ticket (modo "lista") — aplicar em "whats"/"caixas"/"novo"/etc. não
+    # quebra nada (essas listas não são usadas nesses modos), então fica
+    # incondicional por simplicidade, sem duplicar lógica.
+    # Aplica o filtro de status (Aguardando equipe/Em tratamento
+    # interno/Concluído/Todos) nos buckets ANTES de passar pra lista —
+    # concluído junta os 3 status finais (resolvido/finalizado/cancelado).
+    _filtro_status = st.session_state.tk_status_filtro
+    if _filtro_status != "todos":
+        _alvo = ("resolvido", "finalizado", "cancelado") if _filtro_status == "resolvido" else (_filtro_status,)
+        meus      = [t for t in meus      if t.get("status") in _alvo]
+        f_abertos = [t for t in f_abertos if t.get("status") in _alvo]
+        f_andam   = [t for t in f_andam   if t.get("status") in _alvo]
+        f_urg     = [t for t in f_urg     if t.get("status") in _alvo]
+        f_venc    = [t for t in f_venc    if t.get("status") in _alvo]
 
-        # Aplica a busca (número, CPF, pedido, nome, assunto) por cima do
-        # que sobrou do filtro de status, usando `texto_busca` (já existe
-        # em tickets/common.py, mesma função usada em outras buscas).
-        if st.session_state.tk_busca_termo.strip():
-            _t = st.session_state.tk_busca_termo.strip().lower()
-            meus      = [x for x in meus      if _t in texto_busca(x)]
-            f_abertos = [x for x in f_abertos if _t in texto_busca(x)]
-            f_andam   = [x for x in f_andam   if _t in texto_busca(x)]
-            f_urg     = [x for x in f_urg     if _t in texto_busca(x)]
-            f_venc    = [x for x in f_venc    if _t in texto_busca(x)]
+    # Aplica a busca (número, CPF, pedido, nome, assunto) por cima do
+    # que sobrou do filtro de status, usando `texto_busca` (já existe
+    # em tickets/common.py, mesma função usada em outras buscas).
+    if st.session_state.tk_busca_termo.strip():
+        _t = st.session_state.tk_busca_termo.strip().lower()
+        meus      = [x for x in meus      if _t in texto_busca(x)]
+        f_abertos = [x for x in f_abertos if _t in texto_busca(x)]
+        f_andam   = [x for x in f_andam   if _t in texto_busca(x)]
+        f_urg     = [x for x in f_urg     if _t in texto_busca(x)]
+        f_venc    = [x for x in f_venc    if _t in texto_busca(x)]
 
     # [v26] Sidebar de Filas em accordion — usa o `st.sidebar` GLOBAL (o
     # mesmo da navegação de módulos no main.py), não a coluna "Ações"
