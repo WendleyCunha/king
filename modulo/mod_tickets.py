@@ -709,6 +709,7 @@ def _render_abas_topo(user, papel):
             if st.button("📋 Filas", key="tk_aba_lista", use_container_width=True,
                          type="primary" if ativo == "__lista__" else "secondary"):
                 st.session_state.tk_ticket_ativo = "__lista__"
+                st.session_state.tk_modo = "lista"
                 st.rerun()
 
         for i, tid in enumerate(visiveis):
@@ -719,6 +720,7 @@ def _render_abas_topo(user, papel):
                 if st.button(titulo_aba, key=f"tk_aba_{tid}", use_container_width=True,
                              type="primary" if tid == ativo else "secondary"):
                     st.session_state.tk_ticket_ativo = tid
+                    st.session_state.tk_modo = "lista"
                     st.rerun()
             with col_fechar:
                 if st.button("✕", key=f"tk_aba_fechar_{tid}", use_container_width=True):
@@ -910,14 +912,13 @@ def renderizar_tickets(papel: str, user: dict = None):
     # numa linha só. Construída com st.columns compactas (não Flexbox
     # cru) de propósito: botões e o campo de busca são widgets REAIS do
     # Streamlit, e não renderizam corretamente dentro de HTML injetado
-    # [v28] BARRA DE ABAS ESTILO NAVEGADOR — TOPO ABSOLUTO da área
-    # principal, ANTES até da toolbar (correção: estava depois, ficando
-    # numa posição intermediária). Inclui uma aba fixa "📋 Filas" (a
-    # lista de tickets) + uma aba por ticket aberto. Só aparece quando
-    # modo == "lista" (nos outros modos — novo/whats/caixas/equipe/sync
-    # — não faz sentido escolher entre lista/ticket).
-    if modo in ("lista", None):
-        _render_abas_topo(user, papel)
+    # [v31] BARRA DE ABAS ESTILO NAVEGADOR — TOPO ABSOLUTO da área
+    # principal, ANTES até da toolbar. Agora SEMPRE visível, em qualquer
+    # modo (novo/whats/caixas/equipe/sync incluídos) — não depende mais
+    # de estar no modo "lista", nem de clicar em "Filas" pra aparecer.
+    # Clicar numa aba (real ou "📋 Filas") já volta sozinho pro modo
+    # "lista" (ver _render_abas_topo), então o conteúdo aparece de fato.
+    _render_abas_topo(user, papel)
 
     # via st.markdown — a técnica muda, o resultado visual (uma linha só,
     # compacta) é o mesmo.
