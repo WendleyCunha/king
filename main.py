@@ -171,11 +171,11 @@ def _usuario_tem_acesso_erp() -> bool:
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.stApp { background-color: #f4f6f9; }
+.stApp { background-color: #F4F6F8; }
 .block-container { padding-top: 4rem !important; }
 
 section[data-testid="stSidebar"] {
-    background-color: #ffffff !important;
+    background-color: #F4F6F8 !important;
     border-right: 1px solid #dbe2e9 !important;
     position: sticky !important;
     top: 0 !important;
