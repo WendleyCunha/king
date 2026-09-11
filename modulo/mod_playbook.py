@@ -1,161 +1,160 @@
 """
-Plano de Eliminação de Custo — versão desktop (PyQt6)
+Módulo PLAYBOOK — "Ferramenta externa → solução interna".
 
-Recriação do checklist "Ferramenta externa -> solução interna" como
-aplicativo desktop, com estética retrô (Windows Classic / Motif, anos
-90): fundo cinza-carvão, texto branco, acentos azul-petróleo/teal,
-bordas em baixo-relevo (bevel) nítidas, sem sombras suaves nem cantos
-arredondados, fonte monoespaçada sem anti-aliasing.
+Mesma lógica do checklist reutilizável (14 fases: enquadramento →
+diagnóstico → desenho → desenvolvimento → migração → implantação →
+estabilização → encerramento do contrato anterior), agora vivendo dentro
+do Painel como módulo de verdade: dados no Firestore (reaproveita o
+`get_db()` de database.py — mesmo banco "portal", sem precisar criar
+banco novo nenhum), anexos, notas internas por item, e tema escuro/claro.
 
-As notas internas ficam sempre visíveis no card do item (não exigem
-clique pra aparecer), conforme pedido.
-
-Dados salvos localmente em ./playbook_dados.json (ao lado deste script).
-Rodar com:  python playbook_desktop.py
-Requer:     pip install PyQt6
+Coleções:
+  /playbook_iniciativas/{id} → { nome, ferramenta, solucao, responsavel,
+                                  custo_mensal, tema_preferido, criado_em,
+                                  fases: [ { titulo, gate, itens: [
+                                      { texto, status, nota_interna,
+                                        anexos: [{id, nome_arquivo,
+                                                  tamanho, tipo,
+                                                  enviado_por, enviado_em}]
+                                      } ] } ] }
+  /playbook_anexos/{id}      → { bin, nome_arquivo, tipo, tamanho,
+                                  iniciativa_id, enviado_por, enviado_em }
+    (arquivo binário separado da iniciativa pra não estourar o limite de
+    1 MiB por documento do Firestore à medida que anexos se acumulam)
 """
-import sys
-import os
-import json
-import uuid
+import streamlit as st
+import mimetypes
+from datetime import datetime, timezone, timedelta
 
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFrame,
-    QLabel, QPushButton, QComboBox, QLineEdit, QScrollArea, QToolButton,
-    QSizePolicy, QMessageBox, QInputDialog, QDoubleSpinBox, QGridLayout,
-)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QDoubleValidator
+from database import get_db
 
-# ═══════════════════════════════════════════════════════════════════
-# PALETA / ESTILO — Windows Classic / Motif escuro
-# ═══════════════════════════════════════════════════════════════════
-COR_FUNDO       = "#2c2c2c"   # cinza-carvão
-COR_PAINEL      = "#343434"
-COR_PAINEL_ALT  = "#3a3a3a"
-COR_TEXTO       = "#e8e8e8"
-COR_TEXTO_DIM   = "#9a9a9a"
-COR_TEAL        = "#2f8f89"   # acento azul-petróleo
-COR_TEAL_CLARO  = "#45b3ac"
-COR_BEVEL_CLARO = "#6a6a6a"
-COR_BEVEL_ESC   = "#141414"
-COR_ALERTA      = "#b5564d"
+BRT = timezone(timedelta(hours=-3))
+def _agora_iso(): return datetime.now(BRT).isoformat()
+def _agora_str(): return datetime.now(BRT).strftime("%d/%m/%Y %H:%M")
+
+COL_INICIATIVAS = "playbook_iniciativas"
+COL_ANEXOS = "playbook_anexos"
+TAMANHO_MAX_ANEXO = 900_000  # ~900 KB — folga dentro do limite de 1 MiB/doc do Firestore
 
 STATUS_OPCOES = ["pendente", "andamento", "solicitado", "feito", "bloqueado", "na"]
 STATUS_LABEL = {
-    "pendente": "PENDENTE", "andamento": "EM ANDAMENTO", "solicitado": "SOLICITADO",
-    "feito": "FEITO", "bloqueado": "BLOQUEADO", "na": "N/A",
+    "pendente": "Pendente", "andamento": "Em andamento", "solicitado": "Solicitado",
+    "feito": "Feito", "bloqueado": "Bloqueado", "na": "N/A",
 }
 STATUS_COR = {
-    "pendente": COR_TEXTO_DIM, "andamento": "#c9962f", "solicitado": "#4f8fc9",
-    "feito": COR_TEAL_CLARO, "bloqueado": COR_ALERTA, "na": "#6a6a6a",
+    "pendente": "#8b98a5", "andamento": "#e8a33d", "solicitado": "#6ea8d8",
+    "feito": "#4fb8ae", "bloqueado": "#d9695f", "na": "#5f6b78",
 }
 
-ARQUIVO_DADOS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playbook_dados.json")
+FASE_INDICE_GATE_INICIO = 10  # fases 11-14 (índice 10..13) dependem da Fase 7
 
 
+# ═══════════════════════════════════════════════════════════════════
+# MODELO PADRÃO (as 14 fases) — usado toda vez que uma iniciativa nova
+# é criada "a partir do modelo".
+# ═══════════════════════════════════════════════════════════════════
 def _item(texto):
-    return {"texto": texto, "status": "pendente", "nota_interna": ""}
+    return {"texto": texto, "status": "pendente", "nota_interna": "", "anexos": []}
 
 
 def modelo_base_fases():
     return [
-        {"titulo": "1. ENQUADRAMENTO E DECISAO", "gate": False, "itens": [
+        {"titulo": "1. Enquadramento e Decisão", "gate": False, "itens": [
             _item("Consolidar o custo atual da ferramenta externa vs. custo de construir e manter internamente"),
             _item("Buscar valor atualizado com o fornecedor/financeiro"),
             _item("Realizar o levantamento do investimento técnico com o TI"),
-            _item("Levantar com o Jurídico o prazo de aviso prévio e cláusulas críticas do contrato atual"),
+            _item("Levantar com o Jurídico o prazo de aviso prévio e cláusulas críticas do contrato atual, para calibrar o cronograma"),
             _item("Coletar contratos e aditivos vigentes"),
             _item("Fornecer contratos/aditivos ao Jurídico com prazo definido para avaliação"),
             _item("Definir a arquitetura da solução interna"),
             _item("Validar e aprovar o enquadramento com os Heads"),
-            _item("Registrar a decisão formalmente e iniciar a Fase 2"),
+            _item("Registrar a decisão formalmente e iniciar a Fase 2 (se reprovado, revisar o projeto)"),
         ]},
-        {"titulo": "2. DIAGNOSTICO E LEVANTAMENTO (AS IS)", "gate": False, "itens": [
+        {"titulo": "2. Diagnóstico e Levantamento (AS IS)", "gate": False, "itens": [
             _item("Mapear todas as funcionalidades hoje usadas na ferramenta externa"),
             _item("Aplicar o formulário de diagnóstico ao administrador da ferramenta"),
             _item("Aplicar o formulário de levantamento aos usuários finais das áreas envolvidas"),
-            _item("Levantar volumetria e indicadores de uso relevantes"),
-            _item("Consultar o Financeiro para confirmar valores e cobranças adicionais"),
+            _item("Levantar volumetria e indicadores de uso relevantes (volume/mês, taxa de resposta, SLA, etc.)"),
+            _item("Consultar o Financeiro para confirmar quanto a empresa paga hoje, como é calculado e se há cobranças adicionais"),
             _item("Consolidar o diagnóstico e submeter para aprovação"),
         ]},
-        {"titulo": "3. DESENHO DA SOLUCAO (TO BE)", "gate": False, "itens": [
+        {"titulo": "3. Desenho da Solução (TO BE)", "gate": False, "itens": [
             _item("Desenhar o fluxo/jornada completa, com regras de disparo por canal e frequência"),
             _item("Construir a Matriz de Gaps (ferramenta externa x solução interna)"),
             _item("Desenhar a arquitetura de integração com os canais necessários"),
             _item("Desenhar o modelo de dados único atravessando as etapas"),
-            _item("Desenhar o processo de tratativa/fechamento de loop"),
+            _item("Desenhar o processo de tratativa/fechamento de loop (dono, prazo, escalonamento)"),
             _item("Submeter o desenho para revisão de LGPD/Jurídico"),
             _item("Aprovar o desenho"),
         ]},
-        {"titulo": "4. DESENVOLVIMENTO/PARAMETRIZACAO", "gate": False, "itens": [
+        {"titulo": "4. Desenvolvimento/Parametrização", "gate": False, "itens": [
             _item("Priorizar as ondas de construção"),
             _item("Desenvolver/parametrizar cada onda conforme o desenho aprovado"),
             _item("Acompanhar o orçamento de desenvolvimento vs. TCO projetado"),
             _item("Testar cada onda antes de liberar para migração"),
             _item("Obter aprovação por onda entregue"),
         ]},
-        {"titulo": "5. MIGRACAO E TESTES", "gate": False, "itens": [
+        {"titulo": "5. Migração e Testes", "gate": False, "itens": [
             _item("Rodar cada etapa em paralelo com a ferramenta externa pelo período mínimo definido"),
-            _item("Comparar indicadores entre as duas ferramentas"),
+            _item("Comparar indicadores entre as duas ferramentas (taxa de resposta, tempo de tratativa)"),
             _item("Migrar ou preservar acesso ao histórico de dados"),
             _item("Validar critérios de aceite por onda"),
             _item("Aprovar formalmente cada onda migrada"),
         ]},
-        {"titulo": "6. IMPLANTACAO", "gate": False, "itens": [
+        {"titulo": "6. Implantação", "gate": False, "itens": [
             _item("Treinar cada área envolvida na nova ferramenta"),
             _item("Comunicar o RACI de quem trata cada frente"),
-            _item("Ativar a ferramenta em produção, etapa por etapa"),
+            _item("Ativar a ferramenta em produção, etapa por etapa, substituindo a ferramenta externa"),
             _item("Validar que os dados estão sendo capturados corretamente após a ativação"),
         ]},
-        {"titulo": "7. ESTABILIZACAO", "gate": False, "itens": [
-            _item("Acompanhar indicadores de aderência"),
+        {"titulo": "7. Estabilização", "gate": False, "itens": [
+            _item("Acompanhar indicadores de aderência (taxa de resposta, SLA de tratativa)"),
             _item("Coletar e tratar feedback das áreas usuárias nas primeiras semanas"),
             _item("Ajustar parametrizações/regras identificadas como problema"),
-            _item("Obter aprovação final de estabilização — libera o cancelamento da ferramenta externa"),
+            _item("Obter aprovação final de estabilização — libera o início do cancelamento da ferramenta externa"),
         ]},
-        {"titulo": "8. REVISAR CLAUSULAS CONTRATUAIS DO CONTRATO ANTERIOR", "gate": False, "itens": [
+        {"titulo": "8. Revisar cláusulas contratuais do contrato anterior", "gate": False, "itens": [
             _item("Localizar o contrato vigente e eventuais aditivos"),
             _item("Identificar o prazo de aviso prévio exigido"),
-            _item("Identificar multa rescisória, se houver"),
+            _item("Identificar multa rescisória, se houver, e sua condição de aplicação"),
             _item("Identificar vigência mínima e data de renovação automática"),
-            _item("Identificar a forma exigida de notificação"),
+            _item("Identificar a forma exigida de notificação (e-mail, carta, portal)"),
             _item("Repassar o levantamento ao Financeiro"),
         ]},
-        {"titulo": "9. LEVANTAR SITUACAO FINANCEIRA DO CONTRATO ANTERIOR", "gate": False, "itens": [
+        {"titulo": "9. Levantar situação financeira do contrato anterior", "gate": False, "itens": [
             _item("Levantar faturas em aberto e status de pagamento"),
             _item("Confirmar o ciclo de cobrança vigente"),
             _item("Calcular o valor de eventual multa rescisória"),
             _item("Consolidar o valor total do encerramento"),
         ]},
-        {"titulo": "10. EXPORTAR E VALIDAR BACKUP DO HISTORICO DE DADOS", "gate": False, "itens": [
+        {"titulo": "10. Exportar e validar backup do histórico de dados", "gate": False, "itens": [
             _item("Levantar todos os dados históricos existentes"),
             _item("Executar a extração completa dos dados na plataforma"),
-            _item("Validar a integridade do que foi exportado"),
+            _item("Validar a integridade do que foi exportado (comparar volumetria exportada vs. conhecida)"),
             _item("Armazenar o backup em local definitivo e seguro"),
             _item("Confirmar formalmente que o backup está validado"),
         ]},
-        {"titulo": "11. ENVIO DA NOTIFICACAO DE AVISO PREVIO", "gate": True, "itens": [
+        {"titulo": "11. Envio da notificação de aviso prévio", "gate": True, "itens": [
             _item("Confirmar que o backup do histórico já foi validado"),
             _item("Redigir a notificação conforme a forma exigida pelo contrato"),
             _item("Validar o texto com o Jurídico"),
             _item("Enviar a notificação dentro do prazo contratual de aviso prévio"),
             _item("Guardar o comprovante de envio/protocolo"),
         ]},
-        {"titulo": "12. DESATIVAR USUARIOS, INTEGRACOES E CREDENCIAIS", "gate": True, "itens": [
+        {"titulo": "12. Desativar usuários, remover integrações e revogar credenciais", "gate": True, "itens": [
             _item("Confirmar que a notificação já foi enviada e o prazo contratual está em curso"),
             _item("Levantar todos os usuários com acesso à plataforma"),
             _item("Remover/desativar integrações ativas"),
             _item("Revogar credenciais e acessos de API"),
             _item("Confirmar o encerramento técnico completo com TI"),
         ]},
-        {"titulo": "13. CONFIRMAR AUSENCIA DE COBRANCAS E ARQUIVAR COMPROVANTE", "gate": True, "itens": [
+        {"titulo": "13. Confirmar ausência de cobranças e arquivar comprovante", "gate": True, "itens": [
             _item("Solicitar ao fornecedor o comprovante formal de cancelamento"),
             _item("Confirmar com o Financeiro que não há cobranças futuras programadas"),
             _item("Arquivar contrato, aditivos, notificação enviada e comprovante"),
             _item("Encerrar formalmente o processo junto ao Financeiro/Jurídico"),
         ]},
-        {"titulo": "14. NOTIFICAR AREAS SOBRE A DESATIVACAO", "gate": True, "itens": [
+        {"titulo": "14. Notificar áreas sobre a desativação", "gate": True, "itens": [
             _item("Confirmar que a desativação técnica (Fase 12) foi concluída"),
             _item("Comunicar as áreas envolvidas sobre a desativação"),
             _item("Reforçar o canal de suporte para dúvidas sobre a ferramenta nova"),
@@ -165,558 +164,361 @@ def modelo_base_fases():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PERSISTÊNCIA (JSON local)
+# FIRESTORE — CRUD
 # ═══════════════════════════════════════════════════════════════════
-class Armazenamento:
-    def __init__(self, caminho):
-        self.caminho = caminho
-
-    def carregar(self):
-        if not os.path.exists(self.caminho):
-            return {"iniciativas": [], "ativa_id": None}
-        try:
-            with open(self.caminho, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {"iniciativas": [], "ativa_id": None}
-
-    def salvar(self, estado):
-        try:
-            with open(self.caminho, "w", encoding="utf-8") as f:
-                json.dump(estado, f, ensure_ascii=False, indent=2)
-        except OSError as e:
-            QMessageBox.warning(None, "Aviso", f"Não foi possível salvar os dados:\n{e}")
+@st.cache_data(ttl=20, show_spinner=False)
+def listar_iniciativas_playbook_db() -> list:
+    """Lista leve (id + nome), usada só pra montar o seletor."""
+    docs = get_db().collection(COL_INICIATIVAS).stream()
+    out = [{"id": d.id, "nome": d.to_dict().get("nome", "(sem nome)")} for d in docs]
+    return sorted(out, key=lambda x: x["nome"])
 
 
-# ═══════════════════════════════════════════════════════════════════
-# FOLHA DE ESTILO (QSS) — bordas em bevel, sem cantos arredondados
-# ═══════════════════════════════════════════════════════════════════
-def folha_de_estilo():
-    return f"""
-    QWidget {{
-        background-color: {COR_FUNDO};
-        color: {COR_TEXTO};
-    }}
-    QMainWindow {{ background-color: {COR_FUNDO}; }}
-
-    QLabel {{ background: transparent; }}
-    QLabel[papel="titulo_fase"] {{
-        color: {COR_TEAL_CLARO}; font-weight: bold;
-    }}
-    QLabel[papel="kpi_label"] {{
-        color: {COR_TEXTO_DIM}; font-size: 9pt;
-    }}
-    QLabel[papel="kpi_valor"] {{
-        color: {COR_TEAL_CLARO}; font-size: 15pt; font-weight: bold;
-    }}
-    QLabel[papel="rotulo_campo"] {{
-        color: {COR_TEXTO_DIM}; font-size: 8pt;
-    }}
-    QLabel[papel="gate"] {{
-        color: {COR_ALERTA};
-        border: 2px solid {COR_ALERTA};
-        padding: 4px;
-    }}
-
-    QFrame[papel="painel"] {{
-        background-color: {COR_PAINEL};
-        border-style: outset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_CLARO} {COR_BEVEL_ESC} {COR_BEVEL_ESC} {COR_BEVEL_CLARO};
-    }}
-    QFrame[papel="kpi_box"] {{
-        background-color: {COR_PAINEL_ALT};
-        border-style: inset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_ESC} {COR_BEVEL_CLARO} {COR_BEVEL_CLARO} {COR_BEVEL_ESC};
-        padding: 6px;
-    }}
-    QFrame[papel="item_card"] {{
-        background-color: {COR_PAINEL_ALT};
-        border-style: outset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_CLARO} {COR_BEVEL_ESC} {COR_BEVEL_ESC} {COR_BEVEL_CLARO};
-    }}
-
-    QPushButton {{
-        background-color: #454545;
-        color: {COR_TEXTO};
-        border-style: outset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_CLARO} {COR_BEVEL_ESC} {COR_BEVEL_ESC} {COR_BEVEL_CLARO};
-        padding: 5px 12px;
-        border-radius: 0px;
-    }}
-    QPushButton:hover {{ background-color: #4d4d4d; }}
-    QPushButton:pressed {{
-        border-style: inset;
-        border-color: {COR_BEVEL_ESC} {COR_BEVEL_CLARO} {COR_BEVEL_CLARO} {COR_BEVEL_ESC};
-    }}
-    QPushButton[papel="perigo"]:hover {{ background-color: {COR_ALERTA}; }}
-
-    QToolButton {{
-        background-color: #454545;
-        border-style: outset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_CLARO} {COR_BEVEL_ESC} {COR_BEVEL_ESC} {COR_BEVEL_CLARO};
-        border-radius: 0px;
-        padding: 3px;
-        color: {COR_TEXTO};
-    }}
-    QToolButton:pressed {{
-        border-style: inset;
-        border-color: {COR_BEVEL_ESC} {COR_BEVEL_CLARO} {COR_BEVEL_CLARO} {COR_BEVEL_ESC};
-    }}
-
-    QComboBox {{
-        background-color: #3a3a3a;
-        color: {COR_TEXTO};
-        border-style: inset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_ESC} {COR_BEVEL_CLARO} {COR_BEVEL_CLARO} {COR_BEVEL_ESC};
-        padding: 3px 6px;
-        border-radius: 0px;
-    }}
-    QComboBox QAbstractItemView {{
-        background-color: #3a3a3a; color: {COR_TEXTO};
-        selection-background-color: {COR_TEAL};
-        border: 2px solid {COR_BEVEL_ESC};
-        border-radius: 0px;
-    }}
-    QComboBox::drop-down {{ border: none; width: 18px; }}
-
-    QLineEdit, QDoubleSpinBox {{
-        background-color: #262626;
-        color: {COR_TEAL_CLARO};
-        border-style: inset;
-        border-width: 2px;
-        border-color: {COR_BEVEL_ESC} {COR_BEVEL_CLARO} {COR_BEVEL_CLARO} {COR_BEVEL_ESC};
-        padding: 4px 6px;
-        border-radius: 0px;
-    }}
-    QLineEdit[papel="nota"] {{
-        color: {COR_TEXTO};
-        font-style: italic;
-    }}
-    QLineEdit[papel="nota"]:placeholder {{ color: {COR_TEXTO_DIM}; }}
-
-    QScrollArea {{ border: none; }}
-    QScrollBar:vertical {{
-        background: {COR_FUNDO}; width: 16px; border-left: 2px solid {COR_BEVEL_ESC};
-    }}
-    QScrollBar::handle:vertical {{
-        background: #4d4d4d; min-height: 24px;
-        border-style: outset; border-width: 1px;
-        border-color: {COR_BEVEL_CLARO} {COR_BEVEL_ESC} {COR_BEVEL_ESC} {COR_BEVEL_CLARO};
-    }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-    """
-
-
-def fonte_monoespacada(tamanho=9, negrito=False):
-    fam = ["Consolas", "Courier New", "Lucida Console", "monospace"]
-    fonte = QFont(fam[0], tamanho)
-    fonte.setStyleHint(QFont.StyleHint.Monospace)
-    fonte.setFamilies(fam)
-    fonte.setBold(negrito)
-    # Pedido explícito: renderização "não suavizada" — desliga antialiasing da fonte.
-    fonte.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
-    return fonte
-
-
-# ═══════════════════════════════════════════════════════════════════
-# WIDGETS
-# ═══════════════════════════════════════════════════════════════════
-class CardItem(QFrame):
-    alterado = pyqtSignal()
-
-    def __init__(self, item: dict, parent=None):
-        super().__init__(parent)
-        self.item = item
-        self.setProperty("papel", "item_card")
-        self.setFont(fonte_monoespacada(9))
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
-
-        linha1 = QHBoxLayout()
-        rotulo_texto = QLabel(item["texto"])
-        rotulo_texto.setWordWrap(True)
-        rotulo_texto.setFont(fonte_monoespacada(9))
-        linha1.addWidget(rotulo_texto, stretch=1)
-
-        self.combo_status = QComboBox()
-        self.combo_status.setFont(fonte_monoespacada(8))
-        for s in STATUS_OPCOES:
-            self.combo_status.addItem(STATUS_LABEL[s], s)
-        self.combo_status.setCurrentIndex(STATUS_OPCOES.index(item["status"]))
-        self.combo_status.currentIndexChanged.connect(self._mudou_status)
-        self.combo_status.setFixedWidth(150)
-        linha1.addWidget(self.combo_status)
-        layout.addLayout(linha1)
-
-        # Nota interna — SEMPRE visível no card (não fica escondida atrás de clique).
-        self.campo_nota = QLineEdit(item.get("nota_interna", ""))
-        self.campo_nota.setProperty("papel", "nota")
-        self.campo_nota.setFont(fonte_monoespacada(8))
-        self.campo_nota.setPlaceholderText("Nota interna...")
-        self.campo_nota.editingFinished.connect(self._mudou_nota)
-        layout.addWidget(self.campo_nota)
-
-        self._atualizar_cor_status()
-
-    def _mudou_status(self):
-        self.item["status"] = self.combo_status.currentData()
-        self._atualizar_cor_status()
-        self.alterado.emit()
-
-    def _mudou_nota(self):
-        self.item["nota_interna"] = self.campo_nota.text()
-        self.alterado.emit()
-
-    def _atualizar_cor_status(self):
-        cor = STATUS_COR[self.item["status"]]
-        self.combo_status.setStyleSheet(f"QComboBox {{ color: {cor}; }}")
-
-
-class PainelFase(QFrame):
-    alterado = pyqtSignal()
-
-    def __init__(self, fase: dict, indice: int, parent=None):
-        super().__init__(parent)
-        self.fase = fase
-        self.indice = indice
-        self.setProperty("papel", "painel")
-
-        layout_externo = QVBoxLayout(self)
-        layout_externo.setContentsMargins(2, 2, 2, 2)
-        layout_externo.setSpacing(4)
-
-        cabecalho = QHBoxLayout()
-        self.botao_toggle = QToolButton()
-        self.botao_toggle.setText("-")
-        self.botao_toggle.setFixedWidth(24)
-        self.botao_toggle.clicked.connect(self._alternar)
-        cabecalho.addWidget(self.botao_toggle)
-
-        titulo = QLabel(fase["titulo"])
-        titulo.setProperty("papel", "titulo_fase")
-        titulo.setFont(fonte_monoespacada(10, negrito=True))
-        cabecalho.addWidget(titulo, stretch=1)
-
-        self.rotulo_progresso = QLabel("")
-        self.rotulo_progresso.setFont(fonte_monoespacada(9))
-        cabecalho.addWidget(self.rotulo_progresso)
-        layout_externo.addLayout(cabecalho)
-
-        self.rotulo_gate = QLabel("BLOQUEADO ATE APROVACAO DA FASE 7 - ESTABILIZACAO")
-        self.rotulo_gate.setProperty("papel", "gate")
-        self.rotulo_gate.setFont(fonte_monoespacada(8, negrito=True))
-        self.rotulo_gate.setVisible(False)
-        layout_externo.addWidget(self.rotulo_gate)
-
-        self.corpo = QWidget()
-        layout_corpo = QVBoxLayout(self.corpo)
-        layout_corpo.setContentsMargins(16, 2, 2, 2)
-        layout_corpo.setSpacing(6)
-        self.cards = []
-        for item in fase["itens"]:
-            card = CardItem(item)
-            card.alterado.connect(self._propagar)
-            layout_corpo.addWidget(card)
-            self.cards.append(card)
-        layout_externo.addWidget(self.corpo)
-
-        self.atualizar_progresso(fase7_completa=True)
-
-    def _alternar(self):
-        visivel = not self.corpo.isVisible()
-        self.corpo.setVisible(visivel)
-        self.botao_toggle.setText("-" if visivel else "+")
-
-    def _propagar(self):
-        self.alterado.emit()
-
-    def progresso(self):
-        total = len(self.fase["itens"])
-        feitos = sum(1 for i in self.fase["itens"] if i["status"] in ("feito", "na"))
-        return feitos, total
-
-    def atualizar_progresso(self, fase7_completa: bool):
-        feitos, total = self.progresso()
-        marca = " [OK]" if total and feitos == total else ""
-        self.rotulo_progresso.setText(f"{feitos:02d}/{total:02d}{marca}")
-        mostrar_gate = self.fase.get("gate") and not fase7_completa
-        self.rotulo_gate.setVisible(mostrar_gate)
-
-
-class JanelaPrincipal(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.armazenamento = Armazenamento(ARQUIVO_DADOS)
-        self.estado = self.armazenamento.carregar()
-
-        self.setWindowTitle("PLANO DE ELIMINACAO DE CUSTO")
-        self.resize(880, 760)
-
-        central = QWidget()
-        self.setCentralWidget(central)
-        raiz = QVBoxLayout(central)
-        raiz.setContentsMargins(10, 10, 10, 10)
-        raiz.setSpacing(8)
-
-        # ── Cabeçalho / seletor de iniciativa ──
-        titulo_id = QLabel("PLAYBOOK :: REDUCAO DE CUSTO POR INTERNALIZACAO")
-        titulo_id.setFont(fonte_monoespacada(8))
-        titulo_id.setStyleSheet(f"color: {COR_TEXTO_DIM};")
-        raiz.addWidget(titulo_id)
-
-        barra_iniciativa = QHBoxLayout()
-        self.combo_iniciativas = QComboBox()
-        self.combo_iniciativas.setFont(fonte_monoespacada(9))
-        self.combo_iniciativas.currentIndexChanged.connect(self._trocar_iniciativa)
-        barra_iniciativa.addWidget(self.combo_iniciativas, stretch=1)
-
-        btn_nova = QPushButton("+ NOVA")
-        btn_nova.setFont(fonte_monoespacada(9))
-        btn_nova.clicked.connect(self._nova_iniciativa)
-        barra_iniciativa.addWidget(btn_nova)
-
-        btn_renomear = QPushButton("RENOMEAR")
-        btn_renomear.setFont(fonte_monoespacada(9))
-        btn_renomear.clicked.connect(self._renomear_iniciativa)
-        barra_iniciativa.addWidget(btn_renomear)
-
-        btn_excluir = QPushButton("EXCLUIR")
-        btn_excluir.setProperty("papel", "perigo")
-        btn_excluir.setFont(fonte_monoespacada(9))
-        btn_excluir.clicked.connect(self._excluir_iniciativa)
-        barra_iniciativa.addWidget(btn_excluir)
-        raiz.addLayout(barra_iniciativa)
-
-        # ── Campos de contexto ──
-        painel_meta = QFrame()
-        painel_meta.setProperty("papel", "painel")
-        grade_meta = QGridLayout(painel_meta)
-        grade_meta.setContentsMargins(10, 8, 10, 8)
-
-        def _campo(rotulo_txt, col):
-            rotulo = QLabel(rotulo_txt)
-            rotulo.setProperty("papel", "rotulo_campo")
-            rotulo.setFont(fonte_monoespacada(8))
-            grade_meta.addWidget(rotulo, 0, col)
-            campo = QLineEdit()
-            campo.setFont(fonte_monoespacada(9))
-            campo.editingFinished.connect(self._salvar_meta)
-            grade_meta.addWidget(campo, 1, col)
-            return campo
-
-        self.campo_ferramenta = _campo("FERRAMENTA ATUAL", 0)
-        self.campo_solucao = _campo("SOLUCAO INTERNA", 1)
-        self.campo_responsavel = _campo("RESPONSAVEL", 2)
-
-        rotulo_custo = QLabel("CUSTO ATUAL (R$/MES)")
-        rotulo_custo.setProperty("papel", "rotulo_campo")
-        rotulo_custo.setFont(fonte_monoespacada(8))
-        grade_meta.addWidget(rotulo_custo, 0, 3)
-        self.campo_custo = QDoubleSpinBox()
-        self.campo_custo.setFont(fonte_monoespacada(9))
-        self.campo_custo.setMaximum(10_000_000)
-        self.campo_custo.setDecimals(2)
-        self.campo_custo.setPrefix("R$ ")
-        self.campo_custo.editingFinished.connect(self._salvar_meta)
-        grade_meta.addWidget(self.campo_custo, 1, 3)
-        raiz.addWidget(painel_meta)
-
-        # ── KPIs ──
-        faixa_kpi = QHBoxLayout()
-        self.kpi_fase = self._criar_kpi("FASE ATUAL", faixa_kpi)
-        self.kpi_progresso = self._criar_kpi("PROGRESSO GERAL", faixa_kpi)
-        self.kpi_fases = self._criar_kpi("FASES CONCLUIDAS", faixa_kpi)
-        self.kpi_economia = self._criar_kpi("ECONOMIA ANUAL PROJETADA", faixa_kpi)
-        raiz.addLayout(faixa_kpi)
-
-        # ── Lista de fases (scroll) ──
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.conteudo_scroll = QWidget()
-        self.layout_fases = QVBoxLayout(self.conteudo_scroll)
-        self.layout_fases.setSpacing(6)
-        self.layout_fases.addStretch()
-        self.scroll.setWidget(self.conteudo_scroll)
-        raiz.addWidget(self.scroll, stretch=1)
-
-        self.paineis_fase = []
-        self._carregar_seletor()
-
-    def _criar_kpi(self, rotulo_txt, layout_pai):
-        caixa = QFrame()
-        caixa.setProperty("papel", "kpi_box")
-        v = QVBoxLayout(caixa)
-        rotulo = QLabel(rotulo_txt)
-        rotulo.setProperty("papel", "kpi_label")
-        rotulo.setFont(fonte_monoespacada(7))
-        valor = QLabel("--")
-        valor.setProperty("papel", "kpi_valor")
-        valor.setFont(fonte_monoespacada(13, negrito=True))
-        v.addWidget(rotulo)
-        v.addWidget(valor)
-        layout_pai.addWidget(caixa)
-        return valor
-
-    # ── Iniciativas ──
-    def _carregar_seletor(self):
-        self.combo_iniciativas.blockSignals(True)
-        self.combo_iniciativas.clear()
-        for ini in self.estado["iniciativas"]:
-            self.combo_iniciativas.addItem(ini["nome"], ini["id"])
-        self.combo_iniciativas.blockSignals(False)
-
-        if self.estado["iniciativas"]:
-            idx = 0
-            for i, ini in enumerate(self.estado["iniciativas"]):
-                if ini["id"] == self.estado.get("ativa_id"):
-                    idx = i
-                    break
-            self.combo_iniciativas.setCurrentIndex(idx)
-            self.estado["ativa_id"] = self.combo_iniciativas.currentData()
-            self._renderizar_iniciativa()
-        else:
-            self._limpar_tela()
-
-    def _iniciativa_ativa(self):
-        for ini in self.estado["iniciativas"]:
-            if ini["id"] == self.estado.get("ativa_id"):
-                return ini
+def obter_iniciativa_playbook_db(iniciativa_id: str) -> dict:
+    """Sem cache: a iniciativa ativa muda a cada clique de status/nota."""
+    doc = get_db().collection(COL_INICIATIVAS).document(iniciativa_id).get()
+    if not doc.exists:
         return None
+    d = doc.to_dict()
+    d["id"] = doc.id
+    return d
 
-    def _trocar_iniciativa(self):
-        novo_id = self.combo_iniciativas.currentData()
-        if novo_id:
-            self.estado["ativa_id"] = novo_id
-            self._renderizar_iniciativa()
 
-    def _nova_iniciativa(self):
-        nome, ok = QInputDialog.getText(self, "Nova iniciativa", "Nome da iniciativa:")
-        if ok and nome.strip():
-            nova = {
-                "id": str(uuid.uuid4()), "nome": nome.strip(), "ferramenta": "",
-                "solucao": "", "responsavel": "", "custo_mensal": 0.0,
-                "fases": modelo_base_fases(),
-            }
-            self.estado["iniciativas"].append(nova)
-            self.estado["ativa_id"] = nova["id"]
-            self.armazenamento.salvar(self.estado)
-            self._carregar_seletor()
+def criar_iniciativa_playbook_db(nome: str, ferramenta="", solucao="") -> str:
+    ref = get_db().collection(COL_INICIATIVAS).document()
+    ref.set({
+        "nome": nome, "ferramenta": ferramenta, "solucao": solucao,
+        "responsavel": "", "custo_mensal": 0.0,
+        "criado_em": _agora_iso(), "fases": modelo_base_fases(),
+    })
+    listar_iniciativas_playbook_db.clear()
+    return ref.id
 
-    def _renomear_iniciativa(self):
-        ini = self._iniciativa_ativa()
-        if not ini:
-            return
-        novo_nome, ok = QInputDialog.getText(self, "Renomear iniciativa", "Novo nome:", text=ini["nome"])
-        if ok and novo_nome.strip():
-            ini["nome"] = novo_nome.strip()
-            self.armazenamento.salvar(self.estado)
-            self._carregar_seletor()
 
-    def _excluir_iniciativa(self):
-        ini = self._iniciativa_ativa()
-        if not ini:
-            return
-        resposta = QMessageBox.question(
-            self, "Excluir iniciativa",
-            f"Excluir '{ini['nome']}' e todo o progresso? Não é possível desfazer.",
-        )
-        if resposta == QMessageBox.StandardButton.Yes:
-            self.estado["iniciativas"] = [i for i in self.estado["iniciativas"] if i["id"] != ini["id"]]
-            self.estado["ativa_id"] = self.estado["iniciativas"][0]["id"] if self.estado["iniciativas"] else None
-            self.armazenamento.salvar(self.estado)
-            self._carregar_seletor()
+def renomear_iniciativa_playbook_db(iniciativa_id: str, novo_nome: str):
+    get_db().collection(COL_INICIATIVAS).document(iniciativa_id).update({"nome": novo_nome})
+    listar_iniciativas_playbook_db.clear()
 
-    def _limpar_tela(self):
-        for p in self.paineis_fase:
-            p.setParent(None)
-        self.paineis_fase = []
-        for kpi in (self.kpi_fase, self.kpi_progresso, self.kpi_fases, self.kpi_economia):
-            kpi.setText("--")
-        self.campo_ferramenta.clear()
-        self.campo_solucao.clear()
-        self.campo_responsavel.clear()
-        self.campo_custo.setValue(0)
 
-    # ── Meta ──
-    def _salvar_meta(self):
-        ini = self._iniciativa_ativa()
-        if not ini:
-            return
-        ini["ferramenta"] = self.campo_ferramenta.text()
-        ini["solucao"] = self.campo_solucao.text()
-        ini["responsavel"] = self.campo_responsavel.text()
-        ini["custo_mensal"] = self.campo_custo.value()
-        self.armazenamento.salvar(self.estado)
-        self._atualizar_kpis(ini)
+def atualizar_meta_iniciativa_db(iniciativa_id: str, **campos):
+    get_db().collection(COL_INICIATIVAS).document(iniciativa_id).update(campos)
 
-    # ── Render principal ──
-    def _renderizar_iniciativa(self):
-        ini = self._iniciativa_ativa()
-        if not ini:
-            self._limpar_tela()
-            return
 
-        self.campo_ferramenta.setText(ini.get("ferramenta", ""))
-        self.campo_solucao.setText(ini.get("solucao", ""))
-        self.campo_responsavel.setText(ini.get("responsavel", ""))
-        self.campo_custo.setValue(ini.get("custo_mensal", 0.0))
+def atualizar_item_playbook_db(iniciativa_id: str, fase_idx: int, item_idx: int, **campos):
+    """
+    O Firestore não atualiza um único elemento de um array aninhado
+    via dot-path — por isso lê o documento inteiro, altera o item em
+    memória e regrava o campo 'fases' completo. Como é tudo texto (sem
+    os binários dos anexos, que ficam em outra coleção), o documento
+    fica bem abaixo do limite de 1 MiB mesmo com muitas iniciativas.
+    """
+    ini = obter_iniciativa_playbook_db(iniciativa_id)
+    if not ini:
+        return
+    ini["fases"][fase_idx]["itens"][item_idx].update(campos)
+    get_db().collection(COL_INICIATIVAS).document(iniciativa_id).update({"fases": ini["fases"]})
 
-        for p in self.paineis_fase:
-            p.setParent(None)
-        self.paineis_fase = []
 
-        self.layout_fases.takeAt(self.layout_fases.count() - 1)  # remove o stretch
-        for idx, fase in enumerate(ini["fases"]):
-            painel = PainelFase(fase, idx)
-            painel.alterado.connect(lambda i=ini: self._on_item_alterado(i))
-            self.layout_fases.addWidget(painel)
-            self.paineis_fase.append(painel)
-        self.layout_fases.addStretch()
+def excluir_iniciativa_playbook_db(iniciativa_id: str):
+    db = get_db()
+    # remove também os anexos binários associados, pra não deixar lixo órfão
+    anexos = db.collection(COL_ANEXOS).where("iniciativa_id", "==", iniciativa_id).stream()
+    for a in anexos:
+        a.reference.delete()
+    db.collection(COL_INICIATIVAS).document(iniciativa_id).delete()
+    listar_iniciativas_playbook_db.clear()
 
-        self._atualizar_kpis(ini)
 
-    def _on_item_alterado(self, ini):
-        self.armazenamento.salvar(self.estado)
-        self._atualizar_kpis(ini)
+def salvar_anexo_item_db(iniciativa_id, fase_idx, item_idx, arquivo_bytes, nome_arquivo, tipo, enviado_por):
+    if len(arquivo_bytes) > TAMANHO_MAX_ANEXO:
+        return False, f"Arquivo muito grande ({len(arquivo_bytes)//1000} KB) — limite de {TAMANHO_MAX_ANEXO//1000} KB por anexo."
 
-    def _atualizar_kpis(self, ini):
-        fases = ini["fases"]
-        progressos = [p.progresso() for p in self.paineis_fase]
-        total_itens = sum(t for _, t in progressos)
-        total_feitos = sum(f for f, _ in progressos)
-        pct_geral = round(100 * total_feitos / total_itens) if total_itens else 0
-        fases_completas = sum(1 for f, t in progressos if t > 0 and f == t)
-        fase_atual_idx = next((i for i, (f, t) in enumerate(progressos) if f < t), None)
-        fase7_completa = progressos[6][0] == progressos[6][1] if len(progressos) > 6 else True
+    db = get_db()
+    ref_anexo = db.collection(COL_ANEXOS).document()
+    ref_anexo.set({
+        "bin": arquivo_bytes, "nome_arquivo": nome_arquivo, "tipo": tipo,
+        "tamanho": len(arquivo_bytes), "iniciativa_id": iniciativa_id,
+        "enviado_por": enviado_por, "enviado_em": _agora_str(),
+    })
 
-        for p in self.paineis_fase:
-            p.atualizar_progresso(fase7_completa)
+    ini = obter_iniciativa_playbook_db(iniciativa_id)
+    anexos = ini["fases"][fase_idx]["itens"][item_idx].setdefault("anexos", [])
+    anexos.append({
+        "id": ref_anexo.id, "nome_arquivo": nome_arquivo, "tipo": tipo,
+        "tamanho": len(arquivo_bytes), "enviado_por": enviado_por, "enviado_em": _agora_str(),
+    })
+    db.collection(COL_INICIATIVAS).document(iniciativa_id).update({"fases": ini["fases"]})
+    return True, "Anexo enviado."
 
-        if fase_atual_idx is not None:
-            self.kpi_fase.setText(fases[fase_atual_idx]["titulo"].split(". ", 1)[-1][:22])
+
+def baixar_anexo_db(anexo_id: str):
+    doc = get_db().collection(COL_ANEXOS).document(anexo_id).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def excluir_anexo_item_db(iniciativa_id, fase_idx, item_idx, anexo_id):
+    db = get_db()
+    db.collection(COL_ANEXOS).document(anexo_id).delete()
+    ini = obter_iniciativa_playbook_db(iniciativa_id)
+    item = ini["fases"][fase_idx]["itens"][item_idx]
+    item["anexos"] = [a for a in item.get("anexos", []) if a["id"] != anexo_id]
+    db.collection(COL_INICIATIVAS).document(iniciativa_id).update({"fases": ini["fases"]})
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CÁLCULOS
+# ═══════════════════════════════════════════════════════════════════
+def _progresso_fase(fase: dict) -> tuple:
+    total = len(fase["itens"])
+    feitos = sum(1 for i in fase["itens"] if i["status"] in ("feito", "na"))
+    return feitos, total
+
+
+def moeda(v: float) -> str:
+    return f"R$ {v:,.0f}".replace(",", ".")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CSS — visual "painel de controle" (mesmo estilo do protótipo em HTML),
+# com variante clara. Escopado dentro de .pb-wrap pra não vazar pros
+# outros módulos do Painel.
+# ═══════════════════════════════════════════════════════════════════
+def _injetar_css(tema: str):
+    if tema == "escuro":
+        bg, painel, linha = "#11161c", "#1a222b", "#2b3846"
+        texto, muted, muted_dim = "#e9edf1", "#8b98a5", "#5f6b78"
+    else:
+        bg, painel, linha = "#eef1f4", "#ffffff", "#d7dee5"
+        texto, muted, muted_dim = "#1b232c", "#5c6b7a", "#8b98a5"
+
+    st.markdown(f"""
+    <style>
+    .pb-wrap {{
+        background:
+            linear-gradient({bg}, {bg}),
+            repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(120,120,120,0.06) 27px, rgba(120,120,120,0.06) 28px),
+            repeating-linear-gradient(90deg, transparent, transparent 27px, rgba(120,120,120,0.05) 27px, rgba(120,120,120,0.05) 28px);
+        color:{texto}; padding:20px 22px; border-radius:6px; margin-bottom:14px;
+        font-family:'IBM Plex Sans', sans-serif;
+    }}
+    .pb-wrap .pb-id {{ font-family:'IBM Plex Mono', monospace; font-size:0.7rem; color:{muted_dim}; letter-spacing:0.06em; margin-bottom:6px; }}
+    .pb-wrap h2 {{ font-family:'Space Grotesk', sans-serif; font-weight:700; margin:0 0 4px; color:{texto}; }}
+    .pb-kpi-strip {{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:{linha}; border:1px solid {linha}; margin:16px 0; }}
+    .pb-kpi {{ background:{painel}; padding:14px 16px; }}
+    .pb-kpi-label {{ font-family:'IBM Plex Mono', monospace; font-size:0.64rem; color:{muted}; letter-spacing:0.03em; margin-bottom:6px; }}
+    .pb-kpi-value {{ font-family:'Space Grotesk', sans-serif; font-size:1.3rem; font-weight:700; color:{texto}; }}
+    .pb-kpi.accent .pb-kpi-value {{ color:#e8a33d; }}
+    .pb-kpi.teal .pb-kpi-value {{ color:#4fb8ae; }}
+    .pb-progress-track {{ height:6px; background:{linha}; border-radius:3px; overflow:hidden; margin-bottom:4px; }}
+    .pb-progress-fill {{ height:100%; background:#e8a33d; }}
+    .pb-gate {{ padding:8px 12px; border:1px dashed #d9695f; color:#d9695f; font-family:'IBM Plex Mono',monospace; font-size:0.75rem; border-radius:4px; margin-bottom:10px; }}
+    .pb-item-status {{ font-family:'IBM Plex Mono', monospace; font-size:0.68rem; padding:2px 8px; border-radius:3px; display:inline-block; }}
+    .pb-footer {{ font-family:'IBM Plex Mono', monospace; font-size:0.7rem; color:{muted_dim}; line-height:1.6; margin-top:10px; }}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# UI
+# ═══════════════════════════════════════════════════════════════════
+def renderizar_playbook(papel, user=None):
+    user = user or {}
+    login = user.get("usuario", "")
+
+    if "pb_tema" not in st.session_state:
+        st.session_state.pb_tema = "escuro"
+
+    _injetar_css(st.session_state.pb_tema)
+
+    st.markdown('<div class="pb-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="pb-id">PLAYBOOK · REDUÇÃO DE CUSTO POR INTERNALIZAÇÃO</div>', unsafe_allow_html=True)
+    st.markdown('<h2>Ferramenta externa → solução interna</h2>', unsafe_allow_html=True)
+
+    topo1, topo2, topo3, topo4, topo5 = st.columns([2.4, 1, 1, 1, 0.8])
+
+    iniciativas = listar_iniciativas_playbook_db()
+
+    with topo1:
+        if iniciativas:
+            opcoes = {i["nome"]: i["id"] for i in iniciativas}
+            nome_escolhido = st.selectbox("Iniciativa", list(opcoes.keys()), label_visibility="collapsed")
+            iniciativa_id = opcoes[nome_escolhido]
         else:
-            self.kpi_fase.setText("CONCLUIDO")
-        self.kpi_progresso.setText(f"{pct_geral}%")
-        self.kpi_fases.setText(f"{fases_completas}/{len(fases)}")
-        economia = (ini.get("custo_mensal", 0) or 0) * 12
-        self.kpi_economia.setText(f"R$ {economia:,.0f}".replace(",", "."))
+            iniciativa_id = None
+            st.caption("Nenhuma iniciativa criada ainda.")
 
+    with topo2:
+        if st.button("+ Nova iniciativa", use_container_width=True):
+            st.session_state["pb_criando"] = True
 
-def main():
-    app = QApplication(sys.argv)
-    app.setStyleSheet(folha_de_estilo())
-    janela = JanelaPrincipal()
-    janela.show()
-    sys.exit(app.exec())
+    with topo3:
+        if iniciativa_id and st.button("Renomear", use_container_width=True):
+            st.session_state["pb_renomeando"] = iniciativa_id
 
+    with topo4:
+        if iniciativa_id and st.button("🗑️ Excluir", use_container_width=True):
+            st.session_state["pb_confirmando_exclusao"] = iniciativa_id
 
-if __name__ == "__main__":
-    main()
+    with topo5:
+        rotulo_tema = "☀️" if st.session_state.pb_tema == "escuro" else "🌙"
+        if st.button(rotulo_tema, use_container_width=True, help="Alternar tema claro/escuro"):
+            st.session_state.pb_tema = "claro" if st.session_state.pb_tema == "escuro" else "escuro"
+            st.rerun()
+
+    if st.session_state.get("pb_criando"):
+        with st.form("form_nova_iniciativa"):
+            st.markdown("**Nova iniciativa** — nasce com as mesmas 14 fases do modelo.")
+            nome = st.text_input("Nome da iniciativa (ex: nome da ferramenta a substituir)")
+            c1, c2 = st.columns(2)
+            ferramenta = c1.text_input("Ferramenta atual")
+            solucao = c2.text_input("Solução interna prevista")
+            colA, colB = st.columns(2)
+            if colA.form_submit_button("Criar", type="primary"):
+                if nome.strip():
+                    novo_id = criar_iniciativa_playbook_db(nome.strip(), ferramenta, solucao)
+                    st.session_state.pop("pb_criando", None)
+                    st.success(f"Iniciativa '{nome}' criada.")
+                    st.rerun()
+                else:
+                    st.error("Informe um nome.")
+            if colB.form_submit_button("Cancelar"):
+                st.session_state.pop("pb_criando", None)
+                st.rerun()
+
+    if st.session_state.get("pb_renomeando") == iniciativa_id and iniciativa_id:
+        with st.form("form_renomear"):
+            novo_nome = st.text_input("Novo nome", value=nome_escolhido)
+            c1, c2 = st.columns(2)
+            if c1.form_submit_button("Salvar", type="primary"):
+                renomear_iniciativa_playbook_db(iniciativa_id, novo_nome)
+                st.session_state.pop("pb_renomeando", None)
+                st.rerun()
+            if c2.form_submit_button("Cancelar"):
+                st.session_state.pop("pb_renomeando", None)
+                st.rerun()
+
+    if st.session_state.get("pb_confirmando_exclusao") == iniciativa_id and iniciativa_id:
+        st.warning(f"Excluir **{nome_escolhido}** e todo o progresso/anexos? Não é possível desfazer.")
+        c1, c2 = st.columns(2)
+        if c1.button("Sim, excluir definitivamente", type="primary"):
+            excluir_iniciativa_playbook_db(iniciativa_id)
+            st.session_state.pop("pb_confirmando_exclusao", None)
+            st.rerun()
+        if c2.button("Cancelar exclusão"):
+            st.session_state.pop("pb_confirmando_exclusao", None)
+            st.rerun()
+
+    if not iniciativa_id:
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.info("Crie a primeira iniciativa pra começar (ex: a que você já está tocando com o Amplifique.me).")
+        return
+
+    ini = obter_iniciativa_playbook_db(iniciativa_id)
+    if not ini:
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.error("Iniciativa não encontrada (pode ter sido excluída em outra sessão).")
+        return
+
+    # ── Campos de contexto ──
+    with st.form("form_meta", border=False):
+        m1, m2, m3, m4, m5 = st.columns([2, 2, 2, 1.4, 1])
+        v_ferramenta = m1.text_input("Ferramenta atual", value=ini.get("ferramenta", ""))
+        v_solucao = m2.text_input("Solução interna", value=ini.get("solucao", ""))
+        v_responsavel = m3.text_input("Responsável", value=ini.get("responsavel", ""))
+        v_custo = m4.number_input("Custo atual (R$/mês)", min_value=0.0, step=50.0, value=float(ini.get("custo_mensal", 0)))
+        if m5.form_submit_button("Salvar", use_container_width=True):
+            atualizar_meta_iniciativa_db(iniciativa_id, ferramenta=v_ferramenta, solucao=v_solucao,
+                                          responsavel=v_responsavel, custo_mensal=v_custo)
+            st.rerun()
+
+    fases = ini["fases"]
+    progressos = [_progresso_fase(f) for f in fases]
+    total_itens = sum(t for _, t in progressos)
+    total_feitos = sum(f for f, _ in progressos)
+    pct_geral = round(100 * total_feitos / total_itens) if total_itens else 0
+    fases_completas = sum(1 for f, t in progressos if t > 0 and f == t)
+    fase_atual_idx = next((idx for idx, (f, t) in enumerate(progressos) if f < t), None)
+    fase7_completa = progressos[6][0] == progressos[6][1]
+
+    st.markdown(f"""
+    <div class="pb-kpi-strip">
+      <div class="pb-kpi"><div class="pb-kpi-label">FASE ATUAL</div>
+        <div class="pb-kpi-value" style="font-size:0.95rem;">{fases[fase_atual_idx]['titulo'].split('. ',1)[-1] if fase_atual_idx is not None else 'Concluído 🎉'}</div></div>
+      <div class="pb-kpi accent"><div class="pb-kpi-label">PROGRESSO GERAL</div><div class="pb-kpi-value">{pct_geral}%</div></div>
+      <div class="pb-kpi teal"><div class="pb-kpi-label">FASES CONCLUÍDAS</div><div class="pb-kpi-value">{fases_completas}/{len(fases)}</div></div>
+      <div class="pb-kpi"><div class="pb-kpi-label">ECONOMIA ANUAL PROJETADA</div><div class="pb-kpi-value">{moeda(ini.get('custo_mensal',0)*12)}</div></div>
+    </div>
+    <div class="pb-progress-track"><div class="pb-progress-fill" style="width:{pct_geral}%"></div></div>
+    """, unsafe_allow_html=True)
+
+    # ── Fases ──
+    for fi, fase in enumerate(fases):
+        feitos, total = progressos[fi]
+        rotulo = f"{fase['titulo']}  ·  {feitos}/{total}" + ("  ✅" if total and feitos == total else "")
+        with st.expander(rotulo, expanded=(fi == fase_atual_idx)):
+            if fase.get("gate") and not fase7_completa:
+                st.markdown('<div class="pb-gate">⚠ Formalizar só após aprovação da Fase 7 — Estabilização</div>', unsafe_allow_html=True)
+
+            for ii, item_ in enumerate(fase["itens"]):
+                c_texto, c_status, c_detalhe = st.columns([3.4, 1.1, 0.5])
+                cor = STATUS_COR[item_["status"]]
+                riscado = "text-decoration:line-through;opacity:.65;" if item_["status"] == "feito" else ""
+                c_texto.markdown(f'<div style="font-size:0.87rem;{riscado}">{item_["texto"]}</div>', unsafe_allow_html=True)
+
+                novo_status = c_status.selectbox(
+                    "status", STATUS_OPCOES, index=STATUS_OPCOES.index(item_["status"]),
+                    format_func=lambda v: STATUS_LABEL[v], label_visibility="collapsed",
+                    key=f"status_{iniciativa_id}_{fi}_{ii}",
+                )
+                if novo_status != item_["status"]:
+                    atualizar_item_playbook_db(iniciativa_id, fi, ii, status=novo_status)
+                    st.rerun()
+
+                n_anexos = len(item_.get("anexos", []))
+                rotulo_pop = f"🗒️{'·'+str(n_anexos) if n_anexos else ''}"
+                with c_detalhe.popover(rotulo_pop, use_container_width=True):
+                    st.markdown("**Nota interna**")
+                    nota_key = f"nota_{iniciativa_id}_{fi}_{ii}"
+                    nova_nota = st.text_area("Nota interna", value=item_.get("nota_interna", ""),
+                                              label_visibility="collapsed", key=nota_key, height=80)
+                    if st.button("Salvar nota", key=f"btn_nota_{iniciativa_id}_{fi}_{ii}"):
+                        atualizar_item_playbook_db(iniciativa_id, fi, ii, nota_interna=nova_nota)
+                        st.success("Nota salva.")
+                        st.rerun()
+
+                    st.markdown("---")
+                    st.markdown("**Anexos**")
+                    for anexo in item_.get("anexos", []):
+                        ac1, ac2 = st.columns([3, 1])
+                        ac1.caption(f"📎 {anexo['nome_arquivo']} ({anexo['tamanho']//1000} KB) · {anexo.get('enviado_por','')}")
+                        if ac2.button("baixar", key=f"dl_{anexo['id']}"):
+                            dados = baixar_anexo_db(anexo["id"])
+                            if dados:
+                                st.download_button(
+                                    "confirmar download", data=dados["bin"], file_name=dados["nome_arquivo"],
+                                    mime=dados.get("tipo") or "application/octet-stream",
+                                    key=f"dlconfirm_{anexo['id']}",
+                                )
+                        if ac2.button("excluir", key=f"delanexo_{anexo['id']}"):
+                            excluir_anexo_item_db(iniciativa_id, fi, ii, anexo["id"])
+                            st.rerun()
+
+                    novo_arquivo = st.file_uploader("Anexar arquivo", key=f"upload_{iniciativa_id}_{fi}_{ii}")
+                    if novo_arquivo is not None:
+                        if st.button("Enviar anexo", key=f"btn_upload_{iniciativa_id}_{fi}_{ii}"):
+                            tipo, _ = mimetypes.guess_type(novo_arquivo.name)
+                            ok, msg = salvar_anexo_item_db(
+                                iniciativa_id, fi, ii, novo_arquivo.getvalue(), novo_arquivo.name,
+                                tipo or "application/octet-stream", login,
+                            )
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                st.rerun()
+
+    st.markdown(
+        '<div class="pb-footer">As fases 11–14 (aviso formal, desativação e encerramento) só devem ser '
+        'oficializadas depois da aprovação da Fase 7 — Estabilização. As fases 8–10 (revisão contratual, '
+        'situação financeira, backup) podem ser adiantadas em paralelo à construção.</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
