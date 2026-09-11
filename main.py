@@ -76,6 +76,17 @@ except Exception as _erro_import_erp:
     def _erp_tem_algum_acesso(papel, login):
         return False
 
+# [NOVO — módulo Playbook] Checklist reutilizável de projetos de
+# substituição de ferramenta externa por solução interna (fases,
+# status, notas internas e anexos). Mesmo padrão de proteção de import
+# dos demais módulos: se falhar, não derruba o main.py inteiro.
+try:
+    from modulo.mod_playbook import renderizar_playbook
+except Exception as _erro_import_playbook:
+    def renderizar_playbook(papel, user=None, _erro=_erro_import_playbook):
+        st.error("⚠️ Falha ao carregar o módulo Playbook. Detalhe técnico abaixo:")
+        st.exception(_erro)
+
 try:
     from database_chat import listar_conversas_com_nao_lidas
 except Exception:
@@ -166,12 +177,6 @@ st.markdown("""
 section[data-testid="stSidebar"] {
     background-color: #ffffff !important;
     border-right: 1px solid #dbe2e9 !important;
-    /* [v30] Persistente igual à toolbar de Tickets: fica fixa ao rolar,
-       nunca sobe/soma junto com o conteúdo principal. A sidebar nativa do
-       Streamlit já tende a se comportar assim, mas isto garante
-       explicitamente (mesmo princípio de position:sticky já usado nas
-       barras de Tickets), com scroll PRÓPRIO dela caso a lista de Filas
-       cresça além da tela. */
     position: sticky !important;
     top: 0 !important;
     height: 100vh !important;
@@ -239,7 +244,6 @@ section[data-testid="stSidebar"] .st-key-config_nav .stButton > button[kind="pri
     color: #2c3e50 !important;
 }
 
-/* ── [v25] Navbar escura — cartão de topo (logo/título/tempo real) ── */
 .ks-header {
     background: linear-gradient(180deg, #1c1710 0%, #262015 100%);
     border-left:5px solid #C9A84C;
@@ -514,6 +518,16 @@ with st.sidebar:
                 st.session_state.modulo_ativo = "erp"
                 st.rerun()
 
+        # [NOVO] Playbook — mesmo critério de visibilidade do
+        # Diagnóstico/Checklist (adm/supervisor), sem depender de
+        # 'modulos' do usuário no Firestore.
+        if papel in ("adm", "supervisor"):
+            ativo = st.session_state.modulo_ativo == "playbook"
+            if st.button("Playbook", key="nav_playbook", use_container_width=True,
+                         type="primary" if ativo else "secondary"):
+                st.session_state.modulo_ativo = "playbook"
+                st.rerun()
+
     if papel == "adm":
         st.markdown('<div style="border-top:1px solid #e2e8f0;margin:14px 8px 10px;"></div>',
                     unsafe_allow_html=True)
@@ -564,8 +578,8 @@ with hc2:
                 st.rerun()
 
 # ── MENU HORIZONTAL — mesma navegação da sidebar, formato navbar escura,
-# incluindo o ERP. A sidebar continua funcionando em paralelo por
-# enquanto (ver pergunta feita na resposta anterior sobre remover ela). ──
+# incluindo o ERP e o Playbook. A sidebar continua funcionando em
+# paralelo por enquanto. ──
 with st.container(key="navbar_menu"):
     itens_navbar = []
     if papel != "motorista":
@@ -578,6 +592,8 @@ with st.container(key="navbar_menu"):
         itens_navbar.append(("checklist", "Checklist"))
     if papel == "adm" or _usuario_tem_acesso_erp():
         itens_navbar.append(("erp", "ERP"))
+    if papel in ("adm", "supervisor"):
+        itens_navbar.append(("playbook", "Playbook"))
     if papel == "adm":
         itens_navbar.append(("config", "Configurações"))
 
@@ -589,11 +605,6 @@ with st.container(key="navbar_menu"):
                          type="primary" if ativo else "secondary"):
                 st.session_state.modulo_ativo = key
                 st.rerun()
-
-# [v29 — REMOVIDO] O widget de Status (Online/Offline/Pausa) saiu do
-# cabeçalho global — por pedido explícito, agora vive DENTRO da barra
-# persistente do módulo Tickets (ver mod_tickets.py), como um botão
-# único. Deixa de aparecer nos outros módulos (Rastreio, Cartas, ERP).
 
 # ── DADOS ─────────────────────────────────────────────────────────
 modulo_ativo = st.session_state.modulo_ativo
@@ -873,6 +884,9 @@ elif modulo_ativo == "checklist" and papel in ("adm", "supervisor"):
 
 elif modulo_ativo == "erp" and (papel == "adm" or _usuario_tem_acesso_erp()):
     _executar_modulo_protegido("ERP", renderizar_erp, papel, user)
+
+elif modulo_ativo == "playbook" and papel in ("adm", "supervisor"):
+    _executar_modulo_protegido("Playbook", renderizar_playbook, papel, user)
 
 elif modulo_ativo == "config" and papel == "adm":
     _executar_modulo_protegido("Configurações", _renderizar_bloco_configuracoes)
