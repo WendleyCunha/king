@@ -4,12 +4,6 @@ KingStar — Módulo de Tickets — strip.py
 TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket, usado em TODO lugar do
 sistema que mostra um ticket (Filas de Trabalho, abas por Departamento em
 Pendências, Visão Geral por Atendente, SLA vencidos).
-
-O clique é um BOTÃO DE VERDADE (visível), formando a "linha de cima" do card
-— ícone + ID + título — e o restante das informações (badges, cliente, SLA)
-fica colado visualmente embaixo dele. O clique define qual ticket está
-"aberto" no estado da sessão (tk_ticket_aberto), e a coluna de Detalhe
-(terceira coluna, à direita, ver mod_tickets.py) aparece/atualiza sozinha.
 """
 import streamlit as st
 
@@ -22,10 +16,6 @@ from .common import (
 
 
 def _badges_ticket(t, user) -> str:
-    """Badges/alertas coloridos do ticket — usados em QUALQUER lugar do
-    sistema que mostre a tirinha do ticket: vencido, aviso de <30min,
-    validação pendente, nova interação não vista e pendências abertas com
-    outros setores."""
     estado = sla_estado(t)
     badge = ""
     if estado == "venc":
@@ -45,17 +35,6 @@ def _badges_ticket(t, user) -> str:
 
 
 def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
-    """
-    TIRINHA HORIZONTAL — padrão ÚNICO de card de ticket usado em TODO o
-    sistema, com TODAS as informações e cores já existentes: ícone de
-    origem, ID, título, departamento, motivo (pai › filho › etapa), cliente,
-    nº de comentários, data de criação, pill de status, pill de prioridade,
-    badges (vencido / aviso <30min / validação pendente / nova interação /
-    pendências de setor) e a barra + texto do SLA/prazo ativo.
-
-    extra_badge_html: badge(s) adicional(is) específico(s) do contexto (ex.:
-    a tag "🏠 aberto aqui" / "↩ vindo de X" usada na aba de um Departamento).
-    """
     tid    = t.get("id","")
     estado = sla_estado(t)
     sl, spct, svenc = sla_restante(t)
@@ -85,8 +64,6 @@ def _render_ticket_strip(t, user, papel, key_ctx, extra_badge_html=""):
     meta_com = f" &nbsp;·&nbsp; 💬 {num_com}" if num_com else ""
     meta_mot = f" &nbsp;·&nbsp; 📂 {esc(caminho_mot)}" if caminho_mot else ""
 
-    # o `estado` entra na key do container pra o CSS conseguir mirar o
-    # botão (venc/warn) e dar o mesmo destaque piscante que a borda tinha
     with st.container(key=f"tkwrap_{estado}_{key_ctx}"):
         if st.button(f"{icon}  #{idv} — {titulo}", key=f"tkbtn_{key_ctx}", use_container_width=True):
             st.session_state.tk_ticket_aberto = tid
