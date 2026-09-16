@@ -5,13 +5,6 @@ Bloco exclusivo de Supervisor/ADM: Visão Geral da Operação (dashboard,
 ranking por atendente com transferência em massa, ranking por motivo, SLA
 perdido, exportação em Excel com 3 abas) + a tela de Sync Zendesk / Zona de
 Perigo (exclusão total de tickets).
-
-[Ajuste visual — v23] O dashboard mostrava "Quem mais atendeu" e "Motivo
-mais acionado" como `st.dataframe` cru — uma tabela sem estilo nenhum,
-destoando do resto do sistema (que usa cards com borda dourada em todo
-lugar). Trocado por uma lista de cards no mesmo padrão visual já usado em
-`tickets/detalhe.py` e `mod_motivos.py` — nenhuma lógica de contagem
-mudou, só a forma de mostrar o resultado.
 """
 import time
 import pandas as pd
@@ -114,12 +107,7 @@ def _gerar_excel_relatorio(tickets: list, nomes_users: dict) -> bytes:
     return buf.getvalue()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# [v23] Card de ranking — mesmo padrão visual do resto do sistema
-# (borda dourada à esquerda, badge de posição), em vez de st.dataframe.
-# ═══════════════════════════════════════════════════════════════════
 def _render_ranking_cards(itens: list, rotulo_singular: str, key_ctx: str, max_itens: int = 8):
-    """`itens`: lista de (nome, qtd), já ordenada do maior pro menor."""
     if not itens:
         st.caption("Sem dados.")
         return
@@ -148,11 +136,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
     if st.button("← Voltar"):
         st.session_state.tk_modo = "lista"; st.rerun()
 
-    # [v26 — REMOVIDO] O seletor "Departamento" (view/filtro "Por
-    # Departamento"), os multiselects "Filtrar por atendente" e "Filtrar
-    # por motivo" saíram por instrução explícita: a tela deixa de oferecer
-    # visão analítica por Departamento/Atendente/Motivo. Para ADM, o
-    # recorte agora é SEMPRE todos os departamentos juntos — sem seletor.
     if papel == "adm":
         tickets_dep = todos_geral
         usuarios_dep = listar_usuarios()
@@ -201,9 +184,6 @@ def _render_visao_geral_operacao(user, papel, todos_geral):
         st.caption(f"🔎 Período {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')} "
                    f"— exibindo {len(tickets_filtrados)} de {len(tickets_dep)} ticket(s).")
 
-    # [v26 — REMOVIDO] As abas "Por Atendente" e "Por Motivo" saíram por
-    # instrução explícita — só sobra o Dashboard geral, SLA Perdido e
-    # Exportar (que continua útil pra fechamento mensal em planilha).
     aba_dash, aba_sla, aba_export = st.tabs(
         ["📊 Dashboard", "⏳ SLA Perdido", "📥 Exportar"]
     )
@@ -245,11 +225,6 @@ def _aba_dashboard(tickets: list, usuarios_dep: list, nomes_users: dict):
                     f'<div class="kpi-value">{pct_sla1:.0f}%</div>'
                     f'<div class="kpi-sub">{sla1_ok} de {len(com_sla1)} classificados</div></div>',
                     unsafe_allow_html=True)
-    # [v26 — REMOVIDO] "Quem mais atendeu" / "Motivo mais acionado" saíram
-    # daqui — eram visão por Atendente/Demanda, removida por instrução.
-    # O Dashboard agora só mostra os KPIs gerais acima.
-
-
 
 
 def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
@@ -269,7 +244,6 @@ def _aba_sla_perdido(tickets: list, nomes_users: dict, user, papel):
         for a in ats:
             cont_resp[nomes_users.get(a, a)] += 1
 
-    # [v23] Ranking em cards, não mais st.dataframe cru.
     st.markdown("**Ranking de responsáveis por SLA perdido**")
     _render_ranking_cards(cont_resp.most_common(), "SLA perdido", key_ctx="sla_resp")
 
