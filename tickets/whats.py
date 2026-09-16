@@ -55,7 +55,7 @@ from .common import (
     abrir_solicitacao_cliente, STATUS_ABERTOS,
     listar_departamentos,
 )
-from modulo.mod_motivos import motivos_pai_do_departamento
+from mod_motivos import motivos_pai_do_departamento
 
 # ── Import de database_chat.py (raiz do projeto), reaproveitando o mesmo
 # truque de path que tickets/common.py já usa pra importar database.py ──
