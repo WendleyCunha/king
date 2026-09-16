@@ -34,7 +34,7 @@ tickets/common.py), esta tela passou a:
 import time
 import streamlit as st
 
-from modulo.mod_motivos import motivos_pai_do_departamento, listar_motivos_filho_de
+from mod_motivos import motivos_pai_do_departamento, listar_motivos_filho_de
 from .common import (
     STATUS_ABERTOS, STATUS_CFG, STATUS_ENCERRADOS_DUPLICIDADE, esc, _html,
     listar_departamentos, normalizar_codigo_cliente, tickets_do_cliente,
