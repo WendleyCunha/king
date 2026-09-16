@@ -8,72 +8,6 @@ de filas, visibilidade por papel, histórico por cliente e todo o CRUD do
 Firestore (tickets, comentários, sync Zendesk, exclusão total).
 
 Todo o resto do pacote `tickets/` importa deste arquivo.
-
-[v5 — TICKET CONTÊINER POR CLIENTE] Mudança de modelo de dados, a pedido:
-  1) `cliente_codigo` normalizado passou a ser a CHAVE do documento do
-     Firestore (um único documento por cliente — "ticket contêiner").
-  2) Abrir um chamado com o MESMO Motivo Pai de uma solicitação ainda não
-     encerrada (status fora de finalizado/cancelado) do MESMO cliente é
-     BLOQUEADO (ver `abrir_solicitacao_cliente`).
-  3) Motivos diferentes (ou o mesmo motivo já encerrado antes) são sempre
-     aceitos como NOVA "solicitação" dentro do MESMO documento contêiner.
-  4) O documento contêiner guarda um array `solicitacoes` — cada elemento é
-     uma solicitação completa (mesmos campos que um "ticket" tinha antes:
-     assunto, motivo, status, SLA, atendentes, comentários...). O histórico
-     de TODAS as solicitações do cliente vive sempre no mesmo documento.
-  5) Cada solicitação tem seu próprio `status` — encerrar uma não afeta as
-     outras do mesmo contêiner.
-
-  Para não obrigar a reescrever todo o resto do sistema (strip.py, filas.py,
-  geral.py, detalhe.py), o container nunca é exposto diretamente: toda
-  leitura passa por `_achatar(...)`, que transforma cada solicitação num
-  dict "achatado" com EXATAMENTE os mesmos campos que um ticket antigo
-  tinha (inclusive um "id" — agora um ID COMPOSTO "container#sid"). Todo o
-  código que já existia (SLA, status, badges, listagem, exportação) continua
-  funcionando sem nenhuma alteração, porque só enxerga esse dict achatado.
-
-  Documentos ANTIGOS (formato "achatado" direto na raiz, sem o array
-  `solicitacoes` — inclusive os importados do Zendesk) continuam sendo lidos
-  normalmente: são envolvidos em memória por `_normalizar_container` como um
-  contêiner de uma única solicitação. Na primeira vez que forem atualizados
-  (`atualizar_ticket`), já são regravados no formato novo automaticamente —
-  não é necessário rodar nenhuma migração manual.
-
-  `criar_ticket(dados)` continua existindo com o MESMO contrato de antes
-  (recebe dict, devolve uma string de ID) para não quebrar nenhum outro
-  módulo do sistema que já a chame diretamente (ex.: possivelmente
-  mod_home.py) — mas ela NÃO aplica o bloqueio de motivo duplicado (regra 2
-  é uma regra da TELA de abertura de chamado, não do primitivo de gravação).
-  Quem precisa do bloqueio é `abrir_solicitacao_cliente`, usada por
-  `tickets/novo.py`.
-
-[v6 — WHATSAPP DE VERDADE (Twilio)] Novidade: envio e leitura de mensagens
-  reais de WhatsApp, ligadas ao TELEFONE do cliente (campo novo
-  `cliente_telefone` na solicitação — preenchido na abertura do chamado ou
-  editável depois no painel de detalhe).
-
-  Arquitetura (ver changelog completo no topo de `tickets/detalhe.py` e no
-  arquivo separado `webhook_whatsapp/main.py`):
-    • As mensagens NÃO ficam dentro do documento do ticket (cliente_codigo).
-      Ficam numa coleção PRÓPRIA, `whatsapp_conversas`, com um documento por
-      TELEFONE normalizado — porque é assim que a Twilio te avisa de uma
-      mensagem nova (só manda o número de telefone, não sabe nada sobre
-      "ticket" ou "cliente_codigo"). O painel de detalhe lê essa coleção
-      pelo telefone salvo na solicitação.
-    • ENVIAR (agente → cliente): função `enviar_whatsapp` abaixo, chama a
-      API da Twilio direto daqui de dentro do Streamlit. Funciona sem
-      nenhuma peça extra, desde que `twilio_account_sid`,
-      `twilio_auth_token` e `twilio_whatsapp_from` estejam em `st.secrets`.
-    • RECEBER (cliente → agente): a Twilio manda um webhook HTTP — e o
-      Streamlit Cloud NÃO expõe esse tipo de endpoint. Por isso existe o
-      arquivo separado `webhook_whatsapp/main.py` (uma Cloud Function do
-      Google, publicada por fora deste app) que recebe o aviso da Twilio e
-      grava a mensagem na MESMA coleção `whatsapp_conversas` — dali, o
-      Streamlit só precisa LER (função `listar_mensagens_whatsapp`).
-    • A regra das 24h da Twilio (fora da janela da última mensagem do
-      cliente, só dá pra mandar mensagem usando um "template" aprovado pelo
-      Meta) é checada em `minutos_desde_ultima_mensagem_cliente` e usada
-      pela UI pra avisar/desabilitar o envio livre — nunca é ignorada.
 """
 import streamlit as st
 import pandas as pd
@@ -98,12 +32,9 @@ from database import (
 BRT     = timezone(timedelta(hours=-3))
 COLECAO = "tickets"
 
-# Coleção do histórico de WhatsApp — 1 documento por TELEFONE normalizado
-# (não por ticket/cliente_codigo — ver changelog [v6] acima).
 WHATSAPP_COLECAO = "whatsapp_conversas"
-JANELA_WHATSAPP_H = 24  # janela de envio livre da Twilio (fora dela, precisa de template)
+JANELA_WHATSAPP_H = 24
 
-# ── Configurações Zendesk ─────────────────────────────────────────
 ZENDESK_SUBDOMAIN = "kingstarcolchoessupport"
 ZENDESK_EMAIL     = "wendley.cunha@kingstarcolchoes.com.br"
 ZENDESK_TOKEN     = "tXqPtSws0qZMh4uiZnADQbeqUd2t2UjHUFlliTP8"
@@ -125,43 +56,31 @@ PRIO_CFG = {
     "baixa":   ("Baixa",  "#F1F5F9","#475569"),
 }
 
-STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")  # pendentes p/ SLA
-
-# Status que contam como "encerrado" para fins do bloqueio de motivo
-# duplicado (regra 2) — "resolvido" ainda NÃO conta como encerrado aqui de
-# propósito: um chamado "resolvido" mas ainda na janela de validação (24h,
-# ver JANELA_VALIDACAO_H mais abaixo) pode ser reaberto, então uma segunda
-# solicitação do MESMO motivo ainda deve ser bloqueada nesse meio-tempo.
+STATUS_ABERTOS = ("aberto", "em_andamento", "aguardando")
 STATUS_ENCERRADOS_DUPLICIDADE = ("finalizado", "cancelado")
 
-# ── Paleta dourada (sem vermelho) ──────────────────────────────────
-GOLD       = "#C9A84C"   # dourado base
-GOLD_WARN  = "#D4A12C"   # faltando <30min  (ouro médio)
-GOLD_VENC  = "#8A6D1F"   # SLA vencido      (ouro escuro / bronze)
-GREEN_OK   = "#16A34A"   # barra saudável
-BLUE_INFO  = "#60A5FA"   # interação nova (azul-claro)
+GOLD       = "#C9A84C"
+GOLD_WARN  = "#D4A12C"
+GOLD_VENC  = "#8A6D1F"
+GREEN_OK   = "#16A34A"
+BLUE_INFO  = "#60A5FA"
 
-# ── Paleta de cores por Departamento (setor) ───────────────────────
 DEPT_PALETTE = [
     "#2563EB", "#16A34A", "#DB2777", "#7C3AED", "#EA580C",
     "#0EA5E9", "#CA8A04", "#059669", "#D946EF", "#0D9488",
     "#DC2626", "#4F46E5", "#65A30D", "#C2410C", "#0891B2",
 ]
 
-# ── Helpers ────────────────────────────────────────────────────────
 def agora_brt() -> str:
     return datetime.now(BRT).strftime("%Y-%m-%d %H:%M:%S")
 
 def _html(s: str) -> str:
-    """Remove a indentação de cada linha (que vira 'bloco de código' no Markdown)."""
     return "\n".join(linha.lstrip() for linha in s.splitlines())
 
 def esc(v) -> str:
-    """Escapa texto livre do usuário antes de injetar no HTML."""
     return _htmlmod.escape(str(v if v is not None else ""))
 
 def texto_busca(t) -> str:
-    """Concatena tudo que é pesquisável de um ticket (busca global)."""
     partes = [
         t.get("id",""), t.get("id_zendesk",""), t.get("assunto",""),
         t.get("descricao",""), t.get("solicitante_nome",""),
@@ -187,17 +106,7 @@ def texto_busca(t) -> str:
 def _novo_id_curto() -> str:
     return uuid.uuid4().hex[:10]
 
-# ═══════════════════════════════════════════════════════════════════
-# TICKET CONTÊINER POR CLIENTE — helpers internos de (de)serialização
-# ═══════════════════════════════════════════════════════════════════
 def _normalizar_id_doc(cod: str) -> str:
-    """
-    Sanitiza um código de cliente para uso como ID de documento do
-    Firestore: não pode conter '/', não pode ser vazio, nem ser '.' ou '..'.
-    Também remove '#', que é o separador usado no ID COMPOSTO de solicitação
-    (ver _compor_id/_decompor_id) — assim o código do cliente nunca conflita
-    com esse separador, não importa o que o atendente digite.
-    """
     cod = (cod or "").strip().replace("/", "_").replace("#", "_")
     return cod[:200] or ("cliente_" + _novo_id_curto())
 
@@ -205,10 +114,6 @@ def _compor_id(container_id: str, sid: str) -> str:
     return f"{container_id}#{sid}"
 
 def _decompor_id(tid: str):
-    """Separa um ID composto em (container_id, sid). Usa rsplit (a partir do
-    FIM) de propósito: o sid nunca contém '#', mas o container_id (código do
-    cliente já sanitizado) também não deveria — ainda assim, rsplit garante
-    a separação correta mesmo num cenário legado/inesperado."""
     tid = str(tid or "")
     if "#" not in tid:
         return tid, "legacy"
@@ -216,15 +121,6 @@ def _decompor_id(tid: str):
     return cid, sid
 
 def _normalizar_container(raw: dict) -> dict:
-    """
-    Aceita tanto o formato NOVO (dict com uma lista em 'solicitacoes')
-    quanto um documento ANTIGO (formato achatado, sem essa lista — inclusive
-    os importados do Zendesk) e sempre devolve o formato novo em memória,
-    envolvendo o documento antigo como uma única solicitação ('sid':
-    'legacy'). Nunca escreve nada no Firestore sozinha — a gravação no
-    formato novo só acontece na próxima vez que a solicitação for
-    atualizada de verdade (migração preguiçosa, sem downtime).
-    """
     if not raw:
         return {"cliente_codigo": "", "cliente_nome": "", "solicitacoes": []}
     if isinstance(raw.get("solicitacoes"), list):
@@ -240,10 +136,6 @@ def _normalizar_container(raw: dict) -> dict:
     }
 
 def _achatar(container_id: str, container: dict, sol: dict) -> dict:
-    """Achata uma solicitação em um dict com a MESMA forma que um ticket
-    antigo tinha — é isso que permite todo o resto do sistema (SLA, status,
-    badges, tirinha, exportação) continuar funcionando sem nenhuma
-    alteração, mesmo com o novo modelo de contêiner por cliente."""
     flat = dict(sol)
     flat["id"] = _compor_id(container_id, sol.get("sid", "legacy"))
     flat.setdefault("cliente_codigo", container.get("cliente_codigo", ""))
@@ -251,17 +143,12 @@ def _achatar(container_id: str, container: dict, sol: dict) -> dict:
     return flat
 
 def _carregar_container(container_id: str):
-    """Leitura FRESCA (sem cache) de um contêiner pelo ID do documento."""
     doc = get_db().collection(COLECAO).document(container_id).get()
     if not doc.exists:
         return None
     return _normalizar_container(doc.to_dict())
 
 def buscar_ticket_por_id(tid: str):
-    """Busca uma solicitação específica pelo ID composto (container#sid),
-    sempre com leitura FRESCA do Firestore — usado pelo painel de detalhe,
-    que precisa refletir a mudança mais recente imediatamente após
-    qualquer ação (mesmo comportamento que a leitura direta antiga tinha)."""
     if not tid:
         return None
     cid, sid = _decompor_id(tid)
@@ -274,10 +161,6 @@ def buscar_ticket_por_id(tid: str):
     return None
 
 def transferir_tickets(tids: list, novo_responsavel: str):
-    """Reatribui uma lista de tickets (IDs compostos) para um novo
-    responsável. Agrupa por contêiner (cliente) e aplica cada mudança numa
-    transação Firestore própria por contêiner, pra não perder alterações
-    concorrentes de outras solicitações do mesmo cliente."""
     from collections import defaultdict
     agrupado = defaultdict(list)
     for tid in tids:
@@ -314,13 +197,7 @@ def transferir_tickets(tids: list, novo_responsavel: str):
     listar_tickets.clear()
     return n
 
-# ── SLA em cascata (SLA1 = Motivo Pai / SLA2 = Etapa vermelha travada) ──
 def deadline_ativo(t) -> tuple:
-    """Retorna (datetime_limite ou None, origem) onde origem é:
-      'etapa' → SLA2 (etapa vermelha já travada, com data confirmada)
-      'pai'   → SLA1 (prazo do Motivo Pai, ou horas_sla legado p/ tickets
-                antigos/Zendesk que não usam a árvore de motivos)
-    """
     if t.get("etapa_vermelha") and t.get("etapa_data_prevista"):
         try:
             d = datetime.fromisoformat(str(t["etapa_data_prevista"]))
@@ -341,7 +218,6 @@ def sla_label(t) -> str:
     return "Prazo da etapa" if origem == "etapa" else "SLA"
 
 def sla_restante(t) -> tuple:
-    """Retorna (texto, pct_usado, vencido) considerando o prazo ATIVO."""
     limite, origem = deadline_ativo(t)
     if limite is None:
         return "—", 0, False
@@ -364,8 +240,6 @@ def pill(texto, bg, cor):
             f'border-radius:12px;font-size:0.72rem;font-weight:700;">{esc(texto)}</span>')
 
 def sla_estado(t) -> str:
-    """Retorna o estado do SLA ATIVO: 'ok', 'warn' (<=30min) ou 'venc'.
-    Só vale para tickets pendentes; resolvidos/cancelados sempre 'ok'."""
     if t.get("status") not in STATUS_ABERTOS:
         return "ok"
     limite, _ = deadline_ativo(t)
@@ -379,16 +253,12 @@ def sla_estado(t) -> str:
     return "ok"
 
 def ticket_vencido_pendente(t) -> bool:
-    """True se o prazo ATIVO estourou E o ticket ainda está pendente."""
     if t.get("status") not in STATUS_ABERTOS:
         return False
     _, _, venc = sla_restante(t)
     return venc
 
 def sla_foi_perdido(t) -> bool:
-    """SLA (ativo — pai ou etapa) foi/está estourado, mesmo se o ticket já
-    tiver sido resolvido/finalizado/cancelado (usa 'atualizado_em' como
-    proxy de quando foi tratado)."""
     if t.get("status") in STATUS_ABERTOS:
         return ticket_vencido_pendente(t)
     limite, _ = deadline_ativo(t)
@@ -400,11 +270,7 @@ def sla_foi_perdido(t) -> bool:
     except Exception:
         return False
 
-# ── Interação / alerta azul ─────────────────────────────────────────
 def tem_interacao_nao_vista(t, user) -> bool:
-    """True se houve uma interação de OUTRA pessoa que o(s) responsável(is)
-    ainda não 'atendeu' (a única forma de limpar é o próprio responsável
-    interagir de volta — comentário, mudança de status ou classificação)."""
     uname = user.get("usuario","")
     if uname not in t.get("atendentes", []):
         return False
@@ -412,11 +278,7 @@ def tem_interacao_nao_vista(t, user) -> bool:
         return False
     return bool(t.get("ultima_interacao_em"))
 
-# ── Pendências entre Setores (cor por setor + solicitação/resposta) ────
 def cor_departamento(nome_dep: str) -> str:
-    """Cor do setor: usa o campo 'cor' cadastrado em Departamentos
-    (Configurações → Departamentos) se existir; senão gera uma cor estável
-    via hash do nome (sempre a mesma cor pro mesmo setor, mesmo sem cadastro)."""
     nome_dep = nome_dep or "—"
     try:
         for d in listar_departamentos():
@@ -428,8 +290,6 @@ def cor_departamento(nome_dep: str) -> str:
     return DEPT_PALETTE[idx]
 
 def _swatch_dept(nome_dep: str) -> str:
-    """Emoji quadradinho aproximando a cor do setor — só pra dar uma pista
-    visual no rótulo da aba (abas do Streamlit não aceitam HTML/CSS)."""
     cor = cor_departamento(nome_dep).lstrip("#")
     try:
         r, g, b = int(cor[0:2], 16), int(cor[2:4], 16), int(cor[4:6], 16)
@@ -445,7 +305,6 @@ def _swatch_dept(nome_dep: str) -> str:
     return "🏢"
 
 def solicitacoes_abertas(t) -> list:
-    """Lista de pedidos (a outro setor) que ainda NÃO têm resposta registrada."""
     sols = t.get("solicitacoes_setor", []) or []
     respondidos = {s.get("pedido_id") for s in sols if s.get("tipo") == "resposta"}
     return [s for s in sols if s.get("tipo") == "pedido" and s.get("id") not in respondidos]
@@ -457,8 +316,6 @@ def ticket_tem_pendencia_para_setor(t, setor: str) -> bool:
     return bool(solicitacoes_abertas_para_setor(t, setor))
 
 def registrar_solicitacao_setor(tid: str, t: dict, setor_destino: str, mensagem: str, user: dict):
-    """Cria uma pendência para outro setor DENTRO da MESMA solicitação (não
-    cria ticket novo — preserva o histórico único por cliente)."""
     pedido = {
         "id": _novo_id_curto(),
         "tipo": "pedido",
@@ -471,15 +328,12 @@ def registrar_solicitacao_setor(tid: str, t: dict, setor_destino: str, mensagem:
     }
     atualizar_ticket(tid, {}, interacao_de=user.get("usuario", ""),
                       apensar={"solicitacoes_setor": pedido})
-    # também entra no chat unificado do ticket, pra quem só olha comentários
     adicionar_comentario(
         tid, user.get("nome", ""), user.get("usuario", ""),
         f"📨 Solicitação para o setor **{setor_destino}**: {mensagem}"
     )
 
 def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, user: dict):
-    """Fecha uma pendência de setor, registrando a resposta (sem apagar o
-    pedido original — o histórico completo fica sempre visível)."""
     resposta = {
         "id": _novo_id_curto(),
         "tipo": "resposta",
@@ -500,16 +354,6 @@ def responder_solicitacao_setor(tid: str, pedido: dict, resposta_texto: str, use
     )
 
 def tickets_pendentes_do_setor(tickets: list, setor: str) -> list:
-    """Tickets que o SETOR precisa tratar, pra alimentar a aba dele em
-    'Filas de Trabalho'. Isso inclui DOIS casos, não só um:
-      1) Tickets abertos DIRETAMENTE para esse setor (departamento == setor)
-         e ainda pendentes — é o caso mais comum (ex.: abri um chamado pra
-         TI, ele precisa aparecer na aba da TI).
-      2) Tickets de QUALQUER outro setor que tenham uma solicitação aberta
-         (pendência entre setores) direcionada a esse setor.
-    Sem isso, um ticket aberto direto pro setor nunca aparecia na aba dele
-    (só apareceria se alguém tivesse criado uma solicitação manual/automática
-    — o que é um caso à parte, não o principal)."""
     out = []
     for t in tickets:
         if t.get("status") not in STATUS_ABERTOS:
@@ -521,7 +365,6 @@ def tickets_pendentes_do_setor(tickets: list, setor: str) -> list:
     return out
 
 def departamentos_com_pendencia(tickets: list) -> dict:
-    """{nome_setor: qtd_tickets_pendentes} pra montar o contador nas abas por setor."""
     from collections import defaultdict
     cont = defaultdict(int)
     setores = set()
@@ -537,15 +380,13 @@ def departamentos_com_pendencia(tickets: list) -> dict:
             cont[setor] = qtd
     return dict(cont)
 
-# ── Classificação em filas MUTUAMENTE EXCLUSIVAS ───────────────────
 def _atribuido_a(t, user) -> bool:
-    """O ticket caiu para o usuário logado atender (atendente/atribuído)?"""
     uname = user.get("usuario","")
     nome  = user.get("nome","")
     return (uname in t.get("atendentes", [])
             or t.get("atribuido_para") in (uname, nome))
 
-JANELA_VALIDACAO_H = 24   # horas que o autor tem para validar um ticket resolvido
+JANELA_VALIDACAO_H = 24
 
 def _horas_desde_atualizacao(t) -> float:
     try:
@@ -555,11 +396,9 @@ def _horas_desde_atualizacao(t) -> float:
         return 0.0
 
 def resolvido_em_validacao(t) -> bool:
-    """Resolvido há menos de 24h, sem nova interação → ainda aguarda validação do autor."""
     return t.get("status") == "resolvido" and _horas_desde_atualizacao(t) < JANELA_VALIDACAO_H
 
 def classificar_fila(t, user) -> str:
-    """Retorna a ÚNICA caixa onde o ticket aparece (ou None se em nenhuma)."""
     uname = user.get("usuario","")
     if t.get("aberto_por") == uname:
         status = t.get("status")
@@ -581,7 +420,6 @@ def classificar_fila(t, user) -> str:
         return "urgente"
     return "em_andamento"
 
-# ── Visibilidade por papel (Regra 5) ───────────────────────────────
 def _usuario_atende(t, user) -> bool:
     uname = user.get("usuario","")
     nome  = user.get("nome","")
@@ -589,7 +427,6 @@ def _usuario_atende(t, user) -> bool:
             or t.get("atribuido_para") in (uname, nome)
             or t.get("aberto_por") == uname):
         return True
-    # participou de alguma pendência entre setores (pediu ou foi solicitado)
     dep_user = user.get("departamento")
     if dep_user:
         for s in t.get("solicitacoes_setor", []):
@@ -604,23 +441,10 @@ def ticket_visivel(t, user, papel) -> bool:
         return t.get("departamento","") == (user.get("departamento","") or "—")
     return _usuario_atende(t, user)
 
-# ── Histórico por CLIENTE ───────────────────────────────────────────
 def normalizar_codigo_cliente(cod) -> str:
     return str(cod or "").strip()
 
 def tickets_do_cliente(cliente_codigo: str, excluir_id: str = None) -> list:
-    """
-    Todas as OUTRAS solicitações do mesmo cliente. Desde a Regra 1
-    (cliente_codigo como chave do contêiner), a via rápida é ler
-    DIRETAMENTE o documento cujo ID é o código normalizado do cliente — 1
-    única leitura, sem varrer a coleção inteira.
-
-    Também faz uma varredura de segurança em `listar_tickets()` (cacheada,
-    portanto barata) para pegar tickets ANTIGOS/legados que porventura
-    tenham o mesmo cliente_codigo mas vivam sob um ID de documento
-    diferente (ex.: criados antes desta mudança de modelo, ou importados
-    do Zendesk) — assim nenhum histórico antigo fica de fora.
-    """
     cod = normalizar_codigo_cliente(cliente_codigo)
     if not cod:
         return []
@@ -660,14 +484,8 @@ def _render_bloco_historico_cliente(lista_tickets, titulo_vazio=None):
         else:
             st.caption("Sem comentários registrados neste chamado.")
 
-# ── CRUD Firestore ─────────────────────────────────────────────────
 @st.cache_data(ttl=10, show_spinner=False)
 def listar_tickets() -> list:
-    """Lê TODOS os contêineres (um por cliente, mais os legados/Zendesk que
-    ainda vivem sob ID próprio) e devolve a lista ACHATADA de solicitações
-    — cada uma com a mesma forma que um ticket antigo tinha. É essa lista
-    achatada que o resto do sistema (SLA, filas, badges, exportação)
-    consome, sem precisar saber nada sobre o modelo de contêiner."""
     docs = get_db().collection(COLECAO).stream()
     flat = []
     for d in docs:
@@ -680,22 +498,6 @@ def listar_tickets() -> list:
     return sorted(flat, key=lambda x: x.get("criado_em",""), reverse=True)
 
 def _criar_ou_anexar_solicitacao(dados: dict, bloquear_duplicado: bool = False):
-    """
-    Núcleo comum de criação: garante que TODA solicitação de um mesmo
-    cliente (mesmo `cliente_codigo`) vive dentro do MESMO documento
-    contêiner (Regra 1), e — quando `bloquear_duplicado=True` — impede
-    abrir uma nova solicitação com o MESMO Motivo Pai de outra que ainda
-    não esteja encerrada (Regra 2). Roda dentro de uma transação Firestore
-    pra não haver corrida entre duas aberturas simultâneas do mesmo cliente
-    (a checagem de duplicidade só é confiável se leitura+escrita forem
-    atômicas).
-
-    Sem `cliente_codigo` (uso interno/legado, sem tela de abertura própria
-    de cliente), cria um contêiner novo com ID aleatório — mesmo
-    comportamento que o sistema já tinha antes desta mudança.
-
-    Retorna (ok: bool, mensagem_de_erro: str, tid_composto: str | None).
-    """
     cod = normalizar_codigo_cliente(dados.get("cliente_codigo"))
     db  = get_db()
 
@@ -758,51 +560,13 @@ def _criar_ou_anexar_solicitacao(dados: dict, bloquear_duplicado: bool = False):
     return ok, msg, tid
 
 def criar_ticket(dados: dict) -> str:
-    """
-    [Compatibilidade] Cria/anexa uma solicitação SEM checar duplicidade de
-    motivo — mantém o MESMO contrato de antes (recebe dict, devolve string
-    de ID) para não quebrar nenhum outro módulo do sistema que já chame
-    esta função diretamente. Ainda assim, se `dados` tiver `cliente_codigo`,
-    a solicitação passa a viver no contêiner daquele cliente (Regra 1) —
-    essa parte do novo modelo é sempre aplicada, incondicionalmente.
-
-    Para a regra de bloqueio de motivo duplicado (Regra 2), usada pela tela
-    de abertura de chamado, veja `abrir_solicitacao_cliente`.
-    """
     _, _, tid = _criar_ou_anexar_solicitacao(dados, bloquear_duplicado=False)
     return tid
 
 def abrir_solicitacao_cliente(dados: dict) -> tuple:
-    """
-    Abre uma nova solicitação de atendimento para um cliente, aplicando as
-    regras completas do novo modelo:
-      • Regra 1: `cliente_codigo` é a CHAVE do ticket contêiner.
-      • Regra 2: bloqueia se já existir uma solicitação NÃO
-        finalizada/cancelada com o MESMO Motivo Pai para este cliente.
-      • Regras 3/4: motivos diferentes (ou o mesmo motivo já encerrado) são
-        sempre aceitos como NOVA solicitação dentro do MESMO documento —
-        nunca cria um segundo ticket pro mesmo cliente.
-    Usada pela tela de abertura de chamado (`tickets/novo.py`).
-
-    Retorna (ok: bool, mensagem_de_erro: str, tid_composto: str | None).
-    """
     return _criar_ou_anexar_solicitacao(dados, bloquear_duplicado=True)
 
 def atualizar_ticket(tid: str, dados: dict, interacao_de: str = None, apensar: dict = None):
-    """
-    Atualiza campos de UMA solicitação específica (identificada pelo ID
-    composto `container#sid`), sem afetar as outras solicitações do mesmo
-    cliente. Roda em uma transação Firestore (lê o contêiner inteiro,
-    modifica só o elemento certo do array, regrava o documento inteiro) —
-    isso evita perder alterações concorrentes de OUTRA solicitação do
-    mesmo cliente sendo editada ao mesmo tempo por outra pessoa.
-
-    `apensar`: dict opcional {campo: item} para ADICIONAR um item a um
-    campo de lista da solicitação (ex.: {"historico_etapas": {...}}) na
-    MESMA escrita — substitui o uso antigo de `ArrayUnion` do Firestore,
-    que só funciona em updates diretos de campo, não em listas aninhadas
-    dentro de um array maior como agora é o caso.
-    """
     cid, sid = _decompor_id(tid)
     db = get_db()
     ref = db.collection(COLECAO).document(cid)
@@ -845,28 +609,9 @@ def adicionar_comentario(tid: str, autor_nome: str, autor_usuario: str, texto: s
     )
 
 def vincular_ticket_relacionado(tid: str, novo_id: str):
-    """
-    [Compatibilidade — agora um no-op] Antes, cada abertura de chamado
-    criava um documento novo e esta função só registrava uma referência
-    cruzada entre "irmãos" do mesmo cliente. Desde a Regra 1 (cliente_codigo
-    como chave do ticket contêiner), TODAS as solicitações de um mesmo
-    cliente já vivem DENTRO do mesmo documento — não existe mais "ticket
-    separado" para vincular. Mantida apenas para não quebrar chamadas
-    antigas que ainda a invoquem.
-    """
     pass
 
-# ═══════════════════════════════════════════════════════════════════
-# WHATSAPP DE VERDADE (Twilio) — ver changelog [v6] no topo do arquivo
-# ═══════════════════════════════════════════════════════════════════
 def normalizar_telefone(numero: str) -> str:
-    """
-    Normaliza um telefone para o formato E.164 (+55DDDNUMERO), aceitando
-    qualquer formatação de entrada (com/sem parênteses, espaço, traço,
-    DDI). Números de 10 ou 11 dígitos SEM '+' são tratados como Brasil
-    (DDD + número) e recebem o DDI 55 automaticamente. Retorna "" se não
-    houver nenhum dígito.
-    """
     numero = (numero or "").strip()
     digitos = "".join(c for c in numero if c.isdigit())
     if not digitos:
@@ -879,11 +624,6 @@ def _whatsapp_ref(telefone_norm: str):
     return get_db().collection(WHATSAPP_COLECAO).document(telefone_norm.lstrip("+"))
 
 def listar_mensagens_whatsapp(telefone: str) -> list:
-    """Histórico completo (enviadas + recebidas) de WhatsApp com este
-    telefone, mais antigas primeiro. Leitura FRESCA (sem cache) — o webhook
-    de recebimento (Cloud Function externa) grava direto no Firestore, sem
-    passar pelo cache do Streamlit, então uma leitura cacheada poderia
-    esconder uma mensagem nova do cliente por até alguns segundos."""
     tel = normalizar_telefone(telefone)
     if not tel:
         return []
@@ -894,11 +634,6 @@ def listar_mensagens_whatsapp(telefone: str) -> list:
     return sorted(data.get("mensagens", []), key=lambda m: m.get("criado_em", ""))
 
 def minutos_desde_ultima_mensagem_cliente(telefone: str):
-    """Minutos desde a última mensagem RECEBIDA do cliente (direção 'in'),
-    ou None se ele nunca escreveu. Usado pra saber se o envio livre
-    (free-form) ainda está dentro da janela de 24h da Twilio — fora dela,
-    só um template aprovado pelo Meta funciona (ver skill de referência:
-    twilio-whatsapp-send-message)."""
     msgs = listar_mensagens_whatsapp(telefone)
     recebidas = [m for m in msgs if m.get("direcao") == "in"]
     if not recebidas:
@@ -911,8 +646,6 @@ def minutos_desde_ultima_mensagem_cliente(telefone: str):
         return None
 
 def whatsapp_configurado() -> bool:
-    """True se as 3 chaves da Twilio estiverem em st.secrets. Usada pela UI
-    pra mostrar um aviso amigável em vez de deixar o envio quebrar."""
     return bool(
         st.secrets.get("twilio_account_sid")
         and st.secrets.get("twilio_auth_token")
@@ -920,10 +653,6 @@ def whatsapp_configurado() -> bool:
     )
 
 def _twilio_client():
-    """Import local de propósito (mesmo padrão de `import requests as req`
-    já usado em sync_zendesk) — assim o módulo `twilio` só precisa estar
-    instalado se essa função for de fato chamada, sem virar uma dependência
-    obrigatória pro resto do sistema."""
     sid = st.secrets.get("twilio_account_sid")
     token = st.secrets.get("twilio_auth_token")
     if not sid or not token:
@@ -932,20 +661,6 @@ def _twilio_client():
     return Client(sid, token)
 
 def enviar_whatsapp(telefone: str, texto: str, autor_nome: str) -> tuple:
-    """
-    Envia uma mensagem de WhatsApp de verdade via Twilio (modo 'free-form'
-    — só é aceito pela Twilio dentro da janela de 24h da última mensagem
-    RECEBIDA do cliente; fora dela, a Twilio recusa o envio. A UI que chama
-    esta função deve checar `minutos_desde_ultima_mensagem_cliente` ANTES
-    de oferecer o botão de enviar, pra não deixar o atendente tentar um
-    envio que vai falhar).
-
-    Grava tanto o envio bem-sucedido quanto a tentativa na coleção
-    `whatsapp_conversas` (mesma que o webhook de recebimento usa), pra o
-    histórico ficar completo e em ordem cronológica única.
-
-    Retorna (ok: bool, mensagem_ou_erro: str).
-    """
     tel = normalizar_telefone(telefone)
     if not tel:
         return False, "Telefone do cliente não informado ou inválido."
@@ -980,17 +695,7 @@ def enviar_whatsapp(telefone: str, texto: str, autor_nome: str) -> tuple:
     ref.set(data)
     return True, "Mensagem enviada!"
 
-# ── Sync Zendesk ───────────────────────────────────────────────────
 def sync_zendesk() -> tuple:
-    """
-    [Legado, formato inalterado] Os tickets importados do Zendesk não têm
-    `cliente_codigo` (a API do Zendesk usada aqui não devolve esse dado),
-    então continuam sendo gravados no formato "achatado" direto, um
-    documento por ticket (`zendesk_{id}`) — não fazem parte do modelo de
-    contêiner por cliente. Continuam sendo lidos normalmente por
-    `listar_tickets()`/`_normalizar_container`, que envolve qualquer
-    documento nesse formato antigo como um contêiner de uma solicitação só.
-    """
     import requests as req
     url  = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/views/{ZENDESK_VIEW_ID}/tickets.json?per_page=100"
     auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
@@ -1028,7 +733,6 @@ def sync_zendesk() -> tuple:
     except Exception as e:
         return False, 0, str(e)
 
-# ── Exclusão total (ADM) ───────────────────────────────────────────
 def deletar_todos_tickets() -> int:
     db = get_db()
     total = 0
@@ -1048,9 +752,6 @@ def _caminho_motivo(t) -> str:
     partes = [p for p in [t.get("motivo_pai"), t.get("motivo_filho"), t.get("etapa_atual")] if p]
     return " › ".join(partes) if partes else ""
 
-# ───────────────────────────────────────────────────────────────────
-# PAGINAÇÃO (9 tickets por página, em qualquer lista de tirinhas)
-# ───────────────────────────────────────────────────────────────────
 PAGE_SIZE_CARDS = 9
 
 def _paginar(lista, chave_estado):
