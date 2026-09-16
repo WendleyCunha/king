@@ -3,47 +3,7 @@ KingStar — Módulo de Tickets — filas.py
 ─────────────────────────────────────────────────────────────────────────────
 Painel de Tickets (topo, independente): busca global + botões clicáveis
 ("views") — Meus tickets, Abertos, Em andamento, Urgentes, SLA vencidos,
-Todos — mais um botão por Departamento cadastrado (mostrando pra QUALQUER
-atendente quais tickets aquele setor precisa responder: abertos direto pro
-setor + pendências vindas de outro setor). É renderizado FORA dos 3 painéis
-redimensionáveis (Ações/Lista/Detalhe) — como as colunas de baixo já rolam
-por dentro de si mesmas (não a página toda), esse painel fica sempre
-visível sem precisar de nenhum truque de CSS sticky.
-
-A seleção de qual "view" está ativa fica em st.session_state.tk_fila_selecionada
-e é lida por _render_conteudo_fila_selecionada, chamada de dentro da coluna
-"Lista" (ver mod_tickets.py), que mostra só os tickets da fila escolhida.
-
-[v7 — VISUAL "PAINEL DE TICKETS" ESTILO SIDEBAR + CARDS DE ESTATÍSTICA]
-Redesenho visual pedido com base num mockup de referência (King Connect).
-Duas mudanças, deliberadamente PARCIAIS em relação ao mockup:
-
-  1) A fileira de botões virou uma LISTA VERTICAL estilo sidebar (busca no
-     topo, "📌 Meus tickets" sempre destacado em dourado — "fixado", igual
-     no mockup —, itens de status abaixo, e uma seção "Por Departamento"
-     com uma bolinha colorida por setor). Isso é só CSS + reorganização
-     de `_render_painel_tickets_topo` em 2 colunas internas — não mexe em
-     `_render_conteudo_fila_selecionada` nem em como os tickets são
-     listados.
-
-  2) Adicionados 2 CARDS DE ESTATÍSTICA ("Por atendente" / "Por demanda"),
-     que o sistema não tinha antes — calculados sobre TODOS os tickets
-     (f_global), igual o mockup faz (não filtra pela view selecionada).
-
-  O que **NÃO** foi trazido do mockup, por decisão consciente: a tabela
-  plana de tickets. As "tirinhas" (`_render_ticket_strip`) carregam
-  informação que uma tabela simples não tem (SLA em cascata, caminho
-  Motivo Pai→Filho→Etapa, badges de pendência entre setores) — substituir
-  isso por uma tabela seria uma perda real de funcionalidade já construída.
-
-  ⚠️ PONTO EM ABERTO: o card "Por atendente" tenta ler o responsável do
-  ticket testando, em ordem, os campos `atendente_atual`, `atendente`, e o
-  primeiro item de `atendentes` (lista) — na falta de todos, mostra "—".
-  Não vi a implementação completa de `classificar_fila`/`atendentes` em
-  common.py (parte do arquivo foi truncada), então não tenho 100% de
-  certeza de qual desses é o campo "oficial" usado hoje. Se o card
-  aparecer com muitos "—" ou nomes errados, me diga qual campo é o
-  correto que eu ajusto essa única função (`_nome_atendente_ticket`).
+Todos — mais um botão por Departamento cadastrado.
 """
 import time
 import streamlit as st
@@ -55,7 +15,6 @@ from .common import (
 )
 from .strip import _render_ticket_strip
 
-# Views fixas do Painel de Tickets — (chave interna, rótulo mostrado no botão)
 _FILA_DEFS = [
     ("meus",         "📌 Meus tickets"),
     ("aberto",       "Abertos"),
@@ -67,13 +26,8 @@ _FILA_DEFS = [
 
 
 def _injetar_css_painel_topo():
-    """CSS do novo visual (lista vertical estilo sidebar + cards de
-    estatística). Autocontido neste arquivo — não depende de nenhuma regra
-    já existente em mod_tickets.py, pra não correr risco de colidir com
-    CSS que eu não vi (parte do arquivo foi truncada)."""
     st.markdown(_html("""
     <style>
-    /* Lista de filtros vertical, largura total do container estreito */
     div[class*="st-key-tkview_"] button {
         text-align:left !important; justify-content:space-between !important;
         background:transparent !important; border:none !important;
@@ -87,8 +41,6 @@ def _injetar_css_painel_topo():
     div[class*="st-key-tkview_"] button[kind="primary"] {
         background:#eef1ff !important; color:#2f4bd6 !important; font-weight:700 !important;
     }
-    /* "Meus tickets" — fixado/destacado em dourado, sempre (mesmo quando
-    não é a view ativa no momento), igual ao mockup */
     div[class*="st-key-tkview_meus"] button {
         background:#FBF1D9 !important; color:#7A5A12 !important; font-weight:700 !important;
     }
@@ -121,11 +73,6 @@ def _injetar_css_painel_topo():
 
 
 def _nome_atendente_ticket(t) -> str:
-    """
-    [PONTO EM ABERTO — ver changelog v7 no topo do arquivo] Tenta achar o
-    responsável de um ticket em 3 campos plausíveis, na ordem. Ajuste aqui
-    se nenhum bater com o campo real do seu modelo de dados.
-    """
     if t.get("atendente_atual"):
         return t["atendente_atual"]
     if t.get("atendente"):
@@ -137,9 +84,6 @@ def _nome_atendente_ticket(t) -> str:
 
 
 def _render_stat_cards_topo(f_global):
-    """[NOVO v7] Cards 'Por atendente' e 'Por demanda' — calculados sobre
-    TODOS os tickets (f_global), igual o mockup de referência (não filtra
-    pela view selecionada no momento)."""
     from collections import Counter
 
     por_atendente = Counter(_nome_atendente_ticket(t) for t in f_global)
@@ -169,18 +113,6 @@ def _render_stat_cards_topo(f_global):
 
 
 def _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
-    """
-    PAINEL DE TICKETS — cartão independente, renderizado ACIMA dos 3 painéis
-    redimensionáveis, sem pertencer a nenhum deles. Reúne a busca global +
-    os botões clicáveis de "view" (antes eram abas dentro da coluna Lista).
-    Clicar num botão só troca st.session_state.tk_fila_selecionada e dá
-    rerun — quem realmente desenha a lista de tickets é
-    _render_conteudo_fila_selecionada, chamada separadamente de dentro da
-    coluna Lista.
-
-    [v7] Reorganizado em 2 colunas internas: filtros (estilo sidebar,
-    esquerda) + cards de estatística (direita) — ver changelog no topo.
-    """
     if "tk_fila_selecionada" not in st.session_state:
         st.session_state.tk_fila_selecionada = "meus"
 
@@ -237,9 +169,6 @@ def _render_painel_tickets_topo(user, papel, meus, f_abertos, f_andam, f_urg, f_
 
 
 def _render_conteudo_fila_selecionada(user, papel, meus, f_abertos, f_andam, f_urg, f_venc, f_global):
-    """Mostra a lista de tickets da view/departamento selecionado no Painel
-    de Tickets (topo), já aplicando o filtro de busca global. Chamada de
-    dentro da coluna "Lista", que é quem tem a rolagem própria."""
     busca = st.session_state.get("tk_busca", "")
     b = busca.strip().lower() if busca else ""
 
@@ -288,9 +217,6 @@ def _render_lista_pendencias_setor(lista, nome_dep, user, papel, chave):
         eh_dono = dep_origem == nome_dep
         pedidos_abertos = solicitacoes_abertas_para_setor(t, nome_dep)
 
-        # Tag de origem — mesma tirinha padrão do resto do sistema, só que
-        # com esta tag extra pra deixar claro se o chamado nasceu neste
-        # setor ou veio pedido de outro.
         cor = cor_departamento(nome_dep)
         if eh_dono:
             tag_origem = f'<span class="tk-setor-pill" style="background:{cor};">🏠 aberto aqui</span> '
